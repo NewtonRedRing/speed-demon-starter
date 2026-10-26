@@ -40,6 +40,10 @@ One repo per team holds all your tracks. Delete the folders of the tracks you ar
 python3 check.py a --data data/a
 ```
 
+On Windows, `check.py` transfers data through temporary Docker volumes, so Docker
+Desktop does not need a shared host drive. The same network, read-only, memory,
+process and `/tmp` limits are applied to the run.
+
 To get data, generate it with the public generators. Seed 1 at `full` scale is the board's dataset; `sample` is 10% of it.
 
 ```

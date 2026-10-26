@@ -17,10 +17,12 @@ import subprocess
 import sys
 import time
 import urllib.request
+import uuid
 
 OUTPUT = {"a": "summary.txt", "b": "results.txt", "c": "aggregates.txt", "d": "distances.txt"}
 ALLOWLIST_URL = "https://speeddemon.dev/allowlist.json"
 IMAGE_MAX_BYTES = 2 * 1024 ** 3
+STAGING_IMAGE = "python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -69,11 +71,100 @@ def build(track, tag):
     print(f"ok    image is {size / 1e6:.0f} MB")
 
 
+def checked_docker(arguments, action):
+    result = subprocess.run(["docker", *arguments], capture_output=True, text=True)
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+        fail(f"{action}: {detail}")
+    return result
+
+
+def cleanup_docker(containers, volumes):
+    for container in reversed(containers):
+        result = subprocess.run(["docker", "rm", "--force", container], capture_output=True, text=True)
+        detail = (result.stderr or result.stdout).strip()
+        if result.returncode and "no such container" not in detail.lower():
+            print(f"warning could not remove Docker container {container}: {detail}", file=sys.stderr)
+    for volume in reversed(volumes):
+        result = subprocess.run(["docker", "volume", "rm", "--force", volume], capture_output=True, text=True)
+        detail = (result.stderr or result.stdout).strip()
+        if result.returncode and "no such volume" not in detail.lower():
+            print(f"warning could not remove Docker volume {volume}: {detail}", file=sys.stderr)
+
+
+def run_with_named_volumes(track, tag, data, out):
+    suffix = uuid.uuid4().hex[:12]
+    data_volume = f"speed-demon-check-{track}-{suffix}-data"
+    out_volume = f"speed-demon-check-{track}-{suffix}-out"
+    stager = f"speed-demon-check-{track}-{suffix}-stage"
+    runner = f"speed-demon-check-{track}-{suffix}-run"
+    containers, volumes = [], []
+    try:
+        for volume in (data_volume, out_volume):
+            checked_docker(["volume", "create", volume], f"could not create temporary Docker volume {volume}")
+            volumes.append(volume)
+
+        checked_docker(
+            ["create", "--name", stager, "--network=none",
+             "-v", f"{data_volume}:/data", "-v", f"{out_volume}:/out",
+             STAGING_IMAGE, "python3", "-c", "import time; time.sleep(3600)"],
+            "could not create the temporary data-transfer container",
+        )
+        containers.append(stager)
+        checked_docker(["start", stager], "could not start the temporary data-transfer container")
+        checked_docker(
+            ["cp", os.path.join(data, "."), f"{stager}:/data/"],
+            "could not copy input data into the temporary Docker volume",
+        )
+        permissions = (
+            "import os\n"
+            "for root, dirs, files in os.walk('/data'):\n"
+            " os.chmod(root, 0o755)\n"
+            " for name in dirs:\n"
+            "  os.chmod(os.path.join(root, name), 0o755)\n"
+            " for name in files:\n"
+            "  path = os.path.join(root, name)\n"
+            "  if not os.path.islink(path): os.chmod(path, 0o644)\n"
+            "os.chmod('/out', 0o777)\n"
+        )
+        checked_docker(
+            ["exec", stager, "python3", "-c", permissions],
+            "could not set permissions on the temporary Docker volumes",
+        )
+        checked_docker(["rm", "--force", stager], "could not remove the data-transfer container")
+        containers.remove(stager)
+
+        cmd = ["docker", "run", "--name", runner, "--network=none", "--read-only",
+               "--tmpfs", "/tmp:rw,size=1g,exec", "--memory=8g", "--memory-swap=8g",
+               "--pids-limit=512", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+               "--user", "65534:65534", "--ulimit", "nofile=8192:8192",
+               "-e", f"TRACK={track}", "-v", f"{data_volume}:/data:ro",
+               "-v", f"{out_volume}:/out:rw", tag]
+        containers.append(runner)
+        started = time.monotonic()
+        code = subprocess.run(cmd).returncode
+        took = time.monotonic() - started
+        if code:
+            fail(f"the run exited {code} after {took:.2f} s")
+
+        output = OUTPUT[track]
+        checked_docker(
+            ["cp", f"{runner}:/out/{output}", os.path.join(out, output)],
+            "could not copy the container output back to the host",
+        )
+        return out, took
+    finally:
+        cleanup_docker(containers, volumes)
+
+
 def run(track, tag, data):
     out = os.path.join(ROOT, ".out", f"track-{track}")
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
     os.chmod(out, 0o777)  # the run is an unprivileged user, as on the board
+    if os.name == "nt":
+        return run_with_named_volumes(track, tag, data, out)
+
     cmd = ["docker", "run", "--rm", "--network=none", "--read-only", "--tmpfs", "/tmp:rw,size=1g,exec",
            "--memory=8g", "--memory-swap=8g", "--pids-limit=512", "--cap-drop=ALL",
            "--security-opt=no-new-privileges", "--user", "65534:65534", "--ulimit", "nofile=8192:8192",
