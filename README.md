@@ -29,7 +29,7 @@ One repo per team holds all your tracks. Delete the folders of the tracks you ar
 - There is no network, at build time or at run time. Commit your dependencies to the repo (`cargo vendor`, `go mod vendor` and so on).
 - It runs as an unprivileged user on a read-only filesystem. `/tmp` is 1 GB of scratch space.
 - It gets 12 hardware threads (six P-cores, turbo off), 8 GB of memory with no swap, and 512 processes.
-- The live board stops a run at 3x the reference's time. Final scoring stops it at 10x.
+- Runs must finish within 10x the reference's time, including live-board runs.
 - Your output must match the reference's byte for byte (sha256) on every run.
 
 ## Check before you push
