@@ -1,10 +1,12 @@
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <fstream>
 #include <limits>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -146,13 +148,26 @@ int main() {
     for (std::size_t i = 0; i < queries.size(); ++i)
         source_queries[queries[i].source].push_back(i);
 
+    // Independent source groups can be processed concurrently without locks:
+    // each query index belongs to exactly one group, and the graph is read-only.
+    using Job = std::pair<std::uint32_t, std::vector<std::size_t>>;
+    std::vector<Job> jobs;
+    jobs.reserve(source_queries.size());
+    for (auto& [source, indexes] : source_queries)
+        jobs.emplace_back(source, std::move(indexes));
     std::vector<std::int64_t> answers(queries.size(), -1);
-    std::vector<std::uint64_t> distance(n);
-    std::vector<std::uint32_t> seen(n, 0);
-    MinHeap heap;
-    std::uint32_t generation = 0;
-
-    for (const auto& [source, indexes] : source_queries) {
+    std::atomic<std::size_t> next_job{0};
+    auto worker = [&]() {
+        // Per-worker generation arrays avoid clearing millions of entries per query.
+        // Per-worker heaps and distance arrays avoid cross-thread false sharing.
+        std::vector<std::uint64_t> distance(n);
+        std::vector<std::uint32_t> seen(n, 0);
+        MinHeap heap;
+        std::uint32_t generation = 0;
+        for (;;) {
+            const std::size_t job_index = next_job.fetch_add(1, std::memory_order_relaxed);
+            if (job_index >= jobs.size()) break;
+            const auto& [source, indexes] = jobs[job_index];
         std::unordered_map<std::uint32_t, std::vector<std::size_t>> targets;
         targets.reserve(indexes.size());
         for (std::size_t index : indexes) {
@@ -191,7 +206,17 @@ int main() {
                 }
             }
         }
-    }
+        }
+    };
+
+    // The scoring machine has six performance cores. Limiting worker count
+    // avoids flooding its cache with independent searches on E-cores.
+    const std::size_t workers_count = std::min<std::size_t>(6, jobs.size());
+    std::vector<std::thread> threads;
+    threads.reserve(workers_count - 1);
+    for (std::size_t i = 1; i < workers_count; ++i) threads.emplace_back(worker);
+    worker();
+    for (auto& thread : threads) thread.join();
 
     std::ofstream output("/out/distances.txt", std::ios::binary);
     if (!output) return 1;
