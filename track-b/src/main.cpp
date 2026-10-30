@@ -82,6 +82,7 @@ void combine(const std::vector<std::uint32_t>& left, const std::vector<std::uint
     std::size_t i = 0, j = 0;
     output.clear();
     if (operation == 'O') output.reserve(left.size() + right.size());
+    else if (operation == 'N') output.reserve(left.size());
     else output.reserve(std::min(left.size(), right.size()));
 
     // Adaptive exact intersection: when list lengths differ greatly, probe
