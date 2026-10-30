@@ -21,11 +21,18 @@ using u64 = std::uint64_t;
 constexpr unsigned hours = 72;
 constexpr unsigned endpoint_capacity = 1842;
 
-struct Hash {
-    using is_transparent = void;
-    std::size_t operator()(std::string_view s) const { return std::hash<std::string_view>{}(s); }
-};
-using Ids = std::unordered_map<std::string, u32, Hash, std::equal_to<>>;
+u64 endpoint_hash(std::string_view name) {
+    u64 hash = name.size();
+    while (name.size() >= sizeof(u64)) {
+        u64 word;
+        std::memcpy(&word, name.data(), sizeof(word));
+        hash = (hash ^ word) * 0x9e3779b97f4a7c15ULL;
+        hash ^= hash >> 29;
+        name.remove_prefix(sizeof(word));
+    }
+    for (unsigned char c : name) hash = (hash ^ c) * 0x100000001b3ULL;
+    return hash ^ (hash >> 32);
+}
 
 struct Group {
     u32 count = 0;
@@ -78,14 +85,12 @@ void parse(Local& local, const char* data, std::size_t begin, std::size_t end) {
         p = static_cast<const char*>(std::memchr(p, ' ', limit - p));
         if (!p) throw std::runtime_error("missing endpoint delimiter");
         const std::string_view name(endpoint, p - endpoint);
-        const u64 hash = std::hash<std::string_view>{}(name);
+        const u64 hash = endpoint_hash(name);
         auto index = hash & (local.ids.size() - 1);
-        unsigned probes = 0;
         while (local.ids[index]) {
             const u32 candidate = static_cast<u32>(local.ids[index]) - 1;
             if ((local.ids[index] >> 32) == (hash >> 32) && local.endpoints[candidate] == name) break;
             index = (index + 1) & (local.ids.size() - 1);
-            if (++probes == local.ids.size()) throw std::runtime_error("endpoint catalogue exceeds capacity");
         }
         u32 id;
         if (!local.ids[index]) {
@@ -145,7 +150,7 @@ int solve() {
     const unsigned workers = size < 1024 * 1024 ? 1 : 12;
     std::vector<Local> locals(workers);
     parallel(workers, [&](unsigned w) { parse(locals[w], data, size * w / workers, size * (w + 1) / workers); });
-    Ids ids;
+    std::unordered_map<std::string, u32> ids;
     std::vector<std::string> endpoints;
     ids.reserve(1842);
     endpoints.reserve(1842);

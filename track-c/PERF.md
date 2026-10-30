@@ -120,3 +120,32 @@ Deferred stripe-owned country deduplication was exact but slower
 removed. The original exact atomic membership remains.
 All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
 strict warnings and all four offline production-sandbox checks pass.
+
+## Profile-guided compile-time CSV modes
+
+Current phase timers measured 12-14 ms loading regions/preparing boundaries,
+88-98 ms parsing/aggregating names, and under 1 ms merging/writing. Timers were
+removed. The retained field parser specializes copied-name and length-only note
+handling at compile time, so the escaped-field loops do not test a runtime
+materialization flag. Exact quote decoding and full name equality are unchanged.
+
+Eight alternating official-input runs per executable in one sandbox:
+
+| Executable | Median process time (s) | Maximum RSS (MiB) |
+|---|---:|---:|
+| Start-of-pass implementation | 0.125930 | 22.55 |
+| Specialized field modes | 0.121983 | 21.52 |
+
+This is **3.1% lower median time**. An earlier controlled batch measured
+0.107760 s before versus 0.104724 s after. The separate final five-run median
+was 0.113996 s / 21.89 MiB. Shared-host load varies between batches.
+
+Rejected experiments: a 1,024-entry per-worker exact-name cache did not reduce
+elapsed time; inline name hashing lost its small initial gain in a repeat;
+a 2,048-bucket dictionary was slower. All were removed, retaining the exact
+4,096-bucket stripes. The earlier cleanup also avoids the final shard's unused
+quote-parity scan and its extra prepass worker.
+
+All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
+strict warnings and all four offline sandbox checks pass. No new official
+score or 80-point result is claimed.

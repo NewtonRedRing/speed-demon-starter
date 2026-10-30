@@ -133,3 +133,26 @@ No official score or target-machine utilization is claimed.
 
 All 14 regression tests, both A oracle methods under ASan/UBSan, strict GCC
 warnings, and the full official-data production sandbox passed again.
+
+## Profile-guided inline endpoint hashing
+
+Current phase timers found 26-43 ms in mapped parsing, 2.2-2.5 ms reconciling
+endpoints/layout, 7.8-8.7 ms in hour tasks and 2.5-3.3 ms writing output.
+Timers were removed. The retained parser hashes endpoint bytes inline using
+unaligned-safe `memcpy` word loads and a byte tail. Fingerprints still require
+full string equality; the final catalogue uses the standard string-keyed map.
+
+Eight alternating official-input runs per executable in one sandbox:
+
+| Executable | Median process time (s) | Maximum RSS (MiB) |
+|---|---:|---:|
+| Start-of-pass implementation | 0.054506 | 66.92 |
+| Inline endpoint hash | 0.052878 | 66.35 |
+
+This is **3.0% lower median time**. Earlier independent controlled batches
+showed roughly 1.1-4.2% reductions; this is a small, host-sensitive gain.
+The separate final five-run median was 0.045975 s / 65.67 MiB.
+All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
+strict warnings and all four offline sandbox checks pass. The A oracle checks
+every endpoint length from 1 to 125 and shared-prefix/shared-suffix names.
+No new official score is available; formatted-source penalties still apply.

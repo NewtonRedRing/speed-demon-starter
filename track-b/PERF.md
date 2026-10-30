@@ -75,3 +75,34 @@ solution methods under ASan/UBSan, strict GCC warnings and all four offline
 production-sandbox checks pass. The B oracle additionally checks all six bit
 positions, sparse seven-bit words, full words and a partial final word.
 There is no new official score.
+
+## Profile-guided allocator and worker-storage cleanup
+
+Temporary phase timers measured 650-703 ms scanning the corpus, 137-158 ms
+merging, 40-51 ms parsing queries/building the automaton, 39-65 ms evaluating
+queries and 3-5 ms writing. Timers were removed.
+
+The retained arena limit is twelve instead of four, reducing contention among
+scanner allocations. After the unchanged worker-major merge, independent
+worker posting storage is destroyed in parallel. This is not the previously
+rejected parallel per-term merge; no target posting is concurrently mutated.
+ASan continues to skip glibc-specific allocator tuning.
+
+Eight alternating runs per executable in one official-data sandbox:
+
+| Executable | Median process time (s) | Maximum RSS (MiB) |
+|---|---:|---:|
+| Start-of-pass, four arenas | 1.230033 | 197.38 |
+| Twelve arenas, serial worker cleanup | 0.961598 | 219.66 |
+| Twelve arenas, parallel worker cleanup | 0.949081 | 219.41 |
+
+The retained candidate is **22.8% lower median time**, with approximately
+22 MiB additional RSS. An earlier three-way batch measured 1.072565 /
+0.870283 / 0.854985 s respectively. The final separate five-run candidate
+median was 0.774453 s / 219.74 MiB. Cross-batch absolute timings are not speedup
+evidence. Inline token hashing measured effectively equal to the standard hash
+and was removed rather than adding an unnecessary algorithm.
+
+All full official hashes, all 14 tests, all eight solution methods under
+ASan/UBSan, strict warnings and all four offline sandbox checks pass. No new
+official score exists; the memory tradeoff must be included when judging points.

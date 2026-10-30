@@ -21,7 +21,6 @@
 
 using u64 = std::uint64_t;
 using i64 = std::int64_t;
-using u32 = std::uint32_t;
 
 unsigned quote_parity(const char* begin, const char* end) {
     std::uint8_t parity = 0;
@@ -141,7 +140,8 @@ u64 number(const char*& p, const char* end) {
     return value;
 }
 
-std::string_view field(const char*& p, const char* end, std::string& decoded, bool keep) {
+template<bool keep>
+std::string_view field(const char*& p, const char* end, std::string& decoded) {
     const char* start = p;
     if (p == end) throw std::runtime_error("truncated CSV field");
     if (*p != '"') {
@@ -160,13 +160,13 @@ std::string_view field(const char*& p, const char* end, std::string& decoded, bo
             if (quote[1] != ',') throw std::runtime_error("missing CSV comma after quote");
             p = quote + 2;
             if (!escapes) return {start, static_cast<std::size_t>(quote - start)};
-            if (keep) {
+            if constexpr (keep) {
                 decoded.append(start, quote);
                 return decoded;
             }
             return {start, static_cast<std::size_t>(quote - start) - escapes};
         }
-        if (keep) {
+        if constexpr (keep) {
             if (!escapes) decoded.clear();
             decoded.append(start, quote + 1);
             start = quote + 2;
@@ -226,10 +226,10 @@ int solve() {
     if (p == end || *p++ != '\n') throw std::runtime_error("invalid CSV header terminator");
     const auto size = static_cast<std::size_t>(end - input.begin());
     const unsigned workers = size < 1024 * 1024 ? 1 : 12;
-    std::vector<unsigned> parity(workers);
-    parallel(workers + 1, [&](unsigned w) {
-        if (w == workers) load_regions();
-        else if (workers > 1) parity[w] = input.parity(size * w / workers, size * (w + 1) / workers);
+    std::vector<unsigned> parity(workers - 1);
+    parallel(workers, [&](unsigned w) {
+        if (w == workers - 1) load_regions();
+        else parity[w] = input.parity(size * w / workers, size * (w + 1) / workers);
     });
     std::vector<const char*> boundaries(workers + 1);
     boundaries[0] = p;
@@ -252,13 +252,13 @@ int solve() {
       const char* p = boundaries[w];
       const char* end = boundaries[w + 1];
       auto released = (static_cast<std::size_t>(p - input.begin()) + 4095) & ~std::size_t(4095);
-      std::string decoded_name, unused;
+      std::string decoded_name;
       while (p < end) {
         skip_bom(p, end);
         const u64 id = number(p, end);
         if (p == end || *p++ != ',') throw std::runtime_error("invalid record id");
-        const auto name = field(p, end, decoded_name, true);
-        const auto note_bytes = field(p, end, unused, false).size();
+        const auto name = field<true>(p, end, decoded_name);
+        const auto note_bytes = field<false>(p, end, decoded_name).size();
         const u64 region = number(p, end);
         if (p == end || *p++ != ',') throw std::runtime_error("invalid record region");
         const bool negative = p < end && *p == '-';

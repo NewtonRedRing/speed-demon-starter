@@ -7,7 +7,8 @@ The task, the input files and the exact output format are in the [spec](https://
 Twelve aligned byte ranges parse a shared read-only mapping (one worker for
 small inputs). The parser advances directly from latency to the next record,
 without separately searching for every newline. Endpoint delimiters use
-`memchr`; fingerprint matches always require full string equality. Consumed
+`memchr`; an inline word-at-a-time hash fingerprints every endpoint byte, and
+fingerprint matches always require full string equality. Consumed
 complete pages are released in 1 MiB batches without releasing a neighboring
 worker's partial page.
 
@@ -35,11 +36,14 @@ Profile endpoint hashing and parsing on the scoring CPU. Twelve-worker speed
 was better than six or eight locally. Larger endpoint tables, custom small
 sorts and fixed-method dispatch did not justify retention.
 
-Current local full seed-1 median: 0.042965 s, 66.39 MiB peak RSS over five runs.
+Latest local full seed-1 median: 0.045975 s, 65.67 MiB peak RSS over five runs.
 The first redesign measured 34.3% lower elapsed time than the published source.
 The subsequent fused pipeline reduced a controlled median from 0.043447 s to
 0.042055 s (another 3.2%) and slightly reduced RSS. This speed-first candidate
 has no official run ID or verified score improvement.
+The later inline endpoint hash reduced its immediate baseline's latest
+controlled median from 0.054506 s to 0.052878 s (3.0%). It does not replace
+full equality checks or assume collision-free hashing.
 See [PERF.md](PERF.md) for validation and limitations.
 
 The hardware limits are ceilings: one process uses twelve worker threads, not

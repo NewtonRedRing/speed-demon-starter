@@ -10,7 +10,6 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
-#include <string>
 #include <thread>
 #include <utility>
 #include <mutex>
@@ -89,7 +88,8 @@ void edges_in_range(std::size_t begin, std::size_t end, Visit visit) {
 }
 
 class RadixQueue {
-    using Item = std::pair<u64, u32>;
+    struct __attribute__((packed)) Item { u64 first; u32 second; };
+    static_assert(sizeof(Item) == 12);
     std::array<std::vector<Item>, 65> buckets_;
     u64 last_ = 0;
     std::size_t size_ = 0;
@@ -109,7 +109,8 @@ public:
         if (buckets_[0].empty()) {
             unsigned b = 1;
             while (buckets_[b].empty()) ++b;
-            last_ = std::min_element(buckets_[b].begin(), buckets_[b].end())->first;
+            last_ = std::min_element(buckets_[b].begin(), buckets_[b].end(),
+                [](const Item& a, const Item& b) { return a.first < b.first; })->first;
             for (const Item& item : buckets_[b])
                 buckets_[std::bit_width(item.first ^ last_)].push_back(item);
             buckets_[b].clear();
@@ -168,7 +169,7 @@ public:
 
 struct Graph {
     std::array<std::vector<u32>, 2> offsets;
-    std::array<std::vector<Edge>, 2> edges;
+    std::array<std::unique_ptr<Edge[]>, 2> edges;
     std::array<std::unordered_map<u32, u32>, 2> wide_weights;
 };
 
@@ -241,7 +242,7 @@ int solve() {
         for (std::size_t i = 1; i < graph.offsets[d].size(); ++i)
             graph.offsets[d][i] += graph.offsets[d][i - 1];
         if (graph.offsets[d].back() != m) throw std::runtime_error("incorrect edge count");
-        graph.edges[d].resize(m);
+        graph.edges[d] = std::make_unique_for_overwrite<Edge[]>(m);
     }
     {
         auto cursors = graph.offsets;

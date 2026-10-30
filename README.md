@@ -40,10 +40,10 @@ Latest full public seed-1 rechecks (five process-timed runs per track):
 
 | Track | Median time | Peak RSS | Official output hash |
 |---|---:|---:|---|
-| A | 0.056095 s | 65.56 MiB | PASS |
-| B | 1.072819 s | 207.26 MiB | PASS |
-| C | 0.125702 s | 21.77 MiB | PASS |
-| D | 0.399363 s | 133.26 MiB | PASS |
+| A | 0.045975 s | 65.67 MiB | PASS |
+| B | 0.774453 s | 219.74 MiB | PASS |
+| C | 0.113996 s | 21.89 MiB | PASS |
+| D | 0.394181 s | 130.77 MiB | PASS |
 
 These are local measurements, not leaderboard scores or controlled comparisons
 with previous batches. All four also passed `check.py` with the live manifest's
@@ -130,7 +130,7 @@ CPU-equivalents. Neither continuous twelve-thread saturation nor equivalent
 target-machine hardware is established locally. These speed improvements are local;
 memory/source penalties still affect points, and no new official score exists.
 
-### Latest all-track speed-first tuning
+### Earlier all-track speed-first tuning
 
 B now scans mapped corpus shards without per-document `getline` copies and
 summarizes dense Boolean words with exact weighted population counts. C clears
@@ -157,9 +157,52 @@ Unused includes and experiment-only statements were removed; required error
 reporting, exact comparisons, metadata and documentation remain. Removing
 comments or documentation alone does not speed execution.
 
+A subsequent source cleanup removes A's custom hash adapter in favor of the
+standard string hash and its redundant probe counter: the existing 1,842-entry
+limit prevents filling the 4,096-slot table. C no longer computes the final
+shard's unused quote parity, launches an extra prepass worker, or constructs a
+scratch string for notes that are never decoded. Its unused integer alias and
+D's unused string include were removed. All remaining functions in A-D serve
+the contest algorithms, resource management or explicit error reporting.
+
 All 14 regression tests, all eight solution methods under ASan/UBSan, strict
 warnings and all four allowlisted offline production-sandbox checks pass for
 the retained sources. No new board score is available.
+
+### Latest profile-guided tuning pass
+
+Temporary phase timers on the current official inputs found 26-43 ms in A
+parsing, 650-703 ms scanning B plus 137-158 ms merging, 88-98 ms parsing and
+aggregating C, and 229-252 ms answering D queries. These are elapsed phase
+ranges, not isolated CPU profiles. All timers were removed.
+
+Retained changes: A hashes endpoint bytes inline while retaining full equality;
+B allows twelve allocator arenas instead of four and frees independent worker
+posting storage in parallel after merging; C specializes copied-name versus
+length-only note parsing at compile time; D packs radix items into twelve bytes
+and does not zero-initialize edge storage that is completely filled before use.
+
+Latest eight-run alternating comparisons per executable, against the validated
+versions at the start of this pass:
+
+| Track | Before (s) | Retained (s) | Median time reduction | Before / retained maximum RSS (MiB) |
+|---|---:|---:|---:|---:|
+| A | 0.054506 | 0.052878 | 3.0% | 66.92 / 66.35 |
+| B | 1.230033 | 0.949081 | 22.8% | 197.38 / 219.41 |
+| C | 0.125930 | 0.121983 | 3.1% | 22.55 / 21.52 |
+| D | 0.464529 | 0.450791 | 3.0% | 135.01 / 133.96 |
+
+These are additional local raw-time reductions, not cumulative percentages or
+new leaderboard scores. B trades approximately 22 MiB for lower allocation
+contention; memory and formatted-source penalties can offset speed gains.
+A/C/D gains are modest and shared-host-sensitive. Separate five-run measurements
+are in the latest recheck table above and are not the controlled comparisons.
+
+Rejected experiments were removed: B token hashing, C's per-worker name cache,
+inline name hashing and smaller dictionary, and D's speculative prefetch and
+early own-distance lookup. Full official hashes, all 14 tests, all eight
+solution methods under ASan/UBSan, strict warnings and all four offline sandbox
+checks passed again. A's oracle now checks every endpoint length from 1 to 125.
 
 ## Validation
 

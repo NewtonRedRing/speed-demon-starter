@@ -357,7 +357,7 @@ void apply(std::vector<u64>& bits, const Posting& posting, char op, std::vector<
 
 int solve() {
 #if !defined(__SANITIZE_ADDRESS__)
-    if (!mallopt(M_ARENA_MAX, 4)) throw std::runtime_error("cannot set allocator arena limit");
+    if (!mallopt(M_ARENA_MAX, 12)) throw std::runtime_error("cannot set allocator arena limit");
 #endif
     std::vector<Query> queries;
     std::vector<Term> terms;
@@ -428,8 +428,8 @@ int solve() {
                 terms[i].documents.merge(local.documents[terms[i].boolean]);
         }
         for (u32 q = 0; q < phrases; ++q) matches[q].merge(local.matches[q]);
-        local = Local{};
     }
+    parallel(workers, [&](unsigned w) { locals[w] = Local{}; });
     std::vector<std::string> results(queries.size());
     std::atomic<std::size_t> next{0};
     parallel(workers, [&](unsigned) {

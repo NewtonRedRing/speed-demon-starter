@@ -36,6 +36,18 @@ class Solutions(unittest.TestCase):
             b"2026-10-30T18:00:00Z / 1 0 0 0 0 0\n"
             b"2026-11-02T17:00:00Z /Z 2 0 4294967295 4294967295 1 500000\n"
         ))
+        endpoints = ["/" + "x" * (size - 1) for size in range(1, 126)]
+        endpoints += [f"/common-prefix/{i}/common-suffix" for i in range(32)]
+        values = {endpoint: i for i, endpoint in enumerate(endpoints)}
+        rows = [
+            f"2026-10-30T18:00:00.000000Z GET {endpoint} 200 {values[endpoint]}\n"
+            for endpoint in reversed(endpoints)
+        ]
+        expected = [
+            f"2026-10-30T18:00:00Z {endpoint} 1 {value} {value} {value} 0 0\n"
+            for endpoint, value in sorted(values.items())
+        ]
+        self.verify("a", {"requests.log": "".join(rows).encode()}, "".join(expected).encode())
 
     def test_a_percentiles_boundaries_and_parallel_ranges(self):
         rng = random.Random(349)

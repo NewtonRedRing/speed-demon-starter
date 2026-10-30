@@ -66,3 +66,33 @@ removed; packed six-byte CSR with sparse overflow weights remains.
 Every full official hash passes. All 14 regression tests, all eight solution
 methods under ASan/UBSan, strict warnings and all four offline production
 sandbox checks pass. There is no new official score.
+
+## Profile-guided queue and edge-storage compaction
+
+Temporary phase timers measured 38-45 ms counting degrees, 17-18 ms allocating
+and prefixing, 65-69 ms filling edges, and 229-252 ms answering queries.
+Timers were removed. Radix entries now occupy twelve rather than sixteen bytes,
+preserving all 64 distance bits. Finding a bucket minimum compares only distance;
+node-ID tie comparisons never affected that minimum distance.
+Edge arrays use overwrite allocation: checked degrees and unique atomic cursors
+fill every slot before searches begin, so zero-initialization was redundant.
+
+Eight alternating official-input runs per executable in one sandbox:
+
+| Executable | Median process time (s) | Maximum RSS (MiB) |
+|---|---:|---:|
+| Start-of-pass implementation | 0.464529 | 135.01 |
+| Packed queue and overwrite edge arrays | 0.450791 | 133.96 |
+
+This is **3.0% lower median time**. An earlier three-way comparison measured
+0.410595 s before, 0.407331 s with packed queues but zero-initialized arrays,
+and 0.396743 s with both changes. A separate final five-run retained batch
+measured 0.394181 s / 130.77 MiB. Total CPU time did not improve consistently;
+elapsed gains and their transfer to scoring hardware remain host-dependent.
+
+Own-distance-first relaxation and speculative sparse-distance prefetch were
+exact but slower and were removed. No landmark preprocessing was added: the
+entire measured query stage is only about a quarter second locally, so its
+preprocessing cost would need a demonstrated whole-process win.
+All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
+strict warnings and all four offline sandbox checks pass. No new score exists.

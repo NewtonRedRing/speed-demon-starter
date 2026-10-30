@@ -23,7 +23,10 @@ to sum IDs exactly; sparse words still enumerate set bits. The first ten IDs
 are always enumerated in ascending order.
 
 Dense bitmaps are allocated only when needed, keeping sparse posting headers
-small. Four glibc malloc arenas limit fragmentation from parallel allocations;
+small. Twelve glibc malloc arenas reduce allocation contention across corpus
+workers, trading more memory for speed compared with the earlier four-arena
+limit. Independent worker posting storage is freed in parallel after its
+contents have been merged, before query evaluation.
 ASan builds skip this setting because they supply their own allocator.
 
 ## Dependencies
@@ -33,7 +36,8 @@ None.
 ## With another 24 hours
 
 Profile corpus token lookup and posting construction/merging on the scoring CPU.
-Latest local five-run full seed-1 median: 1.072819 s, 207.26 MiB peak RSS.
-Same-sandbox alternating tuning measured a 2.8% time reduction; shared-host
+Latest local five-run full seed-1 median: 0.774453 s, 219.74 MiB peak RSS.
+The latest same-sandbox alternating tuning measured a 22.8% time reduction
+against the preceding implementation, at approximately 22 MiB higher RSS; shared-host
 load prevents comparison against older isolated timings. Memory remains an
 improvement opportunity. This candidate has no official run ID; see [PERF.md](PERF.md).
