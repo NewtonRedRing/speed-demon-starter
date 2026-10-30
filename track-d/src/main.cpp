@@ -61,6 +61,51 @@ struct Query {
     std::uint32_t target;
 };
 
+// Four-way heap: fewer levels than a binary heap and no temporary
+// push_heap/pop_heap range adjustments for each graph relaxation.
+class MinHeap {
+    using Item = std::pair<std::uint64_t, std::uint32_t>;
+    std::vector<Item> entries_;
+
+public:
+    void clear() { entries_.clear(); }
+    bool empty() const { return entries_.empty(); }
+
+    void push(Item item) {
+        std::size_t hole = entries_.size();
+        entries_.emplace_back();
+        while (hole != 0) {
+            const std::size_t parent = (hole - 1) / 4;
+            if (!(item < entries_[parent])) break;
+            entries_[hole] = entries_[parent];
+            hole = parent;
+        }
+        entries_[hole] = item;
+    }
+
+    Item pop() {
+        const Item top = entries_.front();
+        const Item tail = entries_.back();
+        entries_.pop_back();
+        if (entries_.empty()) return top;
+        std::size_t hole = 0;
+        for (;;) {
+            const std::size_t first = hole * 4 + 1;
+            if (first >= entries_.size()) break;
+            std::size_t best = first;
+            const std::size_t end = std::min(entries_.size(), first + 4);
+            for (std::size_t child = first + 1; child < end; ++child) {
+                if (entries_[child] < entries_[best]) best = child;
+            }
+            if (!(entries_[best] < tail)) break;
+            entries_[hole] = entries_[best];
+            hole = best;
+        }
+        entries_[hole] = tail;
+        return top;
+    }
+};
+
 int main() {
     FastInput graph("/data/graph.txt");
     if (!graph.good()) return 1;
@@ -104,7 +149,7 @@ int main() {
     std::vector<std::int64_t> answers(queries.size(), -1);
     std::vector<std::uint64_t> distance(n);
     std::vector<std::uint32_t> seen(n, 0);
-    std::vector<std::pair<std::uint64_t, std::uint32_t>> heap;
+    MinHeap heap;
     std::uint32_t generation = 0;
 
     for (const auto& [source, indexes] : source_queries) {
@@ -122,13 +167,10 @@ int main() {
         heap.clear();
         seen[source] = generation;
         distance[source] = 0;
-        heap.emplace_back(0, source);
-        std::push_heap(heap.begin(), heap.end(), std::greater<>());
+        heap.push({0, source});
 
         while (!heap.empty() && remaining != 0) {
-            std::pop_heap(heap.begin(), heap.end(), std::greater<>());
-            const auto [current, u] = heap.back();
-            heap.pop_back();
+            const auto [current, u] = heap.pop();
             if (seen[u] != generation || current != distance[u]) continue;
 
             auto target_it = targets.find(u);
@@ -145,8 +187,7 @@ int main() {
                 if (seen[edge.to] != generation || next < distance[edge.to]) {
                     seen[edge.to] = generation;
                     distance[edge.to] = next;
-                    heap.emplace_back(next, edge.to);
-                    std::push_heap(heap.begin(), heap.end(), std::greater<>());
+                    heap.push({next, edge.to});
                 }
             }
         }
