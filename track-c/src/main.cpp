@@ -32,6 +32,7 @@ struct Aggregate {
     std::int64_t amount_max = std::numeric_limits<std::int64_t>::min();
     std::uint64_t name_bytes = 0;
     std::uint64_t note_bytes = 0;
+    std::uint64_t distinct_names = 0;
 };
 
 std::uint64_t parse_unsigned(std::string_view text) {
@@ -154,10 +155,16 @@ int main() {
     for (int field = 0; field < 5; ++field) parse_field(data, pos, nullptr);
 
     std::vector<Aggregate> aggregates(countries.size());
-    // All names without escaped double quotes (including quoted names)
-    // reference the immutable input; only escaped names need owned storage.
-    using NameSet = std::unordered_set<std::string_view, TransparentHash, TransparentEqual>;
-    std::vector<NameSet> names(countries.size());
+    // Exact global dictionary + per-country dynamic bitsets.
+    // Storing one copy of a globally unique name is cheaper than maintaining
+    // hundreds of country-local unordered_sets of the same names.
+    using NameIds = std::unordered_map<std::string_view, std::uint32_t,
+                                      TransparentHash, TransparentEqual>;
+    NameIds name_ids;
+    name_ids.reserve(130000);
+    std::vector<std::vector<std::uint64_t>> country_names(countries.size());
+    // Views of non-escaped names reference immutable input; escaped names
+    // use stable deque storage (push_back does not invalidate references).
     std::deque<std::string> quoted_name_storage;
     std::string value, name;
     while (pos < data.size()) {
@@ -198,14 +205,26 @@ int main() {
         aggregate.amount_max = std::max(aggregate.amount_max, amount);
         aggregate.name_bytes += name_length;
         aggregate.note_bytes += note_length;
-        NameSet& set = names[country];
-        if (set.find(name_view) == set.end()) {
+        auto found = name_ids.find(name_view);
+        std::uint32_t name_id;
+        if (found == name_ids.end()) {
+            name_id = static_cast<std::uint32_t>(name_ids.size());
             if (escaped_quotes) {
                 quoted_name_storage.emplace_back(std::move(name));
-                set.emplace(std::string_view(quoted_name_storage.back()));
+                name_ids.emplace(std::string_view(quoted_name_storage.back()), name_id);
             } else {
-                set.emplace(name_view);
+                name_ids.emplace(name_view, name_id);
             }
+        } else {
+            name_id = found->second;
+        }
+        auto& bits = country_names[country];
+        const std::size_t word = static_cast<std::size_t>(name_id) / 64;
+        if (bits.size() <= word) bits.resize(word + 1, 0);
+        const std::uint64_t mask = std::uint64_t{1} << (name_id % 64);
+        if ((bits[word] & mask) == 0) {
+            bits[word] |= mask;
+            ++aggregate.distinct_names;
         }
     }
 
@@ -223,7 +242,7 @@ int main() {
         if (a.count == 0) continue;
         output << countries[i] << ' ' << a.count << ' ' << a.id_sum << ' '
                << format_cents(a.amount_sum) << ' ' << format_cents(a.amount_min) << ' '
-               << format_cents(a.amount_max) << ' ' << names[i].size() << ' '
+               << format_cents(a.amount_max) << ' ' << a.distinct_names << ' '
                << a.name_bytes << ' ' << a.note_bytes << '\n';
     }
     return output ? 0 : 1;
