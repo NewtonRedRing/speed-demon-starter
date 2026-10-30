@@ -1,0 +1,67 @@
+name: Exact-output optimization experiments (A-D)
+
+on:
+  push:
+    branches:
+      - experiments/90-plus-exact-20261030
+  pull_request:
+    branches:
+      - speed-demon
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exact-speed-demon-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  differential-and-sample-benchmark:
+    name: Track ${{ matrix.track }} correctness + relative speed
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        track: [a, b, c, d]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          repository: hackathon-raptors/speed-demon-2026
+          path: _generator
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Compile baseline and experimental C++ versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show "origin/speed-demon:track-${{ matrix.track }}/src/main.cpp" > /tmp/speed-demon-base.cpp
+          g++ -std=c++20 -O3 -DNDEBUG -flto -march=native -o /tmp/speed-demon-base /tmp/speed-demon-base.cpp
+          g++ -std=c++20 -O3 -DNDEBUG -flto -march=native -o /tmp/speed-demon-candidate track-${{ matrix.track }}/src/main.cpp
+
+      - name: Create input and output mount locations
+        run: |
+          sudo mkdir -p /data /out
+          sudo chown "$(id -u):$(id -g)" /data /out
+
+      - name: Compare exact hashes (two tiny seeds, sample seed 1) and benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/verify_optimizations.py --track "${{ matrix.track }}" --generator "_generator/generators/${{ matrix.track }}_$(case "${{ matrix.track }}" in a) echo ingest;; b) echo index;; c) echo join;; d) echo traverse;; esac).py" | tee benchmark-track-${{ matrix.track }}.txt
+
+      - name: Save benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speed-demon-track-${{ matrix.track }}-experiment
+          path: benchmark-track-${{ matrix.track }}.txt
+          if-no-files-found: ignore
