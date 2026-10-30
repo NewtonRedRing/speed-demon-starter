@@ -1,14 +1,13 @@
-# Speed Demon 2026 starter
+# Speed Demon 2026 — NewtonRedHat
 
-A working entry for all four tracks of [Speed Demon 2026](https://speeddemon.dev). Each `track-*` folder holds the organisers' naive Python reference, packaged the way the live board builds and runs it. Use it to check your setup end to end, then replace the reference with your own code.
+Private C++20 submissions for all four tracks of [Speed Demon 2026](https://speeddemon.dev). Track code in `src/main.cpp` was written for the event after kickoff, from the published specs; no pre-event practice C++ source was copied into these folders.
 
 ## Start in five steps
 
-1. **Use this template** (the green button on GitHub) to create your repo. It can stay private until code freeze.
-2. **Install the [Speed Demon Board app](https://github.com/apps/speed-demon-board)** on that repo. It gets read-only access to the repos you pick and nothing else.
-3. **Register your team** on the submission form linked from speeddemon.dev, with the repo URL and the tracks you are entering.
-4. **Push to the `speed-demon` branch.** It is this template's default branch, so a plain `git push` does it. The board picks up each push, builds every `track-*` folder and runs it once on the full public dataset. Results appear on speeddemon.dev.
-5. **Make it fast.** Log every step in the track's `PERF.md`, with the board run ID that measured it. At code freeze (November 2, 18:00 UTC), make the repo public.
+1. The repository is registered for team `NewtonRedHat`, language `C/C++`.
+2. The [Speed Demon Board app](https://github.com/apps/speed-demon-board) is installed for this private repo.
+3. Push submissions to the `speed-demon` branch. Each changed track is built and checked by the board against the full public seed-1 dataset.
+4. Record measured changes in each `PERF.md` with the board run ID. Code freeze is November 2, 15:00 UTC; make the repo public by then.
 
 One repo per team holds all your tracks. Delete the folders of the tracks you are not entering. An unchanged folder is the reference itself, so the board reports it as unchanged and does not run it.
 
@@ -20,7 +19,7 @@ One repo per team holds all your tracks. Delete the folders of the tracks you ar
 | `.speed-demon.toml` | Track, team, language, dependency count; set `team` |
 | `PERF.md` | Your optimisation log, worth 8% of your total |
 | `README.md` | Your approach, your dependencies, your next 24 hours |
-| `run.py` + module | The reference; replace it with your code |
+| `src/main.cpp` | The C++20 track implementation |
 
 ## How your program runs
 
@@ -29,7 +28,7 @@ One repo per team holds all your tracks. Delete the folders of the tracks you ar
 - There is no network, at build time or at run time. Commit your dependencies to the repo (`cargo vendor`, `go mod vendor` and so on).
 - It runs as an unprivileged user on a read-only filesystem. `/tmp` is 1 GB of scratch space.
 - It gets 12 hardware threads (six P-cores, turbo off), 8 GB of memory with no swap, and 512 processes.
-- Runs must finish within 10x the reference's time, including live-board runs.
+- The live board has a 3x reference-time timeout; final scoring has a 10x timeout.
 - Your output must match the reference's byte for byte (sha256) on every run.
 
 ## Check before you push
@@ -44,17 +43,17 @@ On Windows, `check.py` transfers data through temporary Docker volumes, so Docke
 Desktop does not need a shared host drive. The same network, read-only, memory,
 process and `/tmp` limits are applied to the run.
 
-To get data, generate it with the public generators. Seed 1 at `full` scale is the board's dataset; `sample` is 10% of it.
+Seed 1 at `full` scale is the board's dataset. The full datasets and published input/output hashes are available from the [board](https://speeddemon.dev/board/). The separate sample release was removed.
 
 ```
 git clone https://github.com/hackathon-raptors/speed-demon-2026
-python3.13 speed-demon-2026/generators/a_ingest.py --seed 1 --scale sample --out data/a
+python3.13 speed-demon-2026/generators/a_ingest.py --seed 1 --scale full --out data/a
 ```
 
 No Python 3.13? Run the generator in the same image the reference uses:
 
 ```
-docker run --rm -v "$PWD:/w" -w /w python:3.13-slim python3 speed-demon-2026/generators/a_ingest.py --seed 1 --scale sample --out data/a
+docker run --rm -v "$PWD:/w" -w /w python:3.13-slim python3 speed-demon-2026/generators/a_ingest.py --seed 1 --scale full --out data/a
 ```
 
 Run the check once on the unchanged folder. The sha256 it prints is the correct answer for that data. After every change, pass it back, so the check fails on a wrong answer:
@@ -63,7 +62,7 @@ Run the check once on the unchanged folder. The sha256 it prints is the correct 
 python3 check.py a --data data/a --expected <sha256>
 ```
 
-The 10% samples and their hashes are also published on October 30, 06:00 UTC, linked from speeddemon.dev.
+The final score uses a hidden holdout seed. Passing the public seed is necessary, but does not guarantee the holdout result.
 
 On Colima, keep the repo and the data under your home folder, or Docker cannot mount them.
 

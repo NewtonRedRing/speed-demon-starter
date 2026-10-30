@@ -4,7 +4,7 @@ The task, the input files and the exact output format are in the [spec](https://
 
 ## Approach
 
-How your solution works, in plain prose.
+The program tokenizes document bytes using ASCII-only lowercase and indexes only query terms, retaining document postings and token positions. Boolean operators are applied strictly left to right with sorted-set operations. Phrase matches are verified at consecutive token positions. Each result reports count, id sum and the ten smallest matching ids.
 
 ## Dependencies
 
@@ -12,4 +12,4 @@ None.
 
 ## With another 24 hours
 
-What you would do next.
+Measure the board run, then profile index construction, postings memory and phrase verification.
