@@ -36,7 +36,7 @@ One repo per team holds all your tracks. Delete the folders of the tracks you ar
 `check.py` builds a track offline and runs it with the board's Docker settings, then prints the output's sha256 and a rough time. You need Docker and Python 3.
 
 ```
-python3 check.py a --data data/a
+python3 check.py a --data data/a/full-seed1
 ```
 
 On Windows, `check.py` transfers data through temporary Docker volumes, so Docker
@@ -59,7 +59,7 @@ docker run --rm -v "$PWD:/w" -w /w python:3.13-slim python3 speed-demon-2026/gen
 Run the check once on the unchanged folder. The sha256 it prints is the correct answer for that data. After every change, pass it back, so the check fails on a wrong answer:
 
 ```
-python3 check.py a --data data/a --expected <sha256>
+python3 check.py a --data data/a/full-seed1 --expected <sha256>
 ```
 
 The final score uses a hidden holdout seed. Passing the public seed is necessary, but does not guarantee the holdout result.
