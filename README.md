@@ -36,14 +36,14 @@ be globally optimal. In particular, C retains owned string/deque entries rather
 than the larger instrumented arena-backed experiment. Its latest changes are
 locally validated but do not yet have an official score.
 
-Latest full public seed-1 recheck (three process-timed runs each):
+Latest full public seed-1 rechecks (five process-timed runs per track):
 
 | Track | Median time | Peak RSS | Official output hash |
 |---|---:|---:|---|
-| A | 0.058362 s | 40.69 MiB | PASS |
-| B | 0.831275 s | 197.44 MiB | PASS |
-| C | 0.095814 s | 13.57 MiB | PASS |
-| D | 0.330359 s | 138.30 MiB | PASS |
+| A | 0.056095 s | 65.56 MiB | PASS |
+| B | 1.072819 s | 207.26 MiB | PASS |
+| C | 0.125702 s | 21.77 MiB | PASS |
+| D | 0.399363 s | 133.26 MiB | PASS |
 
 These are local measurements, not leaderboard scores or controlled comparisons
 with previous batches. All four also passed `check.py` with the live manifest's
@@ -87,11 +87,11 @@ fixtures are not used by the benchmark. Generated edge-case oracle tests are
 supplemental software tests only, never official datasets or score measurements.
 Final scoring uses a hidden holdout seed, not the public seed.
 
-## Algorithms and measured local results
+## Algorithms and historical local milestones
 
 | Track | Approach | Previous local median | Candidate median | Candidate peak RSS |
 |---|---|---:|---:|---:|
-| [A](track-a/README.md) | Parallel streaming, exact endpoint interning, percentile selection | 0.541742 s | 0.064004 s | 40.90 MiB |
+| [A](track-a/README.md) | Parallel mapped parsing, fused hour scatter/selection, direct output buffers | 0.541742 s | 0.042965 s | 66.39 MiB |
 | [B](track-b/README.md) | Token phrase automaton, compact sparse/bitmap Boolean postings | 5.749076 s | 0.834935 s | 202.97 MiB |
 | [C](track-c/README.md) | Quote-safe parallel CSV, pooled exact names, overlapped region lookup | 3.299495 s | 0.098435 s | 14.70 MiB |
 | [D](track-d/README.md) | Buffered packed bidirectional CSR, sparse radix-queue Dijkstra | 7.028240 s | 0.356099 s | 135.66 MiB |
@@ -118,6 +118,48 @@ Its latest recorded official result remains 62.989248 points; the new local
 candidate has no official score. At that published memory/source size, 80 points
 would require about 21.45 ms, roughly 4.79x faster than its 102.775 ms official
 run. The dominant measured stage is CSV parsing plus exact-name aggregation.
+
+Track A's subsequent speed-first redesign measured 0.070378 s before versus
+0.046220 s after in twelve alternating same-sandbox runs per executable:
+34.3% lower elapsed time. Peak RSS increased from 41.01 to 68.10 MiB.
+The retained implementation removes per-group latency allocations and uses
+hour-major parallel prefix/scatter storage. A later fused hour pipeline reduced
+the preceding candidate's controlled median another 3.2%, from 0.043447 s to
+0.042055 s, and increased measured mean CPU concurrency from 7.41 to 7.72
+CPU-equivalents. Neither continuous twelve-thread saturation nor equivalent
+target-machine hardware is established locally. These speed improvements are local;
+memory/source penalties still affect points, and no new official score exists.
+
+### Latest all-track speed-first tuning
+
+B now scans mapped corpus shards without per-document `getline` copies and
+summarizes dense Boolean words with exact weighted population counts. C clears
+its decode buffer only for escaped names and releases consumed pages in larger,
+page-safe batches. D parses complete buffer blocks in one pass and prunes
+relaxations that cannot improve the current shortest path.
+
+Eight alternating runs per executable in one sandbox, using only official
+full seed-1 performance inputs and live manifest hashes:
+
+| Track | Before (s) | Retained (s) | Median time reduction | Before / retained maximum RSS (MiB) |
+|---|---:|---:|---:|---:|
+| B | 1.238990 | 1.204293 | 2.8% | 202.94 / 200.67 |
+| C | 0.132686 | 0.128629 | 3.1% | 14.48 / 21.73 |
+| D | 0.459892 | 0.436360 | 5.1% | 138.95 / 136.98 |
+
+These compare against the start of this all-track tuning pass, not the much
+older original submissions. Host load increased between batches; the higher
+absolute times must not be compared against earlier isolated runs. C's extra
+resident pages are an intentional raw-speed tradeoff, not a points improvement.
+Mapped B improved in two controlled comparisons; a byte-classification table,
+deferred C deduplication and larger D construction layouts were rejected.
+Unused includes and experiment-only statements were removed; required error
+reporting, exact comparisons, metadata and documentation remain. Removing
+comments or documentation alone does not speed execution.
+
+All 14 regression tests, all eight solution methods under ASan/UBSan, strict
+warnings and all four allowlisted offline production-sandbox checks pass for
+the retained sources. No new board score is available.
 
 ## Validation
 
@@ -208,7 +250,7 @@ cases, and the changed A source passes strict compiler warnings.
 
 | Track | Remaining cost | Next evidence needed |
 |---|---|---|
-| A | Parsing/hash lookup, group allocations and merging | CPU profile and controlled allocation/percentile benchmarks |
+| A | Endpoint hashing/parsing and remaining output/selection work | CPU profile of the contiguous-storage design on scoring-equivalent hardware |
 | B | Corpus dictionary lookup and posting construction/merge memory | Cache-miss profile; compare compressed or two-pass exact postings against added scan cost |
 | C | Quote-parity pass, exact-name lookup and shared cache traffic | Memory-bandwidth/atomic-contention profile on equivalent hardware |
 | D | Random CSR degree/fill writes and search expansion | Construction/search profile; test preprocessing only including its full time/memory cost |

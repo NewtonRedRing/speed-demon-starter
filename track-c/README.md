@@ -7,7 +7,9 @@ The task, the input files and the exact output format are in the [spec](https://
 A buffered quote-parity prepass aligns twelve memory-mapped CSV shards to real
 record boundaries, including quoted embedded newlines. The byte parser only
 materializes names containing escaped quotes; note contents are counted without
-copying. Consumed pages are released with `madvise`. BOMs, CRLF/LF, trailing
+copying. The decode buffer is cleared only when an escaped name needs it.
+Consumed full pages are released with `madvise` in 1 MiB batches, without
+discarding the partial page preceding a shard. BOMs, CRLF/LF, trailing
 spaces and integer cents are preserved exactly.
 
 A dense region lookup joins countries, including `_UNMATCHED`. Numeric aggregates
@@ -35,7 +37,10 @@ Separate parsing and shared-name cache costs on the scoring CPU. Initial phase
 profiling found 75-84 ms in their combined stage, versus 10-13 ms loading regions
 and 9-11 ms preparing quote-safe boundaries.
 
-The latest local five-run full seed-1 median is 0.098435 s, 14.70 MiB peak RSS.
+The latest local five-run full seed-1 median is 0.125702 s, 21.77 MiB peak RSS.
 A same-sandbox alternating comparison measured an 8.3% median time reduction
-against the published implementation. This candidate has no official run ID;
+against the earlier published implementation. Subsequent lazy decoding and
+page-release tuning reduced its immediate baseline by 3.1%, with higher RSS.
+Shared-host timings from different batches are not directly comparable.
+This candidate has no official run ID;
 80 points has not been reached. See [PERF.md](PERF.md).

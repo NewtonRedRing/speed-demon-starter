@@ -93,3 +93,30 @@ repetitions and the production-style sandbox. All 14 regression tests passed.
 The CSV oracle now includes quoted notes and names larger than 256 KiB,
 embedded CR/LF and no final terminator; three repeated runs also pass ASan/UBSan.
 Strict GCC warnings pass.
+
+## Subsequent speed-first decoding and page-release tuning
+
+The retained candidate clears decode scratch only when the first escaped quote
+in a copied name is encountered. Plain names and unmaterialized notes do not
+clear that buffer. Consumed-page releases now batch 1 MiB rather than 256 KiB,
+start after the shard's initial partial page, and guard against unsigned
+subtraction before the first full page is consumed.
+
+Eight alternating official-input runs per executable in one sandbox:
+
+| Executable | Median process time (s) | Maximum RSS (MiB) |
+|---|---:|---:|
+| Start-of-pass implementation | 0.132686 | 14.48 |
+| Retained candidate | 0.128629 | 21.73 |
+
+This is **3.1% lower median time**, deliberately trading additional resident
+pages for raw speed. An earlier eight-run batch measured 0.098378 s before,
+0.095941 s with lazy scratch clearing, and 0.094746 s with both changes.
+A separate final five-run batch measured 0.125702 s / 21.77 MiB. Shared-host
+load changes absolute times; these are not new board scores or points gains.
+
+Deferred stripe-owned country deduplication was exact but slower
+(0.102828 s versus 0.098791 s) and increased memory to about 72 MB, so it was
+removed. The original exact atomic membership remains.
+All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
+strict warnings and all four offline production-sandbox checks pass.

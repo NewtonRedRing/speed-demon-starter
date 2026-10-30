@@ -26,12 +26,21 @@ class Solutions(unittest.TestCase):
             result = measure(track, data, digest, runs, prefix + track)
             self.assertEqual(result["sha256"], digest)
 
-    def test_a_empty(self):
+    def test_a_empty_and_single_worker(self):
         self.verify("a", {"requests.log": b""}, b"")
+        self.verify("a", {"requests.log": (
+            b"2026-11-02T17:59:59.999999Z OPTIONS /Z 599 4294967295\n"
+            b"2026-10-30T18:00:00.000000Z POST / 499 0\n"
+            b"2026-11-02T17:00:00.000000Z HEAD /Z 100 0\n"
+        )}, (
+            b"2026-10-30T18:00:00Z / 1 0 0 0 0 0\n"
+            b"2026-11-02T17:00:00Z /Z 2 0 4294967295 4294967295 1 500000\n"
+        ))
 
     def test_a_percentiles_boundaries_and_parallel_ranges(self):
         rng = random.Random(349)
         endpoints = ["/", "/x", "/x-export", "/x.csv", "/x/{id}", "/X", "/" + "a" * 124]
+        endpoints += [f"/catalogue/{i}" for i in range(1829)]
         dates = ["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"]
         rows, groups = [], {}
         for i in range(42000):
@@ -39,10 +48,13 @@ class Solutions(unittest.TestCase):
             date = dates[(h + 18) // 24]
             hour = (h + 18) % 24
             timestamp = f"{date}T{hour:02}:00:00.000000Z"
-            endpoint = rng.choice(endpoints)
+            endpoint = rng.choice(endpoints[:7] if i % 2 else endpoints)
             status = rng.choice([100, 200, 499, 500, 599])
             latency = rng.choice([0, 4294967295, rng.randrange(100000)])
-            rows.append(f"{timestamp} {rng.choice(['GET', 'OPTIONS', 'DELETE'])} {endpoint} {status} {latency}\n")
+            method = rng.choice(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+            rows.append(f"{timestamp} {method} {endpoint} {status} {latency}\n")
+        for i, endpoint in enumerate(endpoints):
+            rows.append(f"2026-10-30T18:00:00.000000Z GET {endpoint} 599 {i}\n")
         rows.extend([
             "2026-10-30T18:00:00.000000Z GET /singleton 500 1\n",
             "2026-10-30T18:00:00.000000Z GET /pair 499 0\n",
@@ -125,6 +137,17 @@ class Solutions(unittest.TestCase):
         ]:
             with self.subTest(queries=queries):
                 self.check_b(docs, queries)
+        docs = [
+            b"common " + b" ".join(
+                f"bit{bit}".encode() for bit in range(6) if i & (1 << bit)
+            ) + (b" sparse" if i % 64 < 7 else b"")
+            for i in range(193)
+        ]
+        self.check_b(docs, [
+            "BOOL common", "BOOL sparse", "BOOL absent",
+            *[f"BOOL bit{bit}" for bit in range(6)],
+            "BOOL common NOT sparse", "BOOL common NOT bit5",
+        ])
 
     def test_b_dense_sparse_bitmap_merges_and_parallel_ranges(self):
         rng = random.Random(873)

@@ -44,6 +44,34 @@ Further official-input experiments passed output hashes but were rejected:
 - Inline singleton postings saved allocations, but their small time/memory
   benefit did not justify the added source-size penalty.
 
-These experiments were removed; the published implementation is retained.
+These experiments were removed; subsequent retained changes are described below.
 All comparisons used live official manifest hashes. Host-load variation was
 large enough that isolated faster runs were not treated as improvements.
+
+## Speed-first mapped scanning and exact dense summaries
+
+The retained candidate maps the corpus once and scans aligned shards directly,
+removing per-document line allocations/copies. Full consumed pages are released
+in 1 MiB batches, keeping shard boundary pages intact. Dense Boolean summaries
+compute exact count and ID sum with population counts and six weighted masks;
+words with fewer than eight matches retain set-bit enumeration. The first ten
+IDs still use ascending set bits. No approximate membership or result is used.
+
+Eight alternating runs per executable in one official-data sandbox:
+
+| Executable | Median process time (s) | Maximum RSS (MiB) |
+|---|---:|---:|
+| Start-of-pass implementation | 1.238990 | 202.94 |
+| Retained candidate | 1.204293 | 200.67 |
+
+This is **2.8% lower median time**. An earlier three-candidate controlled batch
+measured 1.152035 s before, 1.116037 s with population summaries, and 1.086487 s
+with mapped scanning as well. A byte-classification lookup table did not improve
+the mapped version and was removed. A separate five-run retained batch measured
+1.072819 s / 207.26 MiB; absolute cross-batch timings vary with host load.
+
+All full official output hashes pass. All 14 regression tests, all eight
+solution methods under ASan/UBSan, strict GCC warnings and all four offline
+production-sandbox checks pass. The B oracle additionally checks all six bit
+positions, sparse seven-bit words, full words and a partial final word.
+There is no new official score.

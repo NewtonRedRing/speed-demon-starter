@@ -7,7 +7,6 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
-#include <limits>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
@@ -59,7 +58,7 @@ public:
     const char* end() const { return data_ + size_; }
     void discard(const char* position, std::size_t& released) const {
         const auto consumed = static_cast<std::size_t>(position - data_);
-        if (consumed - released < 256 * 1024) return;
+        if (consumed < released || consumed - released < 1024 * 1024) return;
         const auto stop = consumed & ~std::size_t(4095);
         if (madvise(data_ + released, stop - released, MADV_DONTNEED))
             throw std::runtime_error("cannot release consumed CSV pages");
@@ -154,7 +153,6 @@ std::string_view field(const char*& p, const char* end, std::string& decoded, bo
     }
     start = ++p;
     std::size_t escapes = 0;
-    decoded.clear();
     for (;;) {
         const char* quote = static_cast<const char*>(std::memchr(p, '"', end - p));
         if (!quote || quote + 1 == end) throw std::runtime_error("unterminated CSV field");
@@ -169,6 +167,7 @@ std::string_view field(const char*& p, const char* end, std::string& decoded, bo
             return {start, static_cast<std::size_t>(quote - start) - escapes};
         }
         if (keep) {
+            if (!escapes) decoded.clear();
             decoded.append(start, quote + 1);
             start = quote + 2;
         }
@@ -252,7 +251,7 @@ int solve() {
     parallel(workers, [&](unsigned w) {
       const char* p = boundaries[w];
       const char* end = boundaries[w + 1];
-      auto released = static_cast<std::size_t>(p - input.begin()) & ~std::size_t(4095);
+      auto released = (static_cast<std::size_t>(p - input.begin()) + 4095) & ~std::size_t(4095);
       std::string decoded_name, unused;
       while (p < end) {
         skip_bom(p, end);

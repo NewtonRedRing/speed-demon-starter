@@ -4,7 +4,6 @@
 #include <bit>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <fstream>
@@ -69,19 +68,18 @@ void edges_in_range(std::size_t begin, std::size_t end, Visit visit) {
         if (!got) throw std::runtime_error("truncated graph.txt");
         const char* p = buffer.data();
         const char* stop = p + carry + got;
-        while (position < end) {
-            const char* newline = static_cast<const char*>(std::memchr(p, '\n', stop - p));
-            if (!newline) break;
+        const char* complete = stop;
+        while (complete != p && complete[-1] != '\n') --complete;
+        while (position < end && p < complete) {
             const char* row = p;
-            const u32 from = number(row);
-            if (*row++ != ' ') throw std::runtime_error("invalid edge source");
-            const u32 to = number(row);
-            if (*row++ != ' ') throw std::runtime_error("invalid edge target");
-            const u32 weight = number(row);
-            if (row != newline) throw std::runtime_error("invalid edge weight");
+            const u32 from = number(p);
+            if (*p++ != ' ') throw std::runtime_error("invalid edge source");
+            const u32 to = number(p);
+            if (*p++ != ' ') throw std::runtime_error("invalid edge target");
+            const u32 weight = number(p);
+            if (*p++ != '\n') throw std::runtime_error("invalid edge weight");
             visit(from, to, weight);
-            position += static_cast<std::size_t>(newline + 1 - p);
-            p = newline + 1;
+            position += static_cast<std::size_t>(p - row);
         }
         carry = static_cast<std::size_t>(stop - p);
         if (carry == buffer.size()) throw std::runtime_error("edge line exceeds buffer");
@@ -104,7 +102,6 @@ public:
         size_ = 0;
     }
     void push(u64 distance, u32 node) {
-        if (distance < last_) throw std::logic_error("nonmonotone radix key");
         buckets_[std::bit_width(distance ^ last_)].emplace_back(distance, node);
         ++size_;
     }
@@ -207,6 +204,7 @@ public:
                 const Edge& edge = graph_.edges[d][i];
                 const u32 weight = edge.weight == UINT16_MAX ? graph_.wide_weights[d].at(i) : edge.weight;
                 const u64 next = distance + weight;
+                if (next >= best) continue;
                 const u64 other = distances_[1 - d].get(edge.to);
                 if (other != infinity) best = std::min(best, next + other);
                 if (next < best && distances_[d].relax(edge.to, next)) queues_[d].push(next, edge.to);

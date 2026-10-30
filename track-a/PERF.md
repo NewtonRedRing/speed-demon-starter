@@ -40,3 +40,96 @@ score improvement or evidence of reaching 90 points.
 
 Six-worker ingestion was rejected: its reduced memory did not offset its slower
 time under the scoring exponents. The candidate retains twelve workers.
+
+## Speed-first contiguous-storage redesign
+
+The subsequent request prioritizes elapsed time. The retained local candidate
+replaces per-group vectors with compact worker records, dense hour-major counts,
+parallel prefix planning and disjoint scatter into one contiguous latency array.
+Parsing uses a read-only mapping, direct next-record pointers and `memchr`
+endpoint scans. Complete consumed pages are released in 1 MiB batches.
+Endpoint remaps are reused rather than hashing every local endpoint a second
+time. Output uses bounded direct buffers rather than repeated string appends.
+
+The official full seed-1 file was measured, not inferred from typical cases:
+3,100,000 rows, 1,842 endpoints, 126,908 populated groups, median group size six,
+114,988 groups of at most 32 rows, maximum group size 9,223 and full-width
+uint32 latencies. The old design created 145,601 worker-local vectors; simulating
+its reserve-four/doubling policy gives another 176,342 growth allocations.
+Only 362,667 latencies needed copying during cross-worker merge, so allocator
+churn mattered more than that merge's 1.45 MB payload.
+
+Temporary phase timers on the first contiguous candidate measured approximately
+30 ms parsing, 10 ms serial layout planning, 4 ms scatter, 7-9 ms selection and
+formatting, and 2-3 ms writing. Hour-major parallel planning reduced the planning
+stage to about 4 ms; direct output formatting reduced its combined stage to
+about 5-6 ms in later batches. Host load varies, and those phase ranges are not
+a controlled comparison. All timing instrumentation was removed.
+
+Final comparison used twelve runs of each executable, alternating execution
+order in one sandbox against the same staged official inputs. Every run
+produced exactly one output file and matched the live manifest's output hash:
+
+| Executable | Median process time (s) | Maximum peak RSS (MiB) |
+|---|---:|---:|
+| Published implementation before redesign | 0.070378 | 41.01 |
+| Retained speed-first candidate | 0.046220 | 68.10 |
+
+This is **34.3% lower elapsed time (1.52x throughput)**, not an official score.
+A separate seven-run final batch measured 0.043013 s and 67.20 MiB peak RSS.
+Higher memory and source-size penalties must be included when judging points;
+this request explicitly prioritized speed. No 80/90-point result is claimed.
+
+Other tested alternatives:
+
+- The initial single-scan buffered parser improved a controlled median from
+  0.069867 s to 0.063940 s; initial contiguous scatter reached 0.057386 s.
+- Endpoint-major parallel planning introduced unfavorable cache sharing;
+  hour-major worker tables were retained.
+- A 8192-slot endpoint table did not improve the controlled median over 4096.
+- Fixed-method dispatch plus custom insertion sort did not beat the simpler
+  method scan and standard small-group sort.
+- Keeping the entire mapping resident used about 286 MiB without a reliable
+  time advantage; consumed-page release was retained.
+- Six/eight/twelve-worker controlled medians for the redesigned candidates were
+  0.066952/0.056950/0.052070 s. Twelve workers remain.
+
+Validation: seven final full official repetitions, twelve alternating full runs,
+the allowlisted offline build and production-style sandbox all passed exact
+hashes. All 14 regression tests pass. The independent A oracle now exercises all
+1,842 catalogue entries, all seven methods, long endpoints, all 72 hours,
+duplicates, uint32 extremes, and small/large percentile groups. Both A oracle
+methods also pass ASan/UBSan; strict GCC warnings pass.
+
+## Hardware-utilization follow-up: fused hour tasks
+
+The previous candidate launched separate parsing, group-planning, scatter and
+selection/formatting worker phases. The retained follow-up uses two phases:
+parallel parsing into per-hour worker vectors, then dynamically scheduled hour
+tasks that count, plan, scatter, select and format together. Hour slices are
+disjoint, so tasks do not wait for other hours between those operations.
+Worker counters now omit the unused offset field.
+
+Sixteen alternating runs per executable in one sandbox, with all official
+input/output hashes checked:
+
+| Executable | Median time (s) | Maximum RSS (MiB) | Mean CPU-equivalents |
+|---|---:|---:|---:|
+| Previous four-phase candidate | 0.043447 | 68.32 | 7.41 |
+| Fused hour pipeline, compact counters | 0.042055 | 66.59 | 7.72 |
+
+This is a further **3.2% median time reduction** against the immediately
+preceding candidate. CPU-equivalents are each run's user-plus-system CPU time
+divided by elapsed time, averaged across runs; they are not a claim of twelve
+continuously busy threads or the target CPU's utilization. A separate five-run
+batch measured 0.042965 s and 66.39 MiB RSS.
+
+One process uses twelve workers for full input; the 512-process and 8 GB limits
+are capacity ceilings, not performance targets. Extra processes would compete
+for the same twelve hardware threads. The local Docker host reports 28 CPUs and
+about 2 GB VM memory; tests impose a twelve-CPU quota and the sandbox's 8 GB
+limit, but cannot reproduce six P-cores, SMT placement or turbo-disabled clocks.
+No official score or target-machine utilization is claimed.
+
+All 14 regression tests, both A oracle methods under ASan/UBSan, strict GCC
+warnings, and the full official-data production sandbox passed again.

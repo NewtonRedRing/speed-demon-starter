@@ -36,3 +36,33 @@ Commit `dfdc930`: run `run-c3a3efa5980d`, 0.418953 s, 141.78 MB,
 A six-worker variant passed the official full output hash but measured
 0.522989 s / 107.71 MiB versus twelve workers at 0.409246 s / 136.98 MiB.
 The time penalty outweighed the memory benefit, so it was removed.
+
+## Subsequent speed-first parser and search tuning
+
+Complete buffered rows now parse in one numeric pass after finding the block's
+last complete newline, instead of searching for every edge's newline first.
+Search skips relaxations at or above the current best distance before consulting
+the opposite frontier. A redundant radix-key runtime check was removed:
+nonnegative Dijkstra weights already guarantee monotone inserted keys.
+Input and output failure reporting remains.
+
+Eight alternating runs per executable in one official-data sandbox:
+
+| Executable | Median process time (s) | Maximum RSS (MiB) |
+|---|---:|---:|
+| Start-of-pass implementation | 0.459892 | 138.95 |
+| Retained candidate | 0.436360 | 136.98 |
+
+This is **5.1% lower median time**. An earlier controlled batch measured
+0.386281 s before versus 0.379875 s after; the gain is modest and host-sensitive.
+A separate final five-run batch measured 0.399363 s / 133.26 MiB.
+
+Cached raw edges with per-worker degree arrays and prefix-owned CSR scatter
+removed construction atomics but were slower and larger: controlled medians
+0.475922 s / about 140 MB baseline, 0.505225 s / 304 MB local-degree candidate,
+and 0.542144 s / 324 MB with full-width aligned edges. Both alternatives were
+removed; packed six-byte CSR with sparse overflow weights remains.
+
+Every full official hash passes. All 14 regression tests, all eight solution
+methods under ASan/UBSan, strict warnings and all four offline production
+sandbox checks pass. There is no new official score.
