@@ -23,6 +23,35 @@ track count toward its source penalty, even when not compiled. The separate
 practice repository was not changed. Downloaded data and generated outputs are
 ignored by Git.
 
+### Retained implementations
+
+Each track has exactly one source file, `src/main.cpp`; rejected alternatives,
+profiling copies and backup implementations are not part of any build context.
+Keep the pinned Dockerfile, metadata and approach/performance documentation with
+that source. The validation scripts and tests stay outside the scored tracks.
+Old implementations remain available in Git history, not as extra scored files.
+
+The retained versions are selected from the tested candidates, not claimed to
+be globally optimal. In particular, C retains owned string/deque entries rather
+than the larger instrumented arena-backed experiment. Its latest changes are
+locally validated but do not yet have an official score.
+
+Latest full public seed-1 recheck (three process-timed runs each):
+
+| Track | Median time | Peak RSS | Official output hash |
+|---|---:|---:|---|
+| A | 0.058362 s | 40.69 MiB | PASS |
+| B | 0.831275 s | 197.44 MiB | PASS |
+| C | 0.095814 s | 13.57 MiB | PASS |
+| D | 0.330359 s | 138.30 MiB | PASS |
+
+These are local measurements, not leaderboard scores or controlled comparisons
+with previous batches. All four also passed `check.py` with the live manifest's
+expected hashes, allowlisted offline builds and the production-style sandbox.
+Each benchmark run checks that `/out` contains exactly its required output file.
+All 14 regression tests passed. No dependency downloads are needed at build or
+run time.
+
 ## Official public dataset
 
 The [official board](https://speeddemon.dev/board/) publishes full public seed 1:
@@ -64,7 +93,7 @@ Final scoring uses a hidden holdout seed, not the public seed.
 |---|---|---:|---:|---:|
 | [A](track-a/README.md) | Parallel streaming, exact endpoint interning, percentile selection | 0.541742 s | 0.064004 s | 40.90 MiB |
 | [B](track-b/README.md) | Token phrase automaton, compact sparse/bitmap Boolean postings | 5.749076 s | 0.834935 s | 202.97 MiB |
-| [C](track-c/README.md) | Quote-safe parallel CSV, exact shared names, atomic country membership | 3.299495 s | 0.118340 s | 14.94 MiB |
+| [C](track-c/README.md) | Quote-safe parallel CSV, pooled exact names, overlapped region lookup | 3.299495 s | 0.098435 s | 14.70 MiB |
 | [D](track-d/README.md) | Buffered packed bidirectional CSR, sparse radix-queue Dijkstra | 7.028240 s | 0.356099 s | 135.66 MiB |
 
 Baseline medians use three repetitions; candidate medians use five. Every run
@@ -82,6 +111,13 @@ replaces per-line D stdio calls with buffered newline scanning.
 Per-track [A](track-a/PERF.md), [B](track-b/PERF.md),
 [C](track-c/PERF.md) and [D](track-d/PERF.md) logs distinguish actual historical
 board runs from local candidates. No board run IDs or points were fabricated.
+
+Track C's latest investigation measured an 8.3% median time reduction in a
+same-sandbox alternating comparison against its published implementation.
+Its latest recorded official result remains 62.989248 points; the new local
+candidate has no official score. At that published memory/source size, 80 points
+would require about 21.45 ms, roughly 4.79x faster than its 102.775 ms official
+run. The dominant measured stage is CSV parsing plus exact-name aggregation.
 
 ## Validation
 
@@ -163,7 +199,8 @@ rank 20**; its leader is at 73.212 overall.
 Subsequent local tests rejected lower worker counts, alternate index merges,
 singleton postings and smaller CSV hash buckets when their speed, memory and
 source-size tradeoffs did not improve the score. A modest small-group sorting
-candidate for A remains local; it does not change the official results above.
+candidate for A was published in `1ba1831`; the table above still describes
+`dfdc930`, not that later commit.
 All 14 current software tests pass, including the new small-group threshold
 cases, and the changed A source passes strict compiler warnings.
 

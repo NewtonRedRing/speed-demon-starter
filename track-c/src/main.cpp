@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <limits>
 #include <mutex>
@@ -13,7 +14,6 @@
 #include <string>
 #include <string_view>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -23,6 +23,12 @@
 using u64 = std::uint64_t;
 using i64 = std::int64_t;
 using u32 = std::uint32_t;
+
+unsigned quote_parity(const char* begin, const char* end) {
+    std::uint8_t parity = 0;
+    while (begin != end) parity ^= *begin++ == '"';
+    return parity;
+}
 
 class Input {
     int fd_;
@@ -65,7 +71,7 @@ public:
         while (begin < end) {
             const auto got = pread(fd_, buffer.data(), std::min(buffer.size(), end - begin), static_cast<off_t>(begin));
             if (got <= 0) throw std::runtime_error("cannot read CSV quote parity");
-            parity ^= static_cast<unsigned>(std::count(buffer.data(), buffer.data() + got, '"')) & 1;
+            parity ^= quote_parity(buffer.data(), buffer.data() + got);
             begin += static_cast<std::size_t>(got);
         }
         return parity;
@@ -93,11 +99,12 @@ class Stripe {
     struct Entry {
         u64 hash;
         std::string name;
-        std::array<std::atomic<u64>, 4> countries{};
         Entry* next;
+        std::array<std::atomic<u64>, 4> countries{};
         Entry(u64 hash, std::string_view name, Entry* next) : hash(hash), name(name), next(next) {}
     };
     std::array<std::atomic<Entry*>, 4096> buckets_{};
+    std::deque<Entry> entries_;
     std::mutex mutex_;
     static Entry* find(Entry* entry, u64 hash, std::string_view name) {
         while (entry && !(entry->hash == hash && entry->name == name)) entry = entry->next;
@@ -110,16 +117,6 @@ class Stripe {
         return !(membership.fetch_or(bit, std::memory_order_relaxed) & bit);
     }
 public:
-    ~Stripe() {
-        for (auto& bucket : buckets_) {
-            Entry* entry = bucket.load(std::memory_order_relaxed);
-            while (entry) {
-                Entry* next = entry->next;
-                delete entry;
-                entry = next;
-            }
-        }
-    }
     bool insert(std::string_view name, unsigned country, u64 hash) {
         auto& bucket = buckets_[(hash >> 6) & (buckets_.size() - 1)];
         if (Entry* entry = find(bucket.load(std::memory_order_acquire), hash, name))
@@ -127,7 +124,7 @@ public:
         std::lock_guard lock(mutex_);
         Entry* head = bucket.load(std::memory_order_relaxed);
         if (Entry* entry = find(head, hash, name)) return mark(entry, country);
-        Entry* entry = new Entry(hash, name, head);
+        Entry* entry = &entries_.emplace_back(hash, name, head);
         mark(entry, country);
         bucket.store(entry, std::memory_order_release);
         return true;
@@ -149,9 +146,9 @@ std::string_view field(const char*& p, const char* end, std::string& decoded, bo
     const char* start = p;
     if (p == end) throw std::runtime_error("truncated CSV field");
     if (*p != '"') {
-        while (p < end && *p != ',') ++p;
+        p = static_cast<const char*>(std::memchr(p, ',', end - p));
+        if (!p) throw std::runtime_error("missing CSV comma");
         const std::string_view result(start, p - start);
-        if (p == end) throw std::runtime_error("missing CSV comma");
         ++p;
         return result;
     }
@@ -188,26 +185,36 @@ std::string money(i64 value) {
 }
 
 int solve() {
-    std::ifstream lookup("/data/regions.csv");
-    std::string line;
-    if (!std::getline(lookup, line) || line != "region_id,country")
-        throw std::runtime_error("invalid regions.csv header");
     std::vector<std::string> countries{"_UNMATCHED"};
-    std::unordered_map<std::string, unsigned> ids;
     std::vector<std::uint8_t> regions;
-    while (std::getline(lookup, line)) {
-        const char* p = line.data();
-        const char* end = p + line.size();
-        const auto region = number(p, end);
-        if (p == end || *p++ != ',' || end - p != 3 || region > 9999999)
-            throw std::runtime_error("invalid regions.csv row");
-        auto [it, inserted] = ids.try_emplace(std::string(p, end), static_cast<unsigned>(countries.size()));
-        if (inserted) countries.emplace_back(p, end);
-        if (countries.size() > 256) throw std::runtime_error("more than 255 countries");
-        if (region >= regions.size()) regions.resize(region + 1);
-        regions[region] = static_cast<std::uint8_t>(it->second);
-    }
-    if (lookup.bad()) throw std::runtime_error("cannot read regions.csv");
+    const auto load_regions = [&] {
+        std::ifstream lookup("/data/regions.csv");
+        std::string line;
+        if (!std::getline(lookup, line) || line != "region_id,country")
+            throw std::runtime_error("invalid regions.csv header");
+        std::array<std::uint8_t, 26 * 26 * 26> ids{};
+        while (std::getline(lookup, line)) {
+            const char* p = line.data();
+            const char* end = p + line.size();
+            const auto region = number(p, end);
+            if (p == end || *p++ != ',' || end - p != 3 || region > 9999999)
+                throw std::runtime_error("invalid regions.csv row");
+            unsigned code = 0;
+            for (const char* c = p; c < end; ++c) {
+                if (*c < 'A' || *c > 'Z') throw std::runtime_error("invalid country code");
+                code = code * 26 + static_cast<unsigned>(*c - 'A');
+            }
+            auto& country = ids[code];
+            if (!country) {
+                if (countries.size() == 256) throw std::runtime_error("more than 255 countries");
+                country = static_cast<std::uint8_t>(countries.size());
+                countries.emplace_back(p, end);
+            }
+            if (region >= regions.size()) regions.resize(region + 1);
+            regions[region] = country;
+        }
+        if (lookup.bad()) throw std::runtime_error("cannot read regions.csv");
+    };
     Input input("/data/records.csv");
     const char* p = input.begin();
     const char* end = input.end();
@@ -221,10 +228,10 @@ int solve() {
     const auto size = static_cast<std::size_t>(end - input.begin());
     const unsigned workers = size < 1024 * 1024 ? 1 : 12;
     std::vector<unsigned> parity(workers);
-    if (workers > 1)
-        parallel(workers, [&](unsigned w) {
-            parity[w] = input.parity(size * w / workers, size * (w + 1) / workers);
-        });
+    parallel(workers + 1, [&](unsigned w) {
+        if (w == workers) load_regions();
+        else if (workers > 1) parity[w] = input.parity(size * w / workers, size * (w + 1) / workers);
+    });
     std::vector<const char*> boundaries(workers + 1);
     boundaries[0] = p;
     boundaries[workers] = end;

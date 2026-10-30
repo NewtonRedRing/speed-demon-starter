@@ -37,3 +37,59 @@ inputs. Both passed exact hashes but lost more time than their memory savings
 were worth. Alternating smaller-dictionary measurements yielded about -1.15
 time/memory points. Both changes were removed; twelve workers and 4096 buckets
 per stripe remain.
+
+## Track C investigation toward 80 points
+
+The feed generated `2026-10-30T22:17:55Z` recorded commit `1ba1831`,
+run `run-2d891a7fe8f2`: **0.102775 s, 17,166,336 bytes, 370 formatted
+source lines, 62.989248 points**. This is a published result, not a result for
+the new local candidate.
+
+Temporary phase timers on the official full seed-1 inputs measured:
+
+| Published implementation phase | Elapsed range over five runs |
+|---|---:|
+| Serial region lookup loading | 10-13 ms |
+| Quote prepass and shard preparation | 9-11 ms |
+| CSV parsing and shared exact-name aggregation together | 75-84 ms |
+| Merge and output | Under 1 ms |
+
+These are elapsed phase measurements, not isolated profiles of parsing versus
+dictionary operations. Timers were removed from the candidate. The dataset
+contains 3,320,000 records, 100,520 exact names and 240 lookup countries; the
+record stage cannot be dismissed as output formatting or Docker startup.
+
+Retained changes: overlap region loading with quote parity, use dense base-26
+country-code lookup, vector-friendly byte-XOR quote parity, `memchr` delimiter
+scanning and stable deque-owned dictionary entries. Distinct names still use
+full string equality and atomic country membership, not approximate hashes.
+
+Controlled comparison: ten runs of each executable, alternating execution order
+inside one sandbox using the same staged official inputs. Every output hash
+passed.
+
+| Executable | Median process time (s) | Maximum peak RSS (MiB) |
+|---|---:|---:|
+| Published implementation | 0.114407 | 15.16 |
+| New local candidate | 0.104869 | 14.52 |
+
+The local median reduction is **8.3%**, not a 4.8x speedup. A separate five-run
+candidate batch measured 0.098435 s and 14.70 MiB; shared-host load makes
+cross-batch timings unsuitable for controlled speedup claims.
+
+Rejected alternatives included buffered record parsing with dynamically growing
+long-record carry, cache-line-separated membership, and compact arena-backed
+name views. They passed full hashes but did not justify their time, memory and
+source-size tradeoffs. The buffered parser was removed rather than retaining
+an extra implementation.
+
+At the published memory/source axes, 80 points requires approximately
+**0.021451 s** (K = 39.810717), versus the official 0.102775 s: about **4.79x**
+faster. Source and memory changes alter that threshold. No new official score
+is available, and 80 points remains unmet.
+
+Validation: the full official input and output hashes passed all benchmark
+repetitions and the production-style sandbox. All 14 regression tests passed.
+The CSV oracle now includes quoted notes and names larger than 256 KiB,
+embedded CR/LF and no final terminator; three repeated runs also pass ASan/UBSan.
+Strict GCC warnings pass.

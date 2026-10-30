@@ -153,6 +153,10 @@ class Solutions(unittest.TestCase):
         for i in range(42000):
             name = names[i % len(names)] if i % 5 == 0 else f"name {rng.randrange(2000)}" + " " * (i % 7)
             note = notes[i % len(notes)] + " ordinary words" * (i % 4)
+            if i in (0, 21000, 41999):
+                note += 'long "quoted"\r\nrecord\n' * 30000
+            if i == 21000:
+                name += 'long "name"\n' * 30000
             region = rng.choice([2, 3, 999999, 1000001, 4, 9999999])
             cents = rng.choice([-1, -99, 0, 9999999, rng.randrange(-99999, 10000000)])
             if region == 1000001:
