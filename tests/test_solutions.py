@@ -48,6 +48,9 @@ class Solutions(unittest.TestCase):
             "2026-10-30T18:00:00.000000Z GET /pair 499 0\n",
             "2026-10-30T18:00:00.000000Z GET /pair 599 4294967295\n",
         ])
+        for count in (3, 31, 32, 33):
+            for value in range(count):
+                rows.append(f"2026-10-30T18:00:00.000000Z GET /threshold-{count} 200 {count - value}\n")
         rows += rows[:10]
         rng.shuffle(rows)
         for row in rows:

@@ -28,4 +28,22 @@ peak RSS but remains far above the requested target's memory footprint.
 90 points and first place remain unverified.
 Latest official-input recheck: five runs, median 0.776055 s, peak RSS 202.80 MiB.
 Inputs and outputs verified against the live manifest linked from the board.
-**Publication authorized; board run ID and points pending.**
+The published candidate's actual board result is recorded below.
+
+## Confirmed board result and rejected local experiments
+
+Commit `dfdc930`: run `run-2c406b83bfaf`, 0.806407 s, 205.30 MB,
+533 formatted source lines, **50.651659 points**. Correctness passed.
+
+Further official-input experiments passed output hashes but were rejected:
+
+- Parallel per-term merging reduced memory but slowed total execution.
+- Sequential per-term merging did not yield a repeatable score improvement.
+- Six workers reduced memory but lost the benefit to slower execution in
+  alternating measurements.
+- Inline singleton postings saved allocations, but their small time/memory
+  benefit did not justify the added source-size penalty.
+
+These experiments were removed; the published implementation is retained.
+All comparisons used live official manifest hashes. Host-load variation was
+large enough that isolated faster runs were not treated as improvements.

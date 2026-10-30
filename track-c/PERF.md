@@ -25,4 +25,15 @@ passes ASan/UBSan. Hash-only/approximate distinct counts are not used.
 90 points and first place remain unverified.
 Latest official-input recheck: five runs, median 0.105275 s, peak RSS 15.16 MiB.
 Inputs and outputs verified against the live manifest linked from the board.
-**Publication authorized; board run ID and points pending.**
+The published candidate's actual board result is recorded below.
+
+## Confirmed board result and rejected local experiments
+
+Commit `dfdc930`: run `run-8bf4bf303f0c`, 0.109505 s, 17.04 MB,
+370 formatted source lines, **62.331786 points**. Correctness passed.
+
+Six workers and a smaller 1024-bucket dictionary were tested against official
+inputs. Both passed exact hashes but lost more time than their memory savings
+were worth. Alternating smaller-dictionary measurements yielded about -1.15
+time/memory points. Both changes were removed; twelve workers and 4096 buckets
+per stripe remain.

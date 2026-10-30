@@ -146,7 +146,26 @@ target is impossible, but it rules out claiming success from the current data.
 The fetched board snapshot generated `2026-10-30T18:58:52Z` had a leading overall
 of 73.194 and no 90-point track. NewtonRedHeat's historical best remained 33.267,
 rank 36 in that snapshot, from `e8f4a84`. Those are not results for this candidate.
-Official improvement remains pending a scored board run after publication.
+The later official feed generated `2026-10-30T19:32:05Z` confirms successful
+scored runs for published commit `dfdc930`:
+
+| Track | Official time | Official memory | Official points |
+|---|---:|---:|---:|
+| A | 0.078022 s | 52.05 MB | 66.618152 |
+| B | 0.806407 s | 205.30 MB | 50.651659 |
+| C | 0.109505 s | 17.04 MB | 62.331786 |
+| D | 0.418953 s | 141.78 MB | 57.008935 |
+
+These establish improvement over the historical result, but not first place
+or 90 points. Actual run IDs are recorded in the per-track performance logs.
+The feed at `2026-10-30T19:39:41Z` places NewtonRedHeat at **61.861 overall,
+rank 20**; its leader is at 73.212 overall.
+Subsequent local tests rejected lower worker counts, alternate index merges,
+singleton postings and smaller CSV hash buckets when their speed, memory and
+source-size tradeoffs did not improve the score. A modest small-group sorting
+candidate for A remains local; it does not change the official results above.
+All 14 current software tests pass, including the new small-group threshold
+cases, and the changed A source passes strict compiler warnings.
 
 ## Remaining optimization work
 

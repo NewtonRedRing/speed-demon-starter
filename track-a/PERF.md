@@ -24,4 +24,19 @@ the recorded local baseline, with higher RSS. The oracle also passes ASan/UBSan.
 90 points and first place remain unverified.
 Latest official-input recheck: five runs, median 0.056666 s, peak RSS 40.58 MiB.
 Inputs and outputs verified against the live manifest linked from the board.
-**Publication authorized; board run ID and points pending.**
+The published candidate's actual board result is recorded below.
+
+## Confirmed board result and subsequent local experiment
+
+Commit `dfdc930`: run `run-fa8a1891ec46`, 0.078022 s, 52.05 MB,
+271 formatted source lines, **66.618152 points**. Correctness passed.
+
+A subsequent local small-group experiment sorts groups of at most 32 values
+and retains selection for larger groups. Alternating nine-run measurements
+gave baseline 0.082072 s / 40.73 MiB versus candidate 0.079945 s / 41.15 MiB.
+The time/memory-only score delta is approximately +0.24 points, before the
+small added-source penalty. This is a modest local candidate, not an official
+score improvement or evidence of reaching 90 points.
+
+Six-worker ingestion was rejected: its reduced memory did not offset its slower
+time under the scoring exponents. The candidate retains twelve workers.

@@ -9,7 +9,8 @@ inputs). Small initial latency allocations avoid reserving oversized vectors
 for sparse groups. Each worker interns exact endpoint strings in a fingerprinted table;
 hash matches always require full string equality. Thread-local groups retain
 uint32 latencies and error counts. After merging, three ordered `nth_element`
-selections compute exact nearest-rank p50/p95/p99 without fully sorting.
+selections compute exact nearest-rank p50/p95/p99 without fully sorting large
+groups. Groups with at most 32 values use a small full sort instead.
 Per-hour output is formatted in parallel and written in deterministic
 chronological-hour and bytewise-endpoint order. Status codes 500–599 are errors.
 

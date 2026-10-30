@@ -187,11 +187,12 @@ int solve() {
             const auto count = values.size();
             if (!count) continue;
             std::array<u32, 3> percentiles;
+            if (count <= 32) std::sort(values.begin(), values.end());
             auto start = values.begin();
             for (unsigned j = 0; j < 3; ++j) {
                 constexpr unsigned ranks[]{50, 95, 99};
                 auto rank = values.begin() + (ranks[j] * count + 99) / 100 - 1;
-                std::nth_element(start, rank, values.end());
+                if (count > 32) std::nth_element(start, rank, values.end());
                 percentiles[j] = *rank;
                 start = rank;
             }

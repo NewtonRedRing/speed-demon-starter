@@ -26,4 +26,13 @@ A dense-distance experiment was slower and was removed.
 90 points and first place remain unverified.
 Latest official-input recheck: five runs, median 0.326934 s, peak RSS 136.10 MiB.
 Inputs and outputs verified against the live manifest linked from the board.
-**Publication authorized; board run ID and points pending.**
+The published candidate's actual board result is recorded below.
+
+## Confirmed board result and rejected local experiment
+
+Commit `dfdc930`: run `run-c3a3efa5980d`, 0.418953 s, 141.78 MB,
+365 formatted source lines, **57.008935 points**. Correctness passed.
+
+A six-worker variant passed the official full output hash but measured
+0.522989 s / 107.71 MiB versus twelve workers at 0.409246 s / 136.98 MiB.
+The time penalty outweighed the memory benefit, so it was removed.
