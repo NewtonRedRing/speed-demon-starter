@@ -1,5 +1,5 @@
 # Read by the board and the scoring harness.
 track = "a"
-team = "NewtonRedHat"
+team = "NewtonRedHeat"
 language = "C/C++"
 dependency_count = 0
