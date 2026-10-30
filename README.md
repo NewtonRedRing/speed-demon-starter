@@ -1,99 +1,177 @@
-# Speed Demon 2026 — NewtonRedHat
+# Speed Demon 2026 - NewtonRedHeat
 
-Private C++20 submissions for all four tracks of [Speed Demon 2026](https://speeddemon.dev). Track code in `src/main.cpp` was written for the event after kickoff, from the published specs; no pre-event practice C++ source was copied into these folders.
+Exact-output C++20 submissions for all four [Speed Demon](https://speeddemon.dev/)
+tracks. No third-party runtime dependencies. Team metadata is `NewtonRedHeat`.
 
-## Start in five steps
+**Publication authorized by the team on October 30 after local validation.
+Neither first place nor the requested 90+ points on every track has been reached
+or verified.** Local performance is not an official leaderboard measurement.
 
-1. The repository is registered for team `NewtonRedHat`, language `C/C++`.
-2. The [Speed Demon Board app](https://github.com/apps/speed-demon-board) is installed for this private repo.
-3. Push submissions to the `speed-demon` branch. Each changed track is built and checked by the board against the full public seed-1 dataset.
-4. Record measured changes in each `PERF.md` with the board run ID. Code freeze is November 2, 15:00 UTC; make the repo public by then.
+## Required repository contents
 
-One repo per team holds all your tracks. Delete the folders of the tracks you are not entering. An unchanged folder is the reference itself, so the board reports it as unchanged and does not run it.
+- Each `track-a` through `track-d` contains its pinned offline `Dockerfile`,
+  `.speed-demon.toml`, `src/main.cpp`, approach `README.md` and `PERF.md`.
+- `check.py` checks the production-style sandbox and exact output hash.
+- `scripts/fetch_data.py` downloads or verifies official public inputs.
+- `scripts/benchmark.py` measures the solution process, excluding Docker startup.
+- `tests/` contains independent solution oracles and dataset-integrity tests.
+- `LICENSE` retains the MIT licence.
 
-## What is in a track folder
+Obsolete phase reports, the stale board snapshot, duplicate templates, unused
+practice sources and generated binaries were removed. All source files inside a
+track count toward its source penalty, even when not compiled. The separate
+practice repository was not changed. Downloaded data and generated outputs are
+ignored by Git.
 
-| File | What it is |
-|---|---|
-| `Dockerfile` | Builds the folder offline, from an allowlisted image pinned by digest |
-| `.speed-demon.toml` | Track, team, language, dependency count; set `team` |
-| `PERF.md` | Your optimisation log, worth 8% of your total |
-| `README.md` | Your approach, your dependencies, your next 24 hours |
-| `src/main.cpp` | The C++20 track implementation |
+## Official public dataset
 
-## How your program runs
+The [official board](https://speeddemon.dev/board/) publishes full public seed 1:
+seven input files totaling 790,519,861 bytes, with an authoritative
+[SHA-256 manifest](https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/data/SHA256SUMS.json).
 
-- It reads its inputs from `/data`, which is read-only, and writes exactly one file to `/out`, then exits 0. The file is `summary.txt` for A, `results.txt` for B, `aggregates.txt` for C and `distances.txt` for D.
-- `TRACK` is set to `a`, `b`, `c` or `d`.
-- There is no network, at build time or at run time. Commit your dependencies to the repo (`cargo vendor`, `go mod vendor` and so on).
-- It runs as an unprivileged user on a read-only filesystem. `/tmp` is 1 GB of scratch space.
-- It gets 12 hardware threads (six P-cores, turbo off), 8 GB of memory with no swap, and 512 processes.
-- The live board has a 3x reference-time timeout; final scoring has a 10x timeout.
-- Your output must match the reference's byte for byte (sha256) on every run.
+From the repository root on Windows, with Python 3.11+ and Docker:
 
-## Check before you push
-
-`check.py` builds a track offline and runs it with the board's Docker settings, then prints the output's sha256 and a rough time. You need Docker and Python 3.
-
-```
-python3 check.py a --data data/a/full-seed1
+```powershell
+python scripts\fetch_data.py
 ```
 
-On Windows, `check.py` transfers data through temporary Docker volumes, so Docker
-Desktop does not need a shared host drive. The same network, read-only, memory,
-process and `/tmp` limits are applied to the run.
+Every existing file is hashed before reuse; missing or invalid files download
+to temporary files and replace existing inputs only after successful SHA-256
+verification. Network and checksum failures are explicit. `--force` requests a
+fresh download even if the existing hash matches.
 
-Seed 1 at `full` scale is the board's dataset. The full datasets and published input/output hashes are available from the [board](https://speeddemon.dev/board/). The separate sample release was removed.
+All seven local input hashes have been verified against the official manifest.
+A redundant forced re-download was interrupted because the connection delivered
+only about 27 KB/s; its partial files were removed. The verified complete inputs
+remain intact. The saved manifest is `data\SHA256SUMS.json`.
 
+Benchmarks use only the full datasets and hashes linked from
+[the official dataset section](https://speeddemon.dev/board/#datasets).
+Before each benchmark batch, the tool fetches the official manifest again and
+verifies every selected input hash. Expected output hashes come directly from
+that manifest, with no local-reference or hardcoded-hash fallback. Network or
+checksum failure aborts the benchmark. JSON reports record the manifest URL and
+input hashes.
+
+Inputs live in `data\<track>\full-seed1`. Historical `tiny-seed1` and `tiny-ref`
+fixtures are not used by the benchmark. Generated edge-case oracle tests are
+supplemental software tests only, never official datasets or score measurements.
+Final scoring uses a hidden holdout seed, not the public seed.
+
+## Algorithms and measured local results
+
+| Track | Approach | Previous local median | Candidate median | Candidate peak RSS |
+|---|---|---:|---:|---:|
+| [A](track-a/README.md) | Parallel streaming, exact endpoint interning, percentile selection | 0.541742 s | 0.064004 s | 40.90 MiB |
+| [B](track-b/README.md) | Token phrase automaton, compact sparse/bitmap Boolean postings | 5.749076 s | 0.834935 s | 202.97 MiB |
+| [C](track-c/README.md) | Quote-safe parallel CSV, exact shared names, atomic country membership | 3.299495 s | 0.118340 s | 14.94 MiB |
+| [D](track-d/README.md) | Buffered packed bidirectional CSR, sparse radix-queue Dijkstra | 7.028240 s | 0.356099 s | 135.66 MiB |
+
+Baseline medians use three repetitions; candidate medians use five. Every run
+matches the published output hash. These are measurements from a shared local
+Docker host, not the competition CPU. Host load materially changes timings;
+the ratios are indicative, not a controlled hardware comparison or official
+points. RSS comes from child-process resource accounting and has a
+launcher-related floor on small inputs. A and D trade extra memory for speed.
+
+Recent tuning bounds phrase results to count/sum/first-ten summaries instead of
+retaining every matching ID, reduces B's posting-header allocation and glibc
+arena fragmentation, avoids unnecessary C membership read-modify-writes, and
+replaces per-line D stdio calls with buffered newline scanning.
+
+Per-track [A](track-a/PERF.md), [B](track-b/PERF.md),
+[C](track-c/PERF.md) and [D](track-d/PERF.md) logs distinguish actual historical
+board runs from local candidates. No board run IDs or points were fabricated.
+
+## Validation
+
+```powershell
+python scripts\benchmark.py a b c d --runs 1 --build
+python -m unittest discover -s tests -v
+python scripts\benchmark.py a b c d --runs 5
+python check.py a --data data\a\full-seed1 --skip-build --expected 495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3
 ```
-git clone https://github.com/hackathon-raptors/speed-demon-2026
-python3.13 speed-demon-2026/generators/a_ingest.py --seed 1 --scale full --out data/a
+
+Repeat the last command for B/C/D using their manifest's expected output hash.
+Windows checks transfer files through temporary Docker volumes; host-drive
+sharing is unnecessary. Benchmark JSON can be saved using `--output <path>`.
+Tests require the four previously built images.
+
+Verified for this candidate:
+
+- All four tiny outputs and five full repetitions per track match exact hashes.
+- All four full-data images pass the capability-free production-style sandbox.
+- Eight solution-oracle methods pass; six dataset-integrity tests check
+  downloads, manifest validation and rejection of missing or modified inputs.
+- Solution oracles also pass AddressSanitizer and UndefinedBehaviorSanitizer.
+  Sanitizer images are separate from optimized images; ASan's own allocator does
+  not use the glibc arena setting.
+- All four sources pass GCC `-Wall -Wextra -Wpedantic -Werror`.
+
+Oracles cover percentile ranks, chunk boundaries, empty inputs, ASCII/Unicode
+token separators, overlapping/duplicate phrases, Boolean order, sparse/dense
+merges, CSV quoting/BOMs/newlines/exact names, and random directed graphs with
+zero and full-width weights, including parallel graph construction.
+They do not prove every possible holdout case or an official performance score.
+
+## 90-point target: quantified gap
+
+The [official formula](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/harness/scoring.py)
+is:
+
+```text
+K = (T_ref/T)^0.50 * min(M_ref/M,50)^0.20 * min(S_ref/S,1)^0.15 * (D_ref/D)^0.15
+points = clamp(50 * log10(K), 0, 100)
+overall = geometric mean of the best three track points
 ```
 
-No Python 3.13? Run the generator in the same image the reference uses:
+`S` is canonical-formatted source size, not raw line count. `D` is one plus the
+direct dependency count; ours is one. Source and dependencies can only penalize.
+Final judging also contributes separately; the live board shows machine points.
 
-```
-docker run --rm -v "$PWD:/w" -w /w python:3.13-slim python3 speed-demon-2026/generators/a_ingest.py --seed 1 --scale full --out data/a
-```
+90 points requires `K >= 63.095734`. Even with the maximum 50x memory bonus,
+no source penalty and no dependency penalty, the required times are at most:
 
-Run the check once on the unchanged folder. The sha256 it prints is the correct answer for that data. After every change, pass it back, so the check fails on a wrong answer:
+| Track | Optimistic time ceiling for 90 points |
+|---|---:|
+| A | 0.038493 s |
+| B | 0.067686 s |
+| C | 0.017349 s |
+| D | 0.087313 s |
 
-```
-python3 check.py a --data data/a/full-seed1 --expected <sha256>
-```
+Actual memory and source penalties make the required times lower. The candidate
+does not meet these optimistic ceilings locally. This is not a claim that the
+target is impossible, but it rules out claiming success from the current data.
 
-The final score uses a hidden holdout seed. Passing the public seed is necessary, but does not guarantee the holdout result.
+The fetched board snapshot generated `2026-10-30T18:58:52Z` had a leading overall
+of 73.194 and no 90-point track. NewtonRedHeat's historical best remained 33.267,
+rank 36 in that snapshot, from `e8f4a84`. Those are not results for this candidate.
+Official improvement remains pending a scored board run after publication.
 
-On Colima, keep the repo and the data under your home folder, or Docker cannot mount them.
+## Remaining optimization work
 
-## Your own language
+| Track | Remaining cost | Next evidence needed |
+|---|---|---|
+| A | Parsing/hash lookup, group allocations and merging | CPU profile and controlled allocation/percentile benchmarks |
+| B | Corpus dictionary lookup and posting construction/merge memory | Cache-miss profile; compare compressed or two-pass exact postings against added scan cost |
+| C | Quote-parity pass, exact-name lookup and shared cache traffic | Memory-bandwidth/atomic-contention profile on equivalent hardware |
+| D | Random CSR degree/fill writes and search expansion | Construction/search profile; test preprocessing only including its full time/memory cost |
 
-Replace the folder's contents with your code and a Dockerfile that builds it offline. A two-stage build keeps the image small. For Rust with no crates:
+Earlier dense-distance D experiments increased both runtime and memory and were
+removed. Approximate cardinalities, hash-only equality, precomputed answers and
+public-seed-specific shortcuts are not valid replacements for exact algorithms.
+Further SIMD, PGO, worker-count or layout changes require controlled measurements;
+compiler flags alone do not bridge the demonstrated 90-point gap.
 
-```
-FROM rust:1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb AS build
-WORKDIR /src
-COPY . .
-RUN cargo build --release --offline
+## Submission contract
 
-FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-COPY --from=build /src/target/release/solution /app/solution
-ENTRYPOINT ["/app/solution"]
-```
+Inputs are read-only under `/data`; write exactly one output under `/out` and
+exit zero: `summary.txt`, `results.txt`, `aggregates.txt`, `distances.txt` for A-D.
+`TRACK` identifies the track. Builds and runs have no network; pinned images
+must remain on the official allowlist. The runtime is unprivileged and read-only,
+with 12 threads on six P-cores, turbo off, 8 GB/no swap, 512 processes and 1 GB
+of `/tmp`. Output correctness is byte-for-byte SHA-256 equality.
 
-Here `solution` is the package name in your `Cargo.toml`. Every allowlisted image and its digest is in [allowlist.json](https://speeddemon.dev/allowlist.json). Each direct runtime dependency costs a little, so count them in `.speed-demon.toml`.
-
-## What the board refuses before it builds
-
-- A `FROM` that is not in the allowlist, or not pinned by digest.
-- `ADD` of a URL or a git repo, and `COPY --from` an image (an earlier stage is fine).
-- A `# syntax=` line; cache, secret or ssh mounts; `RUN --network`, `--security` or `--device`; `ONBUILD`.
-- A build over 10 minutes, or an image over 2 GB.
-
-## Scoring, briefly
-
-Faster than the reference earns points. Using less memory helps, up to a cap. Code beyond the reference's size, and every dependency, cost a little. Each track folder is built and measured on its own: your other tracks never count toward it, and code shared between tracks is copied into each folder that uses it and counts in each. A run that fails correctness, the timeout or the sandbox scores nothing. The full formula and the judging criteria are on speeddemon.dev.
-
-## Licence
-
-The reference code is copyright Hackathon Raptors CIC, under the MIT licence in `LICENSE`. Your repo has to be public under an OSI-approved licence at code freeze; keeping MIT is the simplest way.
+Keep the Board app and team registration configured. At code freeze
+(November 2, 15:00 UTC), the repository must be public under an OSI-approved
+licence. Those external settings are not established by local correctness tests.

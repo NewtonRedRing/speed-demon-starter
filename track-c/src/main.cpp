@@ -1,205 +1,315 @@
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <exception>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
-#include <iostream>
 #include <limits>
+#include <mutex>
+#include <numeric>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
-struct TransparentHash {
-    using is_transparent = void;
-    std::size_t operator()(std::string_view s) const noexcept {
-        return std::hash<std::string_view>{}(s);
+using u64 = std::uint64_t;
+using i64 = std::int64_t;
+using u32 = std::uint32_t;
+
+class Input {
+    int fd_;
+    char* data_;
+    std::size_t size_;
+public:
+    explicit Input(const char* path) {
+        const int fd = open(path, O_RDONLY);
+        if (fd < 0) throw std::runtime_error("cannot open records.csv");
+        struct stat status{};
+        if (fstat(fd, &status) || status.st_size == 0) {
+            close(fd);
+            throw std::runtime_error("cannot size records.csv");
+        }
+        size_ = static_cast<std::size_t>(status.st_size);
+        void* mapping = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (mapping == MAP_FAILED) { close(fd); throw std::runtime_error("cannot map records.csv"); }
+        fd_ = fd;
+        data_ = static_cast<char*>(mapping);
+        if (madvise(data_, size_, MADV_SEQUENTIAL)) {
+            munmap(data_, size_);
+            close(fd_);
+            throw std::runtime_error("cannot advise records.csv");
+        }
+    }
+    ~Input() { munmap(data_, size_); close(fd_); }
+    const char* begin() const { return data_; }
+    const char* end() const { return data_ + size_; }
+    void discard(const char* position, std::size_t& released) const {
+        const auto consumed = static_cast<std::size_t>(position - data_);
+        if (consumed - released < 256 * 1024) return;
+        const auto stop = consumed & ~std::size_t(4095);
+        if (madvise(data_ + released, stop - released, MADV_DONTNEED))
+            throw std::runtime_error("cannot release consumed CSV pages");
+        released = stop;
+    }
+    unsigned parity(std::size_t begin, std::size_t end) const {
+        std::vector<char> buffer(128 * 1024);
+        unsigned parity = 0;
+        while (begin < end) {
+            const auto got = pread(fd_, buffer.data(), std::min(buffer.size(), end - begin), static_cast<off_t>(begin));
+            if (got <= 0) throw std::runtime_error("cannot read CSV quote parity");
+            parity ^= static_cast<unsigned>(std::count(buffer.data(), buffer.data() + got, '"')) & 1;
+            begin += static_cast<std::size_t>(got);
+        }
+        return parity;
     }
 };
 
-struct TransparentEqual {
-    using is_transparent = void;
-    bool operator()(std::string_view a, std::string_view b) const noexcept {
-        return a == b;
-    }
-};
+template<class Work>
+void parallel(unsigned workers, Work work) {
+    std::vector<std::exception_ptr> errors(workers);
+    std::vector<std::jthread> threads;
+    for (unsigned w = 0; w < workers; ++w)
+        threads.emplace_back([&, w] {
+            try { work(w); } catch (...) { errors[w] = std::current_exception(); }
+        });
+    threads.clear();
+    for (auto error : errors) if (error) std::rethrow_exception(error);
+}
 
 struct Aggregate {
-    std::uint64_t count = 0;
-    std::uint64_t id_sum = 0;
-    std::int64_t amount_sum = 0;
-    std::int64_t amount_min = std::numeric_limits<std::int64_t>::max();
-    std::int64_t amount_max = std::numeric_limits<std::int64_t>::min();
-    std::uint64_t name_bytes = 0;
-    std::uint64_t note_bytes = 0;
+    u64 count = 0, id_sum = 0, name_bytes = 0, note_bytes = 0, distinct = 0;
+    i64 sum = 0, min = INT64_MAX, max = INT64_MIN;
 };
 
-std::uint64_t parse_unsigned(std::string_view text) {
-    std::uint64_t value = 0;
-    for (char c : text) value = value * 10 + static_cast<unsigned>(c - '0');
+class Stripe {
+    struct Entry {
+        u64 hash;
+        std::string name;
+        std::array<std::atomic<u64>, 4> countries{};
+        Entry* next;
+        Entry(u64 hash, std::string_view name, Entry* next) : hash(hash), name(name), next(next) {}
+    };
+    std::array<std::atomic<Entry*>, 4096> buckets_{};
+    std::mutex mutex_;
+    static Entry* find(Entry* entry, u64 hash, std::string_view name) {
+        while (entry && !(entry->hash == hash && entry->name == name)) entry = entry->next;
+        return entry;
+    }
+    static bool mark(Entry* entry, unsigned country) {
+        const u64 bit = u64{1} << (country % 64);
+        auto& membership = entry->countries[country / 64];
+        if (membership.load(std::memory_order_relaxed) & bit) return false;
+        return !(membership.fetch_or(bit, std::memory_order_relaxed) & bit);
+    }
+public:
+    ~Stripe() {
+        for (auto& bucket : buckets_) {
+            Entry* entry = bucket.load(std::memory_order_relaxed);
+            while (entry) {
+                Entry* next = entry->next;
+                delete entry;
+                entry = next;
+            }
+        }
+    }
+    bool insert(std::string_view name, unsigned country, u64 hash) {
+        auto& bucket = buckets_[(hash >> 6) & (buckets_.size() - 1)];
+        if (Entry* entry = find(bucket.load(std::memory_order_acquire), hash, name))
+            return mark(entry, country);
+        std::lock_guard lock(mutex_);
+        Entry* head = bucket.load(std::memory_order_relaxed);
+        if (Entry* entry = find(head, hash, name)) return mark(entry, country);
+        Entry* entry = new Entry(hash, name, head);
+        mark(entry, country);
+        bucket.store(entry, std::memory_order_release);
+        return true;
+    }
+};
+
+void skip_bom(const char*& p, const char* end) {
+    if (end - p >= 3 && std::memcmp(p, "\xef\xbb\xbf", 3) == 0) p += 3;
+}
+
+u64 number(const char*& p, const char* end) {
+    u64 value = 0;
+    while (p < end && *p >= '0' && *p <= '9')
+        value = value * 10 + static_cast<unsigned>(*p++ - '0');
     return value;
 }
 
-std::int64_t parse_cents(std::string_view text) {
-    bool negative = !text.empty() && text.front() == '-';
-    if (negative) text.remove_prefix(1);
-    const std::size_t dot = text.find('.');
-    const std::uint64_t whole = parse_unsigned(text.substr(0, dot));
-    const std::uint64_t fraction = parse_unsigned(text.substr(dot + 1));
-    const std::int64_t cents = static_cast<std::int64_t>(whole * 100 + fraction);
-    return negative ? -cents : cents;
-}
-
-std::string format_cents(std::int64_t value) {
-    const bool negative = value < 0;
-    const std::uint64_t magnitude = negative ? static_cast<std::uint64_t>(-value)
-                                             : static_cast<std::uint64_t>(value);
-    std::string result = negative ? "-" : "";
-    result += std::to_string(magnitude / 100);
-    result += '.';
-    if (magnitude % 100 < 10) result += '0';
-    result += std::to_string(magnitude % 100);
-    return result;
-}
-
-bool starts_bom(const std::string& data, std::size_t pos) {
-    return pos + 3 <= data.size() &&
-           static_cast<unsigned char>(data[pos]) == 0xef &&
-           static_cast<unsigned char>(data[pos + 1]) == 0xbb &&
-           static_cast<unsigned char>(data[pos + 2]) == 0xbf;
-}
-
-std::size_t parse_field(const std::string& data, std::size_t& pos, std::string* value) {
-    if (value) value->clear();
-    std::size_t decoded_length = 0;
-    if (pos < data.size() && data[pos] == '"') {
-        ++pos;
-        while (pos < data.size()) {
-            const char c = data[pos++];
-            if (c == '"') {
-                if (pos < data.size() && data[pos] == '"') {
-                    if (value) value->push_back('"');
-                    ++decoded_length;
-                    ++pos;
-                } else {
-                    break;
-                }
-            } else {
-                if (value) value->push_back(c);
-                ++decoded_length;
+std::string_view field(const char*& p, const char* end, std::string& decoded, bool keep) {
+    const char* start = p;
+    if (p == end) throw std::runtime_error("truncated CSV field");
+    if (*p != '"') {
+        while (p < end && *p != ',') ++p;
+        const std::string_view result(start, p - start);
+        if (p == end) throw std::runtime_error("missing CSV comma");
+        ++p;
+        return result;
+    }
+    start = ++p;
+    std::size_t escapes = 0;
+    decoded.clear();
+    for (;;) {
+        const char* quote = static_cast<const char*>(std::memchr(p, '"', end - p));
+        if (!quote || quote + 1 == end) throw std::runtime_error("unterminated CSV field");
+        if (quote[1] != '"') {
+            if (quote[1] != ',') throw std::runtime_error("missing CSV comma after quote");
+            p = quote + 2;
+            if (!escapes) return {start, static_cast<std::size_t>(quote - start)};
+            if (keep) {
+                decoded.append(start, quote);
+                return decoded;
             }
+            return {start, static_cast<std::size_t>(quote - start) - escapes};
         }
-    } else {
-        while (pos < data.size() && data[pos] != ',' && data[pos] != '\r' && data[pos] != '\n') {
-            if (value) value->push_back(data[pos]);
-            ++decoded_length;
-            ++pos;
+        if (keep) {
+            decoded.append(start, quote + 1);
+            start = quote + 2;
         }
+        ++escapes;
+        p = quote + 2;
     }
-
-    if (pos < data.size() && data[pos] == ',') {
-        ++pos;
-    } else if (pos < data.size() && data[pos] == '\r') {
-        pos += pos + 1 < data.size() && data[pos + 1] == '\n' ? 2 : 1;
-    } else if (pos < data.size() && data[pos] == '\n') {
-        ++pos;
-    }
-    return decoded_length;
 }
 
-bool byte_less(const std::string& a, const std::string& b) {
-    return std::lexicographical_compare(
-        a.begin(), a.end(), b.begin(), b.end(),
-        [](unsigned char x, unsigned char y) { return x < y; });
+std::string money(i64 value) {
+    const bool negative = value < 0;
+    const u64 magnitude = negative ? u64{0} - static_cast<u64>(value) : static_cast<u64>(value);
+    return (negative ? "-" : "") + std::to_string(magnitude / 100) + "." +
+           (magnitude % 100 < 10 ? "0" : "") + std::to_string(magnitude % 100);
+}
+
+int solve() {
+    std::ifstream lookup("/data/regions.csv");
+    std::string line;
+    if (!std::getline(lookup, line) || line != "region_id,country")
+        throw std::runtime_error("invalid regions.csv header");
+    std::vector<std::string> countries{"_UNMATCHED"};
+    std::unordered_map<std::string, unsigned> ids;
+    std::vector<std::uint8_t> regions;
+    while (std::getline(lookup, line)) {
+        const char* p = line.data();
+        const char* end = p + line.size();
+        const auto region = number(p, end);
+        if (p == end || *p++ != ',' || end - p != 3 || region > 9999999)
+            throw std::runtime_error("invalid regions.csv row");
+        auto [it, inserted] = ids.try_emplace(std::string(p, end), static_cast<unsigned>(countries.size()));
+        if (inserted) countries.emplace_back(p, end);
+        if (countries.size() > 256) throw std::runtime_error("more than 255 countries");
+        if (region >= regions.size()) regions.resize(region + 1);
+        regions[region] = static_cast<std::uint8_t>(it->second);
+    }
+    if (lookup.bad()) throw std::runtime_error("cannot read regions.csv");
+    Input input("/data/records.csv");
+    const char* p = input.begin();
+    const char* end = input.end();
+    skip_bom(p, end);
+    constexpr std::string_view header = "id,name,note,region_id,amount";
+    if (end - p < static_cast<std::ptrdiff_t>(header.size()) || std::memcmp(p, header.data(), header.size()))
+        throw std::runtime_error("invalid records.csv header");
+    p += header.size();
+    if (p < end && *p == '\r') ++p;
+    if (p == end || *p++ != '\n') throw std::runtime_error("invalid CSV header terminator");
+    const auto size = static_cast<std::size_t>(end - input.begin());
+    const unsigned workers = size < 1024 * 1024 ? 1 : 12;
+    std::vector<unsigned> parity(workers);
+    if (workers > 1)
+        parallel(workers, [&](unsigned w) {
+            parity[w] = input.parity(size * w / workers, size * (w + 1) / workers);
+        });
+    std::vector<const char*> boundaries(workers + 1);
+    boundaries[0] = p;
+    boundaries[workers] = end;
+    bool quoted = false;
+    for (unsigned w = 1; w < workers; ++w) {
+        quoted ^= parity[w - 1] != 0;
+        bool inside = quoted;
+        const char* b = input.begin() + size * w / workers;
+        while (b < end) {
+            const char c = *b++;
+            if (c == '"') inside = !inside;
+            if (c == '\n' && !inside) break;
+        }
+        boundaries[w] = b;
+    }
+    std::array<Stripe, 64> stripes;
+    std::vector<std::vector<Aggregate>> locals(workers, std::vector<Aggregate>(countries.size()));
+    parallel(workers, [&](unsigned w) {
+      const char* p = boundaries[w];
+      const char* end = boundaries[w + 1];
+      auto released = static_cast<std::size_t>(p - input.begin()) & ~std::size_t(4095);
+      std::string decoded_name, unused;
+      while (p < end) {
+        skip_bom(p, end);
+        const u64 id = number(p, end);
+        if (p == end || *p++ != ',') throw std::runtime_error("invalid record id");
+        const auto name = field(p, end, decoded_name, true);
+        const auto note_bytes = field(p, end, unused, false).size();
+        const u64 region = number(p, end);
+        if (p == end || *p++ != ',') throw std::runtime_error("invalid record region");
+        const bool negative = p < end && *p == '-';
+        if (negative) ++p;
+        const auto whole = number(p, end);
+        if (end - p < 3 || *p++ != '.') throw std::runtime_error("invalid record amount");
+        const i64 cents = static_cast<i64>(whole * 100 + (p[0] - '0') * 10 + p[1] - '0');
+        const i64 amount = negative ? -cents : cents;
+        p += 2;
+        if (p < end && *p == '\r') ++p;
+        if (p < end && *p++ != '\n') throw std::runtime_error("invalid CSV terminator");
+        const unsigned country = region < regions.size() ? regions[region] : 0;
+        Aggregate& a = locals[w][country];
+        ++a.count;
+        a.id_sum += id;
+        a.sum += amount;
+        a.min = std::min(a.min, amount);
+        a.max = std::max(a.max, amount);
+        a.name_bytes += name.size();
+        a.note_bytes += note_bytes;
+        const u64 hash = std::hash<std::string_view>{}(name);
+        a.distinct += stripes[hash & 63].insert(name, country, hash);
+        input.discard(p, released);
+      }
+    });
+    std::vector<Aggregate> aggregates(countries.size());
+    for (const auto& local : locals)
+        for (unsigned i = 0; i < countries.size(); ++i) {
+            auto& target = aggregates[i];
+            const auto& source = local[i];
+            target.count += source.count;
+            target.id_sum += source.id_sum;
+            target.name_bytes += source.name_bytes;
+            target.note_bytes += source.note_bytes;
+            target.distinct += source.distinct;
+            target.sum += source.sum;
+            target.min = std::min(target.min, source.min);
+            target.max = std::max(target.max, source.max);
+        }
+    std::vector<unsigned> order(countries.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](unsigned a, unsigned b) { return countries[a] < countries[b]; });
+    std::ofstream output("/out/aggregates.txt", std::ios::binary);
+    if (!output) throw std::runtime_error("cannot open aggregates.txt");
+    for (unsigned i : order) {
+        const Aggregate& a = aggregates[i];
+        if (!a.count) continue;
+        output << countries[i] << ' ' << a.count << ' ' << a.id_sum << ' ' << money(a.sum) << ' '
+               << money(a.min) << ' ' << money(a.max) << ' ' << a.distinct << ' '
+               << a.name_bytes << ' ' << a.note_bytes << '\n';
+    }
+    output.close();
+    if (!output) throw std::runtime_error("cannot write aggregates.txt");
+    return 0;
 }
 
 int main() {
-    std::ios::sync_with_stdio(false);
-    
-    std::ifstream regions_file("/data/regions.csv", std::ios::binary);
-    if (!regions_file) return 1;
-    regions_file.rdbuf()->pubsetbuf(nullptr, 256 * 1024);
-    std::vector<std::string> countries{"_UNMATCHED"};
-    std::unordered_map<std::string, std::uint16_t, TransparentHash, TransparentEqual> country_ids;
-    country_ids.reserve(256);
-    std::vector<std::int16_t> region_country(1000000, -1);
-    std::string line;
-    if (!std::getline(regions_file, line) || line != "region_id,country") return 1;
-    while (std::getline(regions_file, line)) {
-        const std::size_t comma = line.find(',');
-        if (comma == std::string::npos) return 1;
-        const auto region = static_cast<std::uint32_t>(parse_unsigned(std::string_view(line).substr(0, comma)));
-        const std::string_view code(line.data() + comma + 1, line.size() - comma - 1);
-        auto it = country_ids.find(code);
-        if (it == country_ids.end()) {
-            const auto id = static_cast<std::uint16_t>(countries.size());
-            countries.emplace_back(code);
-            country_ids.emplace(countries.back(), id);
-            it = country_ids.find(code);
-        }
-        if (region < region_country.size()) region_country[region] = static_cast<std::int16_t>(it->second);
-    }
-    if (regions_file.bad()) return 1;
-
-    std::ifstream records_file("/data/records.csv", std::ios::binary | std::ios::ate);
-    if (!records_file) return 1;
-    const std::streamsize size = records_file.tellg();
-    if (size < 0) return 1;
-    std::string data(static_cast<std::size_t>(size), '\0');
-    records_file.seekg(0);
-    if (!records_file.read(data.data(), size)) return 1;
-
-    std::size_t pos = 0;
-    if (starts_bom(data, pos)) pos += 3;
-    for (int field = 0; field < 5; ++field) parse_field(data, pos, nullptr);
-
-    std::vector<Aggregate> aggregates(countries.size());
-    using NameSet = std::unordered_set<std::string, TransparentHash, TransparentEqual>;
-    std::vector<NameSet> names(countries.size());
-    std::string value, name;
-    while (pos < data.size()) {
-        if (starts_bom(data, pos)) pos += 3;
-        if (pos >= data.size()) break;
-        parse_field(data, pos, &value);
-        const std::uint64_t record_id = parse_unsigned(value);
-        parse_field(data, pos, &name);
-        const std::uint64_t note_length = parse_field(data, pos, nullptr);
-        parse_field(data, pos, &value);
-        const std::uint64_t region_id = parse_unsigned(value);
-        parse_field(data, pos, &value);
-        const std::int64_t amount = parse_cents(value);
-
-        std::size_t country = 0;
-        if (region_id < region_country.size() && region_country[region_id] >= 0)
-            country = static_cast<std::size_t>(region_country[region_id]);
-        Aggregate& aggregate = aggregates[country];
-        ++aggregate.count;
-        aggregate.id_sum += record_id;
-        aggregate.amount_sum += amount;
-        aggregate.amount_min = std::min(aggregate.amount_min, amount);
-        aggregate.amount_max = std::max(aggregate.amount_max, amount);
-        aggregate.name_bytes += name.size();
-        aggregate.note_bytes += note_length;
-        NameSet& set = names[country];
-        const std::string_view name_view(name);
-        if (set.find(name_view) == set.end()) set.emplace(name);
-    }
-
-    std::vector<std::size_t> order(countries.size());
-    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
-    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-        return byte_less(countries[a], countries[b]);
-    });
-
-    std::ofstream output("/out/aggregates.txt", std::ios::binary);
-    if (!output) return 1;
-    output.rdbuf()->pubsetbuf(nullptr, 256 * 1024);
-    for (std::size_t i : order) {
-        const Aggregate& a = aggregates[i];
-        if (a.count == 0) continue;
-        output << countries[i] << ' ' << a.count << ' ' << a.id_sum << ' '
-               << format_cents(a.amount_sum) << ' ' << format_cents(a.amount_min) << ' '
-               << format_cents(a.amount_max) << ' ' << names[i].size() << ' '
-               << a.name_bytes << ' ' << a.note_bytes << '\n';
-    }
-    return output ? 0 : 1;
+    try { return solve(); }
+    catch (const std::exception& error) { std::fprintf(stderr, "track-c: %s\n", error.what()); return 1; }
 }

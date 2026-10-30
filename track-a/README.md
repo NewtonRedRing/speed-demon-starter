@@ -4,7 +4,14 @@ The task, the input files and the exact output format are in the [spec](https://
 
 ## Approach
 
-The program parses each log row once, groups latencies by UTC hour and exact endpoint bytes, and sorts each group's latency values for nearest-rank percentiles. It writes groups in chronological-hour and bytewise-endpoint order. Status codes from 500 through 599 count as errors.
+Twelve aligned byte ranges stream through bounded buffers (one worker for small
+inputs). Small initial latency allocations avoid reserving oversized vectors
+for sparse groups. Each worker interns exact endpoint strings in a fingerprinted table;
+hash matches always require full string equality. Thread-local groups retain
+uint32 latencies and error counts. After merging, three ordered `nth_element`
+selections compute exact nearest-rank p50/p95/p99 without fully sorting.
+Per-hour output is formatted in parallel and written in deterministic
+chronological-hour and bytewise-endpoint order. Status codes 500–599 are errors.
 
 ## Dependencies
 
@@ -12,4 +19,6 @@ None.
 
 ## With another 24 hours
 
-Measure the board run, then profile parsing and per-group sorting before making targeted changes.
+Profile streaming and merge allocations on the scoring CPU. Current local full
+seed-1 median: 0.064004 s, 40.90 MiB peak RSS; no official run ID is available
+for this candidate. See [PERF.md](PERF.md) for validation and limitations.

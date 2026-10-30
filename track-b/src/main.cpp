@@ -1,232 +1,443 @@
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <bit>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
 #include <fstream>
-#include <iostream>
+#include <memory>
+#include <malloc.h>
+#include <queue>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
+#include <sys/stat.h>
 
-struct TransparentHash {
-    using is_transparent = void;
-    std::size_t operator()(std::string_view s) const noexcept {
-        return std::hash<std::string_view>{}(s);
+using u32 = std::uint32_t;
+using u64 = std::uint64_t;
+constexpr u32 missing = UINT32_MAX;
+
+u64 mix(u64 value) {
+    value ^= value >> 30;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27;
+    value *= 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+class Transitions {
+    struct Slot { u64 key = UINT64_MAX; u32 value = 0; };
+    std::vector<Slot> slots_ = std::vector<Slot>(1024);
+    std::size_t count_ = 0;
+public:
+    u32 find(u32 state, u32 word) const {
+        const u64 key = (u64{state} << 32) | word;
+        auto slot = mix(key) & (slots_.size() - 1);
+        while (slots_[slot].key != UINT64_MAX) {
+            if (slots_[slot].key == key) return slots_[slot].value;
+            slot = (slot + 1) & (slots_.size() - 1);
+        }
+        return missing;
     }
-};
-
-struct TransparentEqual {
-    using is_transparent = void;
-    bool operator()(std::string_view a, std::string_view b) const noexcept {
-        return a == b;
+    void insert(u32 state, u32 word, u32 value) {
+        if ((count_ + 1) * 2 > slots_.size()) {
+            auto old = std::move(slots_);
+            slots_.resize(old.size() * 2);
+            count_ = 0;
+            for (const Slot& entry : old)
+                if (entry.key != UINT64_MAX)
+                    insert(static_cast<u32>(entry.key >> 32), static_cast<u32>(entry.key), entry.value);
+        }
+        const u64 key = (u64{state} << 32) | word;
+        auto slot = mix(key) & (slots_.size() - 1);
+        while (slots_[slot].key != UINT64_MAX) slot = (slot + 1) & (slots_.size() - 1);
+        slots_[slot] = {key, value};
+        ++count_;
     }
-};
-
-struct Occurrence {
-    std::uint32_t document;
-    std::uint16_t position;
-};
-
-struct TermIndex {
-    std::vector<Occurrence> occurrences;
-    std::vector<std::uint32_t> documents;
 };
 
 struct Query {
-    bool phrase = false;
-    std::vector<std::uint32_t> terms;
-    std::vector<char> operators;
+    u32 phrase = missing;
+    std::vector<u32> words;
+    std::vector<char> ops;
 };
-
-using TermMap = std::unordered_map<std::string, std::uint32_t, TransparentHash, TransparentEqual>;
-
-std::uint32_t get_term(std::string_view word, TermMap& ids, std::vector<TermIndex>& terms) {
-    auto it = ids.find(word);
-    if (it != ids.end()) return it->second;
-    const auto id = static_cast<std::uint32_t>(terms.size());
-    ids.emplace(std::string(word), id);
-    terms.emplace_back();
-    return id;
-}
-
-std::vector<std::string_view> split(std::string_view text) {
-    std::vector<std::string_view> result;
-    std::size_t start = 0;
-    while (start < text.size()) {
-        const std::size_t end = text.find(' ', start);
-        result.push_back(text.substr(start, end == std::string_view::npos ? text.size() - start : end - start));
-        if (end == std::string_view::npos) break;
-        start = end + 1;
+struct Matches {
+    u64 sum = 0;
+    u32 count = 0, last = missing;
+    std::array<u32, 10> first{};
+    void add(u32 document) {
+        if (last == document) return;
+        if (count < first.size()) first[count] = document;
+        ++count;
+        sum += document;
+        last = document;
     }
-    return result;
-}
-
-void add_document_token(std::string& token, std::uint32_t document, std::uint16_t& position,
-                       const TermMap& ids, std::vector<TermIndex>& terms) {
-    if (token.empty()) return;
-    auto it = ids.find(token);
-    if (it != ids.end()) terms[it->second].occurrences.push_back({document, position});
-    ++position;
-    token.clear();
-}
-
-void combine(const std::vector<std::uint32_t>& left, const std::vector<std::uint32_t>& right,
-             char operation, std::vector<std::uint32_t>& output) {
-    std::size_t i = 0, j = 0;
-    output.clear();
-    if (operation == 'O') output.reserve(left.size() + right.size());
-    else output.reserve(std::min(left.size(), right.size()));
-    while (i < left.size() && j < right.size()) {
-        if (left[i] < right[j]) {
-            if (operation != 'A') output.push_back(left[i]);
-            ++i;
-        } else if (right[j] < left[i]) {
-            if (operation == 'O') output.push_back(right[j]);
-            ++j;
+    void merge(const Matches& source) {
+        for (u32 i = 0; i < std::min<u32>(source.count, 10) && count + i < first.size(); ++i)
+            first[count + i] = source.first[i];
+        count += source.count;
+        sum += source.sum;
+    }
+    std::string format() const {
+        std::string result = std::to_string(count) + ' ' + std::to_string(sum);
+        for (u32 i = 0; i < std::min<u32>(count, 10); ++i) result += ' ' + std::to_string(first[i]);
+        return result + '\n';
+    }
+};
+struct Posting {
+    std::vector<u32> ids;
+    std::unique_ptr<std::vector<u64>> bits;
+    u32 base = 0;
+    void promote() {
+        base = ids.front() & ~u32{63};
+        bits = std::make_unique<std::vector<u64>>((ids.back() - base) / 64 + 1);
+        for (u32 id : ids) (*bits)[(id - base) / 64] |= u64{1} << (id % 64);
+        std::vector<u32>().swap(ids);
+    }
+    void add(u32 id) {
+        if (bits) {
+            const auto word = (id - base) / 64;
+            if (word >= bits->size()) bits->resize(word + 1);
+            (*bits)[word] |= u64{1} << (id % 64);
         } else {
-            if (operation != 'N') output.push_back(left[i]);
-            ++i;
-            ++j;
+            ids.push_back(id);
+            if (ids.size() >= 256 && id - ids.front() < ids.size() * 32) promote();
         }
     }
-    if (operation == 'O') {
-        output.insert(output.end(), left.begin() + i, left.end());
-        output.insert(output.end(), right.begin() + j, right.end());
-    } else if (operation == 'N') {
-        output.insert(output.end(), left.begin() + i, left.end());
+    void merge(Posting& source) {
+        if (ids.empty() && !bits) { *this = std::move(source); return; }
+        if (!source.bits) {
+            for (u32 id : source.ids) add(id);
+        } else {
+            if (!bits) promote();
+            const auto offset = (source.base - base) / 64;
+            if (bits->size() < offset + source.bits->size()) bits->resize(offset + source.bits->size());
+            for (std::size_t i = 0; i < source.bits->size(); ++i) (*bits)[offset + i] |= (*source.bits)[i];
+        }
     }
-}
-
-bool has_occurrence(const TermIndex& term, std::uint32_t document, std::uint16_t position) {
-    const Occurrence key{document, position};
-    auto it = std::lower_bound(term.occurrences.begin(), term.occurrences.end(), key,
-        [](const Occurrence& a, const Occurrence& b) {
-            return a.document < b.document ||
-                   (a.document == b.document && a.position < b.position);
-        });
-    return it != term.occurrences.end() && it->document == document && it->position == position;
-}
-
-std::vector<std::uint32_t> phrase_matches(const Query& query, const std::vector<TermIndex>& terms) {
-    std::size_t anchor = 0;
-    for (std::size_t i = 1; i < query.terms.size(); ++i) {
-        if (terms[query.terms[i]].occurrences.size() < terms[query.terms[anchor]].occurrences.size())
-            anchor = i;
+};
+struct Term {
+    std::string text;
+    u32 boolean = missing;
+    Posting documents;
+};
+class Automaton {
+    struct Node { u32 fail = 0, output = 0, edge = missing, query = missing; };
+    struct Edge { u32 word, to, next; };
+    std::vector<Node> nodes_{1};
+    std::vector<Edge> edges_;
+    std::vector<u32> next_query_;
+    std::vector<u32> root_;
+    Transitions transitions_;
+    u32 transition(u32 state, u32 word) const {
+        return state ? transitions_.find(state, word) : root_[word];
     }
-    std::vector<std::uint32_t> matches;
-    const auto& occurrences = terms[query.terms[anchor]].occurrences;
-    for (const Occurrence& occurrence : occurrences) {
-        if (occurrence.position < anchor) continue;
-        const auto start = static_cast<std::uint16_t>(occurrence.position - anchor);
-        bool match = true;
-        for (std::size_t i = 0; i < query.terms.size(); ++i) {
-            if (!has_occurrence(terms[query.terms[i]], occurrence.document,
-                                static_cast<std::uint16_t>(start + i))) {
-                match = false;
-                break;
+public:
+    Automaton(const std::vector<Query>& queries, std::size_t terms, u32 phrases)
+        : next_query_(phrases, missing), root_(terms, missing) {
+        for (const Query& query : queries) {
+            if (query.phrase == missing) continue;
+            const u32 q = query.phrase;
+            u32 state = 0;
+            for (u32 word : query.words) {
+                u32 to = transition(state, word);
+                if (to == missing) {
+                    to = static_cast<u32>(nodes_.size());
+                    nodes_.emplace_back();
+                    if (state) transitions_.insert(state, word, to);
+                    else root_[word] = to;
+                    edges_.push_back({word, to, nodes_[state].edge});
+                    nodes_[state].edge = static_cast<u32>(edges_.size() - 1);
+                }
+                state = to;
+            }
+            next_query_[q] = nodes_[state].query;
+            nodes_[state].query = q;
+        }
+        std::queue<u32> queue;
+        for (u32 e = nodes_[0].edge; e != missing; e = edges_[e].next) queue.push(edges_[e].to);
+        while (!queue.empty()) {
+            const u32 state = queue.front();
+            queue.pop();
+            for (u32 e = nodes_[state].edge; e != missing; e = edges_[e].next) {
+                const Edge& edge = edges_[e];
+                u32 fail = nodes_[state].fail;
+                u32 to = transition(fail, edge.word);
+                while (fail && to == missing) {
+                    fail = nodes_[fail].fail;
+                    to = transition(fail, edge.word);
+                }
+                Node& node = nodes_[edge.to];
+                node.fail = to == missing ? 0 : to;
+                node.output = nodes_[node.fail].query != missing ? node.fail : nodes_[node.fail].output;
+                queue.push(edge.to);
             }
         }
-        if (match && (matches.empty() || matches.back() != occurrence.document))
-            matches.push_back(occurrence.document);
+        std::vector<Edge>().swap(edges_);
     }
-    return matches;
+    u32 advance(u32 state, u32 word, u32 document, std::vector<Matches>& matches) const {
+        if (word == missing) return 0;
+        u32 to = transition(state, word);
+        while (state && to == missing) {
+            state = nodes_[state].fail;
+            to = transition(state, word);
+        }
+        state = to == missing ? 0 : to;
+        for (u32 node = nodes_[state].query != missing ? state : nodes_[state].output; node; node = nodes_[node].output) {
+            for (u32 q = nodes_[node].query; q != missing; q = next_query_[q]) {
+                matches[q].add(document);
+            }
+        }
+        return state;
+    }
+};
+
+class Words {
+    const std::vector<Term>& terms_;
+    std::vector<u64> slots_;
+public:
+    explicit Words(const std::vector<Term>& terms) : terms_(terms) {
+        std::size_t capacity = 1;
+        while (capacity < terms.size() * 2 + 1) capacity *= 2;
+        slots_.resize(capacity);
+        for (u32 i = 0; i < terms.size(); ++i) {
+            const u64 hash = std::hash<std::string_view>{}(terms[i].text);
+            auto slot = hash & (capacity - 1);
+            while (slots_[slot]) slot = (slot + 1) & (capacity - 1);
+            slots_[slot] = (hash & 0xffffffff00000000ULL) | (u64{i} + 1);
+        }
+    }
+    u32 find(std::string_view text) const {
+        const u64 hash = std::hash<std::string_view>{}(text);
+        auto slot = hash & (slots_.size() - 1);
+        while (slots_[slot]) {
+            const u32 id = static_cast<u32>(slots_[slot]) - 1;
+            if ((slots_[slot] >> 32) == (hash >> 32) && terms_[id].text == text) return id;
+            slot = (slot + 1) & (slots_.size() - 1);
+        }
+        return missing;
+    }
+};
+
+template<class Work>
+void parallel(unsigned workers, Work work) {
+    std::vector<std::exception_ptr> errors(workers);
+    std::vector<std::jthread> threads;
+    for (unsigned w = 0; w < workers; ++w)
+        threads.emplace_back([&, w] {
+            try { work(w); } catch (...) { errors[w] = std::current_exception(); }
+        });
+    threads.clear();
+    for (auto error : errors) if (error) std::rethrow_exception(error);
 }
 
-void write_result(std::ostream& output, const std::vector<std::uint32_t>& ids) {
-    std::uint64_t sum = 0;
-    for (std::uint32_t id : ids) sum += id;
-    output << ids.size() << ' ' << sum;
-    for (std::size_t i = 0; i < ids.size() && i < 10; ++i) output << ' ' << ids[i];
-    output << '\n';
+struct Local {
+    std::vector<Posting> documents;
+    std::vector<Matches> matches;
+    u32 extent = 0;
+};
+
+void scan(Local& local, std::size_t begin, std::size_t end, const Words& words,
+          const std::vector<Term>& terms, const Automaton& automaton, std::size_t queries, u32 booleans) {
+    local.documents.resize(booleans);
+    local.matches.resize(queries);
+    std::vector<u32> last(booleans, missing);
+    std::vector<char> buffer(256 * 1024);
+    auto close_file = [](FILE* file) { if (file) std::fclose(file); };
+    std::unique_ptr<FILE, decltype(close_file)> file(std::fopen("/data/docs.txt", "rb"), close_file);
+    if (!file) throw std::runtime_error("cannot open docs.txt");
+    std::setvbuf(file.get(), buffer.data(), _IOFBF, buffer.size());
+    char* allocation = nullptr;
+    std::size_t capacity = 0, position = begin;
+    std::unique_ptr<char, decltype(&std::free)> line(nullptr, std::free);
+    if (begin) {
+        if (fseeko(file.get(), static_cast<off_t>(begin - 1), SEEK_SET))
+            throw std::runtime_error("cannot seek docs.txt");
+        if (std::fgetc(file.get()) != '\n') {
+            const auto length = getline(&allocation, &capacity, file.get());
+            line.reset(allocation);
+            if (length < 0) return;
+            position += static_cast<std::size_t>(length);
+        }
+    }
+    while (position < end) {
+        allocation = line.release();
+        const auto length = getline(&allocation, &capacity, file.get());
+        line.reset(allocation);
+        if (length < 0) break;
+        position += static_cast<std::size_t>(length);
+        const char* p = line.get();
+        u32 document = 0;
+        while (*p >= '0' && *p <= '9') document = document * 10 + static_cast<unsigned>(*p++ - '0');
+        if (*p++ != '\t') throw std::runtime_error("invalid document id");
+        local.extent = document + 1;
+        const char* stop = line.get() + length;
+        u32 state = 0;
+        while (p < stop) {
+            char token[32];
+            std::size_t size = 0;
+            while (p < stop) {
+                const unsigned c = static_cast<unsigned char>(*p) | 32;
+                if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) break;
+                if (size < sizeof(token)) token[size] = static_cast<char>(c);
+                ++size;
+                ++p;
+            }
+            if (size) {
+                const u32 word = size <= sizeof(token) ? words.find({token, size}) : missing;
+                if (word != missing && terms[word].boolean != missing) {
+                    const u32 index = terms[word].boolean;
+                    if (last[index] != document) {
+                        local.documents[index].add(document);
+                        last[index] = document;
+                    }
+                }
+                state = automaton.advance(state, word, document, local.matches);
+            }
+            if (p < stop) ++p;
+        }
+    }
+    if (std::ferror(file.get())) throw std::runtime_error("cannot read docs.txt");
+}
+
+std::string format_bits(const std::vector<u64>& bits) {
+    u64 sum = 0, count = 0;
+    std::array<u32, 10> first{};
+    for (std::size_t w = 0; w < bits.size(); ++w) {
+        u64 word = bits[w];
+        while (word) {
+            const u32 id = static_cast<u32>(w * 64 + std::countr_zero(word));
+            if (count < first.size()) first[count] = id;
+            ++count;
+            sum += id;
+            word &= word - 1;
+        }
+    }
+    std::string result = std::to_string(count) + ' ' + std::to_string(sum);
+    for (std::size_t i = 0; i < std::min<u64>(10, count); ++i) result += ' ' + std::to_string(first[i]);
+    return result + '\n';
+}
+
+void apply(std::vector<u64>& bits, const Posting& posting, char op, std::vector<u64>& scratch) {
+    if (!posting.bits) {
+        if (op == 'A') {
+            std::fill(scratch.begin(), scratch.end(), 0);
+            for (u32 id : posting.ids) scratch[id / 64] |= bits[id / 64] & (u64{1} << (id % 64));
+            bits.swap(scratch);
+        } else for (u32 id : posting.ids) {
+            if (op == 'O') bits[id / 64] |= u64{1} << (id % 64);
+            else bits[id / 64] &= ~(u64{1} << (id % 64));
+        }
+    } else {
+        const auto start = posting.base / 64;
+        const auto stop = start + posting.bits->size();
+        if (op == 'A') {
+            std::fill(bits.begin(), bits.begin() + start, 0);
+            std::fill(bits.begin() + stop, bits.end(), 0);
+        }
+        for (std::size_t i = start; i < stop; ++i) {
+            if (op == 'A') bits[i] &= (*posting.bits)[i - start];
+            else if (op == 'O') bits[i] |= (*posting.bits)[i - start];
+            else bits[i] &= ~(*posting.bits)[i - start];
+        }
+    }
+}
+
+int solve() {
+#if !defined(__SANITIZE_ADDRESS__)
+    if (!mallopt(M_ARENA_MAX, 4)) throw std::runtime_error("cannot set allocator arena limit");
+#endif
+    std::vector<Query> queries;
+    std::vector<Term> terms;
+    std::unordered_map<std::string, u32> ids;
+    u32 booleans = 0, phrases = 0;
+    std::ifstream input("/data/queries.txt");
+    if (!input) throw std::runtime_error("cannot open queries.txt");
+    std::string line;
+    while (std::getline(input, line)) {
+        Query query;
+        const bool phrase = line.starts_with("PHRASE \"");
+        if (phrase) query.phrase = phrases++;
+        std::string_view text(line);
+        if (phrase && text.back() == '"') { text.remove_prefix(8); text.remove_suffix(1); }
+        else if (text.starts_with("BOOL ")) text.remove_prefix(5);
+        else throw std::runtime_error("invalid query");
+        unsigned part = 0;
+        while (!text.empty()) {
+            const auto space = text.find(' ');
+            const std::string word(text.substr(0, space));
+            if (!phrase && part % 2) {
+                if (word != "AND" && word != "OR" && word != "NOT") throw std::runtime_error("invalid operator");
+                query.ops.push_back(word.front());
+            } else {
+                auto [it, fresh] = ids.try_emplace(word, static_cast<u32>(terms.size()));
+                if (fresh) terms.push_back({word, missing, {}});
+                query.words.push_back(it->second);
+                if (!phrase && terms[it->second].boolean == missing)
+                    terms[it->second].boolean = booleans++;
+            }
+            ++part;
+            if (space == text.npos) break;
+            text.remove_prefix(space + 1);
+        }
+        if (query.words.empty()) throw std::runtime_error("empty query");
+        queries.push_back(std::move(query));
+    }
+    if (input.bad()) throw std::runtime_error("cannot read queries.txt");
+    ids.clear();
+    ids.rehash(0);
+    const Words words(terms);
+    const Automaton automaton(queries, terms.size(), phrases);
+    struct stat status{};
+    if (stat("/data/docs.txt", &status)) throw std::runtime_error("cannot stat docs.txt");
+    const auto size = static_cast<std::size_t>(status.st_size);
+    const unsigned workers = size < 2 * 1024 * 1024 ? 1 : 12;
+    std::vector<Local> locals(workers);
+    parallel(workers, [&](unsigned w) {
+        scan(locals[w], size * w / workers, size * (w + 1) / workers, words, terms, automaton, phrases, booleans);
+    });
+    std::vector<Matches> matches(phrases);
+    u32 extent = 0;
+    for (Local& local : locals) {
+        extent = std::max(extent, local.extent);
+        for (u32 i = 0; i < terms.size(); ++i) {
+            if (terms[i].boolean != missing)
+                terms[i].documents.merge(local.documents[terms[i].boolean]);
+        }
+        for (u32 q = 0; q < phrases; ++q) matches[q].merge(local.matches[q]);
+        local = Local{};
+    }
+    std::vector<std::string> results(queries.size());
+    std::atomic<std::size_t> next{0};
+    parallel(workers, [&](unsigned) {
+        std::vector<u64> first((static_cast<std::size_t>(extent) + 63) / 64), second(first.size());
+        for (;;) {
+            const auto q = next.fetch_add(1, std::memory_order_relaxed);
+            if (q >= queries.size()) break;
+            const Query& query = queries[q];
+            if (query.phrase != missing) { results[q] = matches[query.phrase].format(); continue; }
+            std::fill(first.begin(), first.end(), 0);
+            apply(first, terms[query.words[0]].documents, 'O', second);
+            for (std::size_t i = 0; i < query.ops.size(); ++i) {
+                apply(first, terms[query.words[i + 1]].documents, query.ops[i], second);
+            }
+            results[q] = format_bits(first);
+        }
+    });
+    std::ofstream output("/out/results.txt", std::ios::binary);
+    if (!output) throw std::runtime_error("cannot open results.txt");
+    for (const auto& result : results) output << result;
+    output.close();
+    if (!output) throw std::runtime_error("cannot write results.txt");
+    return 0;
 }
 
 int main() {
-    std::ios::sync_with_stdio(false);
-    
-    TermMap ids;
-    ids.reserve(150000);
-    std::vector<TermIndex> terms;
-    terms.reserve(150000);
-    std::vector<Query> queries;
-    {
-        std::ifstream input("/data/queries.txt", std::ios::binary);
-        if (!input) return 1;
-        input.rdbuf()->pubsetbuf(nullptr, 256 * 1024);
-        std::string line;
-        line.reserve(256);
-        while (std::getline(input, line)) {
-            Query query;
-            if (line.starts_with("BOOL ")) {
-                const auto parts = split(std::string_view(line).substr(5));
-                for (std::size_t i = 0; i < parts.size(); ++i) {
-                    if (i % 2 == 0) query.terms.push_back(get_term(parts[i], ids, terms));
-                    else query.operators.push_back(parts[i] == "AND" ? 'A' : parts[i] == "OR" ? 'O' : 'N');
-                }
-            } else if (line.starts_with("PHRASE \"") && line.back() == '"') {
-                query.phrase = true;
-                const auto parts = split(std::string_view(line).substr(8, line.size() - 9));
-                for (auto part : parts) query.terms.push_back(get_term(part, ids, terms));
-            } else {
-                return 1;
-            }
-            queries.push_back(std::move(query));
-        }
-        if (input.bad()) return 1;
-    }
-
-    {
-        std::ifstream input("/data/docs.txt", std::ios::binary);
-        if (!input) return 1;
-        input.rdbuf()->pubsetbuf(nullptr, 512 * 1024);
-        std::string line;
-        line.reserve(1024);
-        std::uint32_t document = 0;
-        while (std::getline(input, line)) {
-            const std::size_t tab = line.find('\t');
-            if (tab == std::string::npos) return 1;
-            std::string token;
-            token.reserve(32);
-            std::uint16_t position = 0;
-            for (std::size_t i = tab + 1; i < line.size(); ++i) {
-                unsigned char c = static_cast<unsigned char>(line[i]);
-                if (c >= 'A' && c <= 'Z') c = static_cast<unsigned char>(c + ('a' - 'A'));
-                if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
-                    token.push_back(static_cast<char>(c));
-                } else {
-                    add_document_token(token, document, position, ids, terms);
-                }
-            }
-            add_document_token(token, document, position, ids, terms);
-            ++document;
-        }
-        if (input.bad()) return 1;
-    }
-
-    for (TermIndex& term : terms) {
-        term.documents.reserve(term.occurrences.size());
-        for (const Occurrence& occurrence : term.occurrences) {
-            if (term.documents.empty() || term.documents.back() != occurrence.document)
-                term.documents.push_back(occurrence.document);
-        }
-    }
-
-    std::ofstream output("/out/results.txt", std::ios::binary);
-    if (!output) return 1;
-    output.rdbuf()->pubsetbuf(nullptr, 512 * 1024);
-    std::vector<std::uint32_t> first, second;
-    for (const Query& query : queries) {
-        if (query.phrase) {
-            write_result(output, phrase_matches(query, terms));
-            continue;
-        }
-        const std::vector<std::uint32_t>* result = &terms[query.terms.front()].documents;
-        bool use_first = true;
-        for (std::size_t i = 0; i < query.operators.size(); ++i) {
-            std::vector<std::uint32_t>& next = use_first ? first : second;
-            combine(*result, terms[query.terms[i + 1]].documents, query.operators[i], next);
-            result = &next;
-            use_first = !use_first;
-        }
-        write_result(output, *result);
-    }
-    return output ? 0 : 1;
+    try { return solve(); }
+    catch (const std::exception& error) { std::fprintf(stderr, "track-b: %s\n", error.what()); return 1; }
 }

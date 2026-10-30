@@ -1,5 +1,0 @@
-# Machine-readable entry for the harness queue.
-team = "NewtonRedHat"
-track = "A"
-language = "C++"
-dependencies = 0          # direct non-stdlib runtime dependencies: D = 1 + this
