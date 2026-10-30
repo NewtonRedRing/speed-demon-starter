@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -153,15 +154,23 @@ int main() {
     for (int field = 0; field < 5; ++field) parse_field(data, pos, nullptr);
 
     std::vector<Aggregate> aggregates(countries.size());
-    using NameSet = std::unordered_set<std::string, TransparentHash, TransparentEqual>;
+    // Unquoted names are referenced directly in the immutable input buffer.
+    // Only decoded quoted names require separate, stable storage.
+    using NameSet = std::unordered_set<std::string_view, TransparentHash, TransparentEqual>;
     std::vector<NameSet> names(countries.size());
+    std::deque<std::string> quoted_name_storage;
     std::string value, name;
     while (pos < data.size()) {
         if (starts_bom(data, pos)) pos += 3;
         if (pos >= data.size()) break;
         parse_field(data, pos, &value);
         const std::uint64_t record_id = parse_unsigned(value);
-        parse_field(data, pos, &name);
+        const std::size_t name_start = pos;
+        const bool quoted_name = pos < data.size() && data[pos] == '"';
+        const std::size_t name_length = parse_field(data, pos, quoted_name ? &name : nullptr);
+        const std::string_view name_view = quoted_name
+            ? std::string_view(name)
+            : std::string_view(data.data() + name_start, name_length);
         const std::uint64_t note_length = parse_field(data, pos, nullptr);
         parse_field(data, pos, &value);
         const std::uint64_t region_id = parse_unsigned(value);
@@ -177,11 +186,17 @@ int main() {
         aggregate.amount_sum += amount;
         aggregate.amount_min = std::min(aggregate.amount_min, amount);
         aggregate.amount_max = std::max(aggregate.amount_max, amount);
-        aggregate.name_bytes += name.size();
+        aggregate.name_bytes += name_length;
         aggregate.note_bytes += note_length;
         NameSet& set = names[country];
-        const std::string_view name_view(name);
-        if (set.find(name_view) == set.end()) set.emplace(name);
+        if (set.find(name_view) == set.end()) {
+            if (quoted_name) {
+                quoted_name_storage.emplace_back(std::move(name));
+                set.emplace(std::string_view(quoted_name_storage.back()));
+            } else {
+                set.emplace(name_view);
+            }
+        }
     }
 
     std::vector<std::size_t> order(countries.size());
