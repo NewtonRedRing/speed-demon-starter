@@ -120,3 +120,23 @@ GitHub Actions on the original experiment repeatedly failed with no runner
 assigned or executed steps; that is **not** a successful test, and the jobs
 provided no compilation or output hashes. The direct full-data script is the
 primary verification path until runner access is functional.
+
+## Locally executed kernel tests (NOT whole-program validation)
+
+A standalone C++20 program compiled with GCC 14 and `-O2` passed:
+- 2,000,000 randomized four-way-heap operations vs `std::priority_queue`.
+- 10,000 randomized adaptive posting intersections vs `std::set_intersection`.
+- 500,000 randomized name/country membership events vs `unordered_set<string>`.
+- 20,000 randomized nearest-rank percentile cases vs full sorting.
+
+A separate standalone C++20 `-O3 -march=native` microbenchmark,
+reproducible via `tests/benchmark_country_bitsets.cpp`, generated 3,320,000
+name/country events (240 countries, 100,000 names) and returned the exact same
+3,100,639 country/name memberships in both approaches:
+- Per-country `unordered_set<string_view>`: 4.40 seconds, 215,168 KB peak RSS.
+- Global name-ID + country bitsets: 0.57 seconds, 40,192 KB peak RSS.
+
+These numbers reflect an **isolated synthetic membership kernel on a different
+machine**, not the official real CSV distribution, memory of the full track,
+competition-scored time, or a guarantee of 90+ points. Real parser, hash-map
+and I/O costs could reduce end-to-end speedup substantially.
