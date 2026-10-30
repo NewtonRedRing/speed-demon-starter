@@ -154,8 +154,8 @@ int main() {
     for (int field = 0; field < 5; ++field) parse_field(data, pos, nullptr);
 
     std::vector<Aggregate> aggregates(countries.size());
-    // Unquoted names are referenced directly in the immutable input buffer.
-    // Only decoded quoted names require separate, stable storage.
+    // All names without escaped double quotes (including quoted names)
+    // reference the immutable input; only escaped names need owned storage.
     using NameSet = std::unordered_set<std::string_view, TransparentHash, TransparentEqual>;
     std::vector<NameSet> names(countries.size());
     std::deque<std::string> quoted_name_storage;
@@ -167,10 +167,20 @@ int main() {
         const std::uint64_t record_id = parse_unsigned(value);
         const std::size_t name_start = pos;
         const bool quoted_name = pos < data.size() && data[pos] == '"';
-        const std::size_t name_length = parse_field(data, pos, quoted_name ? &name : nullptr);
-        const std::string_view name_view = quoted_name
+        // Parse once without allocating. Quoted fields that contain no doubled
+        // quotes can also reference the raw CSV buffer directly.
+        const std::size_t name_length = parse_field(data, pos, nullptr);
+        // Name always ends with a comma. Strip opening/closing quotes + comma
+        // to get encoded length; it differs from decoded length only for "".
+        const bool escaped_quotes = quoted_name &&
+            pos - name_start - 3 != name_length;
+        if (escaped_quotes) {
+            std::size_t reread = name_start;
+            parse_field(data, reread, &name);
+        }
+        const std::string_view name_view = escaped_quotes
             ? std::string_view(name)
-            : std::string_view(data.data() + name_start, name_length);
+            : std::string_view(data.data() + name_start + (quoted_name ? 1 : 0), name_length);
         const std::uint64_t note_length = parse_field(data, pos, nullptr);
         parse_field(data, pos, &value);
         const std::uint64_t region_id = parse_unsigned(value);
@@ -190,7 +200,7 @@ int main() {
         aggregate.note_bytes += note_length;
         NameSet& set = names[country];
         if (set.find(name_view) == set.end()) {
-            if (quoted_name) {
+            if (escaped_quotes) {
                 quoted_name_storage.emplace_back(std::move(name));
                 set.emplace(std::string_view(quoted_name_storage.back()));
             } else {
