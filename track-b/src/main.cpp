@@ -27,8 +27,10 @@ struct Occurrence {
 };
 
 struct TermIndex {
+    // Boolean-only terms never need positional postings.
     std::vector<Occurrence> occurrences;
     std::vector<std::uint32_t> documents;
+    bool needs_positions = false;
 };
 
 struct Query {
@@ -64,7 +66,13 @@ void add_document_token(std::string& token, std::uint32_t document, std::uint16_
                        const TermMap& ids, std::vector<TermIndex>& terms) {
     if (token.empty()) return;
     auto it = ids.find(token);
-    if (it != ids.end()) terms[it->second].occurrences.push_back({document, position});
+    if (it != ids.end()) {
+        TermIndex& index = terms[it->second];
+        // Build unique, sorted document IDs in the only scan of the corpus.
+        if (index.documents.empty() || index.documents.back() != document)
+            index.documents.push_back(document);
+        if (index.needs_positions) index.occurrences.push_back({document, position});
+    }
     ++position;
     token.clear();
 }
@@ -164,7 +172,11 @@ int main() {
             } else if (line.starts_with("PHRASE \"") && line.back() == '"') {
                 query.phrase = true;
                 const auto parts = split(std::string_view(line).substr(8, line.size() - 9));
-                for (auto part : parts) query.terms.push_back(get_term(part, ids, terms));
+                for (auto part : parts) {
+                    const auto id = get_term(part, ids, terms);
+                    query.terms.push_back(id);
+                    terms[id].needs_positions = true;
+                }
             } else {
                 return 1;
             }
@@ -201,14 +213,7 @@ int main() {
         if (input.bad()) return 1;
     }
 
-    for (TermIndex& term : terms) {
-        term.documents.reserve(term.occurrences.size());
-        for (const Occurrence& occurrence : term.occurrences) {
-            if (term.documents.empty() || term.documents.back() != occurrence.document)
-                term.documents.push_back(occurrence.document);
-        }
-    }
-
+    // Document postings are constructed in corpus order; no postprocessing pass.
     std::ofstream output("/out/results.txt", std::ios::binary);
     if (!output) return 1;
     output.rdbuf()->pubsetbuf(nullptr, 512 * 1024);
