@@ -1,53 +1,44 @@
-#include <algorithm>
-#include <array>
-#include <cstdio>
-#include <cstdint>
-#include <fstream>
+#include <charconv>
 #include <iostream>
-#include <string>
+#include <stdexcept>
 #include <string_view>
-#include <unordered_map>
-#include <vector>
 
-struct TransparentHash {
-    using is_transparent = void;
-    std::size_t operator()(std::string_view s) const noexcept {
-        return std::hash<std::string_view>{}(s);
-    }
-};
+#include "track_a.hpp"
 
-struct TransparentEqual {
-    using is_transparent = void;
-    bool operator()(std::string_view a, std::string_view b) const noexcept {
-        return a == b;
-    }
-};
+namespace {
 
-struct Group {
-    std::vector<std::uint32_t> latencies;
-    std::uint32_t errors = 0;
-};
-
-std::uint32_t number(std::string_view s) {
-    std::uint32_t value = 0;
-    for (char c : s) value = value * 10 + static_cast<unsigned>(c - '0');
-    return value;
+std::size_t parseThreadCount(std::string_view text) {
+  std::size_t value = 0;
+  const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+  if (text.empty() || error != std::errc{} || end != text.data() + text.size() || value == 0 ||
+      value > 12)
+    throw std::runtime_error("threads must be an integer in 1..12");
+  return value;
 }
 
-bool byte_less(const std::string& a, const std::string& b) {
-    return std::lexicographical_compare(
-        a.begin(), a.end(), b.begin(), b.end(),
-        [](unsigned char x, unsigned char y) { return x < y; });
 }
 
-int main() {
-    std::ifstream input("/data/requests.log", std::ios::binary);
-    if (!input) return 1;
-    std::unordered_map<std::string, std::uint16_t, TransparentHash, TransparentEqual> ids;
-    ids.reserve(2048);
-    std::vector<std::string> endpoints;
-    endpoints.reserve(1842);
-    std::vector<Group> groups(72 * 1842);
+int main(int argc, char** argv) {
+  try {
+    if (argc < 3)
+      throw std::runtime_error("usage: speeddemon_a /data /out [--threads N]");
+
+    std::size_t workers = 8;
+    bool threads_set = false;
+    for (int i = 3; i < argc; ++i) {
+      if (std::string_view(argv[i]) != "--threads" || threads_set || i + 1 >= argc)
+        throw std::runtime_error("expected one --threads N option");
+      workers = parseThreadCount(argv[++i]);
+      threads_set = true;
+    }
+
+    lab::ingest(argv[1], argv[2], workers, "radix");
+    return 0;
+  } catch (const std::exception& error) {
+    std::cerr << "speeddemon_a: " << error.what() << '\n';
+    return 1;
+  }
+}
     std::string line;
 
     while (std::getline(input, line)) {

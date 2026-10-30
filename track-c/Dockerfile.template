@@ -1,0 +1,24 @@
+# Track C - join - submission image.
+#
+# Rules this file must keep:
+#   * every FROM is an allowlisted image pinned by digest
+#     (https://speeddemon.dev/allowlist.json), or an earlier stage of this file;
+#   * the build is offline: no apt, pip, curl, cargo or npm may run;
+#   * COPY --from only from a stage above, never from another image;
+#   * no ADD of a URL, no syntax directive, no cache/secret/ssh mounts;
+#   * build under 10 minutes, image under 2 GB.
+#
+# The build stage compiles; the runtime stage carries only the binary, so the image
+# stays small and the process starts fast. Build time is not scored, so a release
+# build with link-time optimisation is free - and so is profile-guided optimisation
+# trained on generator output, which the FAQ explicitly allows.
+
+FROM gcc:15@sha256:eb5e64286ad47187b32bda75c6b6916166ecb41da56559b8b09e0001748d2cce AS build
+WORKDIR /src
+COPY src/ /src/
+RUN g++ -std=c++20 -O3 -DNDEBUG -flto -pthread -static -o /src/run /src/*.cpp
+
+FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
+COPY --from=build /src/run /app/run
+# Reads /data (read-only), writes exactly one file to /out, exits 0.
+ENTRYPOINT ["/app/run"]
