@@ -83,6 +83,22 @@ void combine(const std::vector<std::uint32_t>& left, const std::vector<std::uint
     output.clear();
     if (operation == 'O') output.reserve(left.size() + right.size());
     else output.reserve(std::min(left.size(), right.size()));
+
+    // Adaptive exact intersection: when list lengths differ greatly, probe
+    // the larger posting list instead of linearly scanning every element.
+    // Correct for empty lists, duplicates-free ascending doc IDs, and all
+    // possible operator orders (Boolean evaluation remains left-associative).
+    if (operation == 'A') {
+        const auto& small = left.size() < right.size() ? left : right;
+        const auto& large = left.size() < right.size() ? right : left;
+        if (large.size() > 16 * small.size()) {
+            for (std::uint32_t doc : small) {
+                if (std::binary_search(large.begin(), large.end(), doc))
+                    output.push_back(doc);
+            }
+            return;
+        }
+    }
     while (i < left.size() && j < right.size()) {
         if (left[i] < right[j]) {
             if (operation != 'A') output.push_back(left[i]);
