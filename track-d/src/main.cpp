@@ -154,6 +154,7 @@ int main() {
 
     std::ofstream output("/out/distances.txt", std::ios::binary);
     if (!output) return 1;
+    output.rdbuf()->pubsetbuf(nullptr, 256 * 1024);
     for (std::int64_t answer : answers) output << answer << '\n';
     return output ? 0 : 1;
 }

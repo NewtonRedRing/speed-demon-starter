@@ -8,6 +8,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <numeric>
 
 struct TransparentHash {
     using is_transparent = void;
@@ -40,15 +41,24 @@ bool byte_less(const std::string& a, const std::string& b) {
         [](unsigned char x, unsigned char y) { return x < y; });
 }
 
+inline std::uint32_t percentile_value(const std::vector<std::uint32_t>& latencies, std::size_t p) {
+    const std::size_t count = latencies.size();
+    return latencies[(p * count + 99) / 100 - 1];
+}
+
 int main() {
+    std::ios::sync_with_stdio(false);
+    
     std::ifstream input("/data/requests.log", std::ios::binary);
     if (!input) return 1;
+    
     std::unordered_map<std::string, std::uint16_t, TransparentHash, TransparentEqual> ids;
     ids.reserve(2048);
     std::vector<std::string> endpoints;
     endpoints.reserve(1842);
     std::vector<Group> groups(72 * 1842);
     std::string line;
+    line.reserve(512);
 
     while (std::getline(input, line)) {
         const unsigned month = number(std::string_view(line).substr(5, 2));
@@ -80,7 +90,9 @@ int main() {
     }
 
     if (input.bad()) return 1;
+    
     std::sort(endpoints.begin(), endpoints.end(), byte_less);
+    
     std::array<std::string, 72> hours;
     for (unsigned h = 0; h < 72; ++h) {
         const unsigned day = (h + 18) / 24;
@@ -94,19 +106,24 @@ int main() {
 
     std::ofstream output("/out/summary.txt", std::ios::binary);
     if (!output) return 1;
+    
+    output.rdbuf()->pubsetbuf(nullptr, 1024 * 1024);
+    
     for (unsigned h = 0; h < 72; ++h) {
         for (const std::string& endpoint : endpoints) {
-            const auto found = ids.find(endpoint);
-            Group& group = groups[h * 1842 + found->second];
+            Group& group = groups[h * 1842 + ids[endpoint]];
             const std::size_t count = group.latencies.size();
             if (count == 0) continue;
+            
             std::sort(group.latencies.begin(), group.latencies.end());
-            const auto percentile = [&](std::size_t p) {
-                return group.latencies[(p * count + 99) / 100 - 1];
-            };
+            
+            const std::uint32_t p50 = percentile_value(group.latencies, 50);
+            const std::uint32_t p95 = percentile_value(group.latencies, 95);
+            const std::uint32_t p99 = percentile_value(group.latencies, 99);
             const std::uint64_t ppm = static_cast<std::uint64_t>(group.errors) * 1000000 / count;
+            
             output << hours[h] << ' ' << endpoint << ' ' << count << ' '
-                   << percentile(50) << ' ' << percentile(95) << ' ' << percentile(99) << ' '
+                   << p50 << ' ' << p95 << ' ' << p99 << ' '
                    << group.errors << ' ' << ppm << '\n';
         }
     }

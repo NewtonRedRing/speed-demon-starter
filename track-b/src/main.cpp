@@ -140,6 +140,8 @@ void write_result(std::ostream& output, const std::vector<std::uint32_t>& ids) {
 }
 
 int main() {
+    std::ios::sync_with_stdio(false);
+    
     TermMap ids;
     ids.reserve(150000);
     std::vector<TermIndex> terms;
@@ -148,7 +150,9 @@ int main() {
     {
         std::ifstream input("/data/queries.txt", std::ios::binary);
         if (!input) return 1;
+        input.rdbuf()->pubsetbuf(nullptr, 256 * 1024);
         std::string line;
+        line.reserve(256);
         while (std::getline(input, line)) {
             Query query;
             if (line.starts_with("BOOL ")) {
@@ -172,7 +176,9 @@ int main() {
     {
         std::ifstream input("/data/docs.txt", std::ios::binary);
         if (!input) return 1;
+        input.rdbuf()->pubsetbuf(nullptr, 512 * 1024);
         std::string line;
+        line.reserve(1024);
         std::uint32_t document = 0;
         while (std::getline(input, line)) {
             const std::size_t tab = line.find('\t');
@@ -205,6 +211,7 @@ int main() {
 
     std::ofstream output("/out/results.txt", std::ios::binary);
     if (!output) return 1;
+    output.rdbuf()->pubsetbuf(nullptr, 512 * 1024);
     std::vector<std::uint32_t> first, second;
     for (const Query& query : queries) {
         if (query.phrase) {

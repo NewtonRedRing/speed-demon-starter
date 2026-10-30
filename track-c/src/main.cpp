@@ -113,8 +113,11 @@ bool byte_less(const std::string& a, const std::string& b) {
 }
 
 int main() {
+    std::ios::sync_with_stdio(false);
+    
     std::ifstream regions_file("/data/regions.csv", std::ios::binary);
     if (!regions_file) return 1;
+    regions_file.rdbuf()->pubsetbuf(nullptr, 256 * 1024);
     std::vector<std::string> countries{"_UNMATCHED"};
     std::unordered_map<std::string, std::uint16_t, TransparentHash, TransparentEqual> country_ids;
     country_ids.reserve(256);
@@ -189,6 +192,7 @@ int main() {
 
     std::ofstream output("/out/aggregates.txt", std::ios::binary);
     if (!output) return 1;
+    output.rdbuf()->pubsetbuf(nullptr, 256 * 1024);
     for (std::size_t i : order) {
         const Aggregate& a = aggregates[i];
         if (a.count == 0) continue;
