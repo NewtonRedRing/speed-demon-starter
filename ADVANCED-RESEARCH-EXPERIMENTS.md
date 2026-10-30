@@ -140,3 +140,29 @@ These numbers reflect an **isolated synthetic membership kernel on a different
 machine**, not the official real CSV distribution, memory of the full track,
 competition-scored time, or a guarantee of 90+ points. Real parser, hash-map
 and I/O costs could reduce end-to-end speedup substantially.
+
+## Repository-wide prototype audit
+
+The repository contains alternate prototype implementations under each
+`track-*/src/track_*_*.cpp`, but **none of them are linked by the pinned
+Dockerfiles**, which copy only `src/main.cpp`.
+
+- A prototype: parallel range processing, radix/bucket-oriented ingestion,
+  much larger source.
+- B prototype: compact postings, query buckets, multi-worker indexing and
+  custom string hashing.
+- C prototype: parallel CSV block and shard processing, separate aggregation.
+- D prototype: forward/reverse graph CSR, monotone radix priority queue,
+  degree-aware bidirectional search, connected-component pruning and a
+  separate wide-distance fallback path.
+
+These are **candidate architectures to benchmark, not validated drop-in
+replacements**. In particular, D's prototype uses UINT32_MAX as an
+unreached sentinel in fast paths; the official D graph deliberately includes
+shortest paths exceeding UINT32_MAX, so its separate wide-distance fallback
+must be tested before reuse. And importing the large prototype sources
+unselectively can worsen the scc source-line penalty.
+
+The current experiment implements independently parallel exact 64-bit
+single-source shortest paths instead. Compare the existing bidirectional
+radix prototype as a *separate* validated experiment before changing it.
