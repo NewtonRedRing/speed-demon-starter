@@ -2,7 +2,6 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
-#include <functional>
 #include <fstream>
 #include <limits>
 #include <string>
