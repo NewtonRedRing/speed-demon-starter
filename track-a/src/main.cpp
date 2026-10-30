@@ -49,7 +49,11 @@ inline std::uint32_t percentile_value(const std::vector<std::uint32_t>& latencie
 int main() {
     std::ios::sync_with_stdio(false);
     
-    std::ifstream input("/data/requests.log", std::ios::binary);
+    // Install a large stream buffer before opening the multi-million-row input.
+    std::vector<char> input_buffer(1 << 20);
+    std::ifstream input;
+    input.rdbuf()->pubsetbuf(input_buffer.data(), input_buffer.size());
+    input.open("/data/requests.log", std::ios::binary);
     if (!input) return 1;
     
     std::unordered_map<std::string, std::uint16_t, TransparentHash, TransparentEqual> ids;
@@ -104,10 +108,11 @@ int main() {
         hours[h] = buffer;
     }
 
-    std::ofstream output("/out/summary.txt", std::ios::binary);
+    std::vector<char> output_buffer(1 << 20);
+    std::ofstream output;
+    output.rdbuf()->pubsetbuf(output_buffer.data(), output_buffer.size());
+    output.open("/out/summary.txt", std::ios::binary);
     if (!output) return 1;
-    
-    output.rdbuf()->pubsetbuf(nullptr, 1024 * 1024);
     
     for (unsigned h = 0; h < 72; ++h) {
         for (const std::string& endpoint : endpoints) {
@@ -115,11 +120,25 @@ int main() {
             const std::size_t count = group.latencies.size();
             if (count == 0) continue;
             
-            std::sort(group.latencies.begin(), group.latencies.end());
-            
-            const std::uint32_t p50 = percentile_value(group.latencies, 50);
-            const std::uint32_t p95 = percentile_value(group.latencies, 95);
-            const std::uint32_t p99 = percentile_value(group.latencies, 99);
+            std::uint32_t p50, p95, p99;
+            if (count >= 128) {
+                // Three exact order statistics without sorting large groups.
+                auto& v = group.latencies;
+                const std::size_t r50 = (50 * count + 99) / 100 - 1;
+                const std::size_t r95 = (95 * count + 99) / 100 - 1;
+                const std::size_t r99 = (99 * count + 99) / 100 - 1;
+                std::nth_element(v.begin(), v.begin() + r99, v.end());
+                p99 = v[r99];
+                std::nth_element(v.begin(), v.begin() + r95, v.begin() + r99);
+                p95 = v[r95];
+                std::nth_element(v.begin(), v.begin() + r50, v.begin() + r95);
+                p50 = v[r50];
+            } else {
+                std::sort(group.latencies.begin(), group.latencies.end());
+                p50 = percentile_value(group.latencies, 50);
+                p95 = percentile_value(group.latencies, 95);
+                p99 = percentile_value(group.latencies, 99);
+            }
             const std::uint64_t ppm = static_cast<std::uint64_t>(group.errors) * 1000000 / count;
             
             output << hours[h] << ' ' << endpoint << ' ' << count << ' '
