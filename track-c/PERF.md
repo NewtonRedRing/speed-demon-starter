@@ -182,7 +182,7 @@ original input validation. Region-to-country assignment and exact
 
 A standalone 200,000-row synthetic lookup microbenchmark checked that the
 buffered and mapped loaders produced equal aggregate country IDs. It
-measured 7.29 ms buffered versus 2.84 ms mapped for ten measurement
+measured 7.37 ms buffered versus 2.28 ms mapped for ten measurement
 repetitions (about 2.6x on lookup stage alone). This is not a Track C
 end-to-end speedup: parsing and exact-name aggregation dominate overall.
 All hostile CSV and exact distinct-name oracles must still pass.
