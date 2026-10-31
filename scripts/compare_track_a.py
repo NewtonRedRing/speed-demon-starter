@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Compare two Track A Git revisions on the ORIGINAL full public seed-1 dataset.
+
+Builds the pinned production Dockerfile from each Git ref, wraps each image
+in a LOCAL process timer, then calls check.py to enforce exact official
+input/output SHA-256 on EVERY run. Docker startup is excluded from process
+timing. This is not equivalent to the organizer's calibrated scoring CPU.
+
+Usage (after git fetch origin):
+  python3 scripts/compare_track_a.py
+  python3 scripts/compare_track_a.py --candidate-ref 5bf7f3b971bb6daf4a11da3309cda3816074ed49
+  python3 scripts/compare_track_a.py --runs 9
+"""
+import argparse
+from pathlib import Path
+import re
+import statistics
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+
+ROOT = Path(__file__).resolve().parents[1]
+TIMER_CONTEXT = ROOT / "scripts"
+WALL_PATTERN = re.compile(r"SPEED_DEMON_PROCESS_NS=(\d+)")
+PEAK_PATTERN = re.compile(r"SPEED_DEMON_CGROUP_PEAK_BYTES=(\d+)")
+
+
+def invoke(args, *, cwd=ROOT, capture=False):
+    print("+", " ".join(str(x) for x in args), flush=True)
+    result = subprocess.run(args, cwd=cwd, text=True, capture_output=capture)
+    if result.returncode:
+        if capture:
+            print(result.stdout, file=sys.stdout)
+            print(result.stderr, file=sys.stderr)
+        raise RuntimeError(f"Command failed ({result.returncode}): {args}")
+    return result
+
+
+def source_at(ref, name):
+    # Fetch directly from Git without touching any tracked worktree file.
+    result = subprocess.run(
+        ["git", "show", f"{ref}:track-a/{name}"],
+        cwd=ROOT, capture_output=True,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            f"Could not read {ref}:track-a/{name}. First run: "
+            "git fetch origin speed-demon experiment/track-a-small-groups"
+        )
+    return result.stdout
+
+
+def build_revision(ref, label, work_dir):
+    context = work_dir / label
+    context.mkdir(parents=True, exist_ok=True)
+    for name in ("main.rs", "Dockerfile"):
+        (context / name).write_bytes(source_at(ref, name))
+
+    # The original Rust builder and Debian runtime are pinned by digest.
+    normal_image = f"sd-compare/track-a-{label}"
+    timed_image = f"sd-compare/track-a-{label}-timed"
+    invoke(["docker", "build", "--network=none", "-t", normal_image, str(context)])
+    invoke([
+        "docker", "build", "--network=none",
+        "-f", str(TIMER_CONTEXT / "track-a-timer.Dockerfile"),
+        "--build-arg", f"SOLUTION_IMAGE={normal_image}",
+        "-t", timed_image, str(TIMER_CONTEXT),
+    ])
+    return timed_image
+
+
+def measure(tag, runs):
+    args = [
+        sys.executable, str(ROOT / "check.py"), "a", "--skip-build",
+        "--image", tag, "--runs", str(runs),
+    ]
+    result = invoke(args, capture=True)
+    print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end="")
+    # Each run must have passed check.py's published output hash.
+    passes = len(re.findall(r"PASS\s+Track A run \d+/\d+", result.stdout))
+    if passes != runs:
+        raise RuntimeError(f"{tag}: only {passes}/{runs} official SHA-256 checks passed")
+    wall = [int(v) / 1e6 for v in WALL_PATTERN.findall(result.stderr + result.stdout)]
+    mem = [int(v) / 1024**2 for v in PEAK_PATTERN.findall(result.stderr + result.stdout)]
+    if len(wall) != runs:
+        raise RuntimeError(
+            f"{tag}: found {len(wall)} process-only timings for {runs} runs. "
+            "The timer may not have launched or log output was not captured."
+        )
+    trimmed = statistics.mean(sorted(wall)[1:-1]) if runs >= 3 else statistics.mean(wall)
+    print(f"\n{tag} process-only times (ms): " + ", ".join(f"{v:.3f}" for v in wall))
+    print(f"{tag} trimmed process mean: {trimmed:.3f} ms")
+    if mem:
+        print(f"{tag} maximum observed cgroup peak: {max(mem):.2f} MiB")
+    else:
+        print(f"{tag} cgroup memory.peak unavailable; memory comparison omitted")
+    return trimmed, max(mem) if mem else None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base-ref", default="origin/speed-demon",
+                        help="Known-good scored branch or a specific commit")
+    parser.add_argument("--candidate-ref", default="origin/experiment/track-a-small-groups",
+                        help="Single-change experiment branch or commit")
+    parser.add_argument("--runs", type=int, default=5,
+                        help="Number of complete official-full-data runs for each (default 5)")
+    args = parser.parse_args()
+    if args.runs < 1:
+        parser.error("--runs must be positive")
+
+    (ROOT / ".out").mkdir(exist_ok=True)
+    print("Only official full seed-1 Track A input and exact output SHA-256 are accepted.")
+    print("Note: timing is Linux process-only but is NOT the organizer's scoring CPU.")
+    with TemporaryDirectory(prefix="sd-compare-a-", dir=ROOT / ".out") as temp:
+        directory = Path(temp)
+        base_tag = build_revision(args.base_ref, "baseline", directory)
+        candidate_tag = build_revision(args.candidate_ref, "candidate", directory)
+        baseline = measure(base_tag, args.runs)
+        candidate = measure(candidate_tag, args.runs)
+
+    print("\n===== REPRODUCIBLE TRACK A COMPARISON =====")
+    print(f"base:      {args.base_ref}")
+    print(f"candidate: {args.candidate_ref}")
+    diff = candidate[0] / baseline[0] - 1
+    print(f"Candidate process time: {diff:+.2%} relative to baseline "
+          f"({baseline[0]:.3f} vs {candidate[0]:.3f} ms)")
+    if baseline[1] is not None and candidate[1] is not None:
+        memory_delta = candidate[1] / baseline[1] - 1
+        print(f"Candidate peak memory: {memory_delta:+.2%} relative to baseline "
+              f"({baseline[1]:.2f} vs {candidate[1]:.2f} MiB)")
+    print("Both candidates produced the official expected SHA-256 on every run.")
+    print("Do not promote solely on local time: also inspect memory and formatted scc lines.")
+    print("Only a new official leaderboard run can establish a score improvement.")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, RuntimeError) as exc:
+        sys.exit(f"FAIL: {exc}")
