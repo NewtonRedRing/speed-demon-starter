@@ -264,11 +264,11 @@ impl Names {
             if lo == 0 {
                 if self.slots[i].lo.compare_exchange(0, BUSY, Acquire, Acquire).is_ok() {
                     if len > 16 {
-                        let tail = len - 16;
+                        let tail = len - 8;
                         let off = self.used.fetch_add(tail as u32, Relaxed) as usize;
                         assert!(off + tail <= NAME_ARENA, "name arena exhausted");
                         unsafe {
-                            self.arena.write(off, (p as *const u8).add(16), tail);
+                            self.arena.write(off, (p as *const u8).add(8), tail);
                             *self.meta[i].0.get() = (len as u64) << 32 | off as u64;
                             *self.slots[i].hi.get() = key_hi;
                         }
