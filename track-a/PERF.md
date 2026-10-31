@@ -195,3 +195,23 @@ startup without usable runner logs. Consequently **no official sandbox run,
 live-board run ID, or 90-point result is claimed**. The submission
 `speed-demon` branch remains unchanged pending an official correctness and
 performance comparison.
+
+
+### Offline PGO candidate (experimental Dockerfile)
+
+An additional speed-first build experiment trains GCC's profile-guided compiler
+on 180,000 generated, valid request lines during Docker image construction,
+then recompiles the same executable path with `-fprofile-use`. Training data
+and profile files are deleted from the final image, and the scoring input is
+never available during build. The target machine's native instruction set is
+used in both compilation passes.
+
+With the plain optimized build versus PGO on the same **non-official** full-size
+generated workload, twelve alternating local runs had process medians of
+115.51 ms and 107.26 ms respectively (7.1% lower). A separate nine-round
+batch of the statically linked candidate, trained on a newly generated 180k
+dataset, showed 123.76 ms for the plain build versus 114.82 ms for PGO.
+Output hashes were identical. These are uncontrolled local host measurements,
+not official scores. The PGO Dockerfile is unverified in the competition's
+exact container image; do not promote it to the submission branch before a
+successful sandbox build and official scoring comparison.
