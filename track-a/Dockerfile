@@ -9,7 +9,7 @@ RUN mkdir -p /app/pgo /data /out \
     && awk 'BEGIN { split("GET POST PUT PATCH DELETE HEAD OPTIONS", meth, " "); \
        for (i=0;i<180000;i++) { h=i%72; d=int((h+18)/24); mo=d<2?10:11; dd=d<2?d+30:d-1; \
        hr=(h+18)%24; ep=i%4?i%24:int(i/4)%1842; err=i%19==0; \
-       printf "2026-%02d-%02dT%02d:21:31.876543Z %s /api/v2/catalogue/%04d/events/{id} %d %d\\n", \
+       printf "2026-%02d-%02dT%02d:21:31.876543Z %s /api/v2/catalogue/%04d/events/{id} %d %d\n", \
        mo,dd,hr,meth[(i%7)+1],ep,err?503:200,(i*13973)%1000000 } }' > /data/requests.log \
     && /app/solution \
     && g++ -std=c++20 -O3 -DNDEBUG -flto -march=native -pthread -static -s \
