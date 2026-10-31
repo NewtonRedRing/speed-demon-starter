@@ -407,3 +407,39 @@ python3 check.py a --skip-build --image speeddemon-pgo/track-a
 The extra scored lines and transient memory can outweigh small speed wins.
 Only an actual official run can establish the new score; no low-90s claim is
 supported by this implementation alone.
+
+
+## 2026-11-01: restore best source; isolate incremental experiments
+
+The 2026-10-31 official board snapshot lists the best Track A run
+`run-5fbf4e3e8868` at commit `73169015`:
+**79.686448 points, 30.690 ms, 21,938,176 B, 348 scc lines**.
+It lists the latest full fused/radix run at `8aac5a80`:
+**76.723315 points, 32.614 ms, 29,110,272 B, 484 scc lines**.
+Both passed the correctness gate.
+
+As requested, restored the exact best-scoring `track-a/main.rs` bytes on
+the scored `speed-demon` branch (Git blob SHA
+`a16b72dd8ef8c05c44431e7ee15daa6122684b09`). Other tracks and the
+new mandatory original-full-data verification workflow are unchanged.
+Preserved the previous fused/radix source separately as
+`experiment/track-a-fused-radix`.
+
+The active minimal `experiment/track-a-small-groups` branch tests two
+individually attributable source changes:
+- `5bf7f3b9`: skip generic unstable sorting for n=1 and n=2, preserving
+  exact nearest-rank values (p50 is min for n=2, p95/p99 are max).
+- `89dae5fb`: allocate the endpoint scatter cursor once per worker instead
+  of once per hour.
+
+For these changes, an independent 100,000-case mathematical n=1/2 Python
+check passed. That does **not** imply the Rust candidate compiled or scored.
+Use `python3 scripts/compare_track_a.py` to build both revisions under
+the same pinned offline Track A Dockerfile, enforce the real public
+seed-1/full input and published output hashes, and compare child-only time
+and observed cgroup peak. The benchmark wrapper is root-level and cannot
+alter the scored track's source-size or dependency axes.
+
+No new score above 79.686448 is claimed. No experiment is promoted until
+independently verified against the organizer's full dataset and shown to
+improve the complete machine-score tradeoff on the target CPU.

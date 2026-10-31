@@ -157,3 +157,42 @@ docker run --rm `
 ```
 
 The local Rust test container is not an official scored submission.
+
+
+## 2026-11-01: measured Track A optimization workflow
+
+The scored `speed-demon` branch restores **exactly** the source of the previous
+best Track A result, `731690155806efd00de78190a438007beecbdd3f`:
+79.686448 points, 30.690 ms, 21,938,176 bytes memory, and 348 formatted
+source-code lines. The newer full fused/radix implementation is preserved in
+`experiment/track-a-fused-radix` rather than silently replacing the best.
+The active small-change candidate is `experiment/track-a-small-groups`.
+
+Two independent, reversible experiment commits:
+- `5bf7f3b9`: exact n=1/n=2 percentile fast paths.
+- `89dae5fb`: reuse the per-worker hour-scatter cursor.
+
+To compare them from **Windows PowerShell** or Linux/WSL with Docker Desktop
+enabled, without editing your working tree:
+
+```powershell
+git fetch origin
+python3 scripts/compare_track_a.py --runs 5
+# Isolate the first change:
+python3 scripts/compare_track_a.py --candidate-ref 5bf7f3b971bb6daf4a11da3309cda3816074ed49 --runs 5
+# Isolate the second change (first change serves as control):
+python3 scripts/compare_track_a.py --base-ref 5bf7f3b971bb6daf4a11da3309cda3816074ed49 --candidate-ref 89dae5fbf9f6f893bb13e1d399ed105e7e734f26 --runs 5
+```
+
+Every tested image compiles directly from the specified Git revision and
+its digest-pinned `track-a/Dockerfile`. The local timer image is separate
+from the scored submission and measures the child process only, excluding
+Docker startup. Before accepting a timing, `check.py` enforces the original
+238,836,234-byte seed-1/full dataset hash and matches every run's output to
+the published SHA-256. The helper also prints cgroup-v2 `memory.peak` when
+the local Docker VM exposes it.
+
+**Local process timing is not the official score:** the organizer uses its
+own i5-13500 CPU, higher-precision runner, cgroup peak, plus rustfmt/scc
+static axes. Promote a candidate into `speed-demon` only if correct and
+faster after accounting for memory and formatted source-size penalties.
