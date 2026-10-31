@@ -34,3 +34,8 @@ The existing offline, digest-pinned, multi-seed Rust PGO Docker build is
 preserved. No source-hiding `build.rs` or `.inc` indirection is used: the
 2026-10-28 scoring rules cap the source-size benefit at 1×, and the
 `scc` count covers all source under this track's build context.
+
+Board comparison (run `run-3b8f1a6bdd06`) showed that pair-digit output
+plus the later build pipeline did not beat the earlier best A result. The
+writer was restored to simple single-digit emission and the fast baseline
+pinned offline Rust build. This is a measured rejection, not a missing feature.

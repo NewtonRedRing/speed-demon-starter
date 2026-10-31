@@ -295,3 +295,13 @@ Replaced per-digit decimal emission with a compile-time 100-pair lookup to
 reduce division work in the output stage. A local Python equivalent passed
 200,014 integer cases, including 0 and u32::MAX. Rust build, production hash,
 local speed and official scoring are not verified in this session.
+
+### 2026-10-31: Reject paired-decimal writer and later PGO build
+
+The live board run `run-3b8f1a6bdd06` at commit `39502cdb` scored
+79.269335 with T=0.030782 s, M=22,573,056 B, S=377. The prior best
+`run-5fbf4e3e8868` scored 79.686448 with T=0.030690 s,
+M=21,938,176 B, S=348. This is a comparison of two full submissions,
+not a controlled attribution; nonetheless the new larger writer and PGO
+pipeline showed no measured speed improvement. Revert to the simpler writer
+and the pinned baseline build, retaining CPU-set and endpoint fixes.

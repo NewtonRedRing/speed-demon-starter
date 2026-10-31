@@ -23,3 +23,8 @@ misses on the scoring CPU, then tune only exact full-process improvements.
 Long names are compared byte-for-byte even on hash collisions. The input
 mapping provides a spare zero page so the final records are parsed without a
 temporary copy. Standard Rust source and the offline PGO image are retained.
+
+Board run `run-0b1d0e65fdba` showed higher peak memory after the zero-copy
+mapping experiment. The original copied/padded tail is reinstated; long names
+still compare exactly and quote parity uses BMI2 PDEP. The previously best
+single-seed PGO build is restored for another scored comparison.

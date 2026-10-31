@@ -20,8 +20,8 @@
 //!   workers claim from a counter (cores differ in speed). A chunk cut is
 //!   the first LF that is followed by a digit or a BOM, which spec 2.2
 //!   makes a record boundary: names are letters and notes lowercase words.
-//! - The mapped file has a spare zero page: even the final record is parsed
-//!   in place rather than being copied into a temporary tail buffer.
+//! - The last few KB are copied behind zero padding so SIMD loads never
+//!   run past the file-backed mapping.
 
 use std::arch::x86_64::{
     __m256i, _pdep_u64, _mm_crc32_u64, _mm256_cmpeq_epi8, _mm256_loadu_si256,
@@ -46,13 +46,9 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
     if len == 0 {
         return Ok(&[]);
     }
-    // Reserve enough anonymous space for the file and a zero-filled guard.
-    // The MAP_FIXED file overlay replaces only its own page-rounded prefix.
-    let p = unsafe { mmap(std::ptr::null_mut(), len + 8192, 1, 0x22, -1, 0) };
+    // PROT_READ = 1, MAP_PRIVATE = 2.
+    let p = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, file.as_raw_fd(), 0) };
     if p as isize == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if unsafe { mmap(p, len, 1, 0x12, file.as_raw_fd(), 0) } != p {
         return Err(std::io::Error::last_os_error());
     }
     Ok(unsafe { std::slice::from_raw_parts(p, len) })
@@ -590,8 +586,8 @@ fn cut(data: &[u8], from: usize) -> usize {
     (i + 1).min(data.len())
 }
 
-/// The final bytes are parsed in place, backed by a spare mapped zero page
-/// for vector lookahead past the real EOF.
+/// The final bytes are copied behind padding and parsed last, so vector
+/// lookahead cannot run beyond the file mapping.
 const TAIL: usize = 8192;
 const CHUNKS_PER_THREAD: usize = 32;
 
@@ -639,14 +635,14 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
             .collect()
     });
 
-    // Every caller maps the input with at least 64 accessible padding bytes.
-    let padded = unsafe { std::slice::from_raw_parts(data.as_ptr(), data.len() + 64) };
+    let mut tail = data[tail_at..].to_vec();
+    tail.resize(tail.len() + 64, 0);
     let mut groups = vec![Agg::new(); n_groups];
     let mut sightings = Sightings::new(names);
     parse_records(
-        padded,
-        tail_at,
-        data.len(),
+        &tail,
+        0,
+        data.len() - tail_at,
         regions,
         &mut sightings,
         &mut groups,

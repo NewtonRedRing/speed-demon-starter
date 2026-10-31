@@ -160,3 +160,14 @@ parsed in place without a copied tail buffer; 64-byte SIMD loads remain
 within the reserved mapping. The PGO image and its pinned digests are retained.
 This change is not yet supported by a new Rust build, official hash or measured
 speed improvement; these remain to validate on the board.
+
+### 2026-10-31: Revert zero-copy EOF mapping after board regression
+
+Run `run-0b1d0e65fdba` at `39502cdb` passed every correctness gate, but
+had M=17,747,968 B and scored 68.996326; best earlier run
+`run-0917a954f355` had M=11,579,392 B and scored 70.830007.
+This comparison includes changed PGO training and exact-name logic, so it
+cannot isolate the mmap experiment. Restore the original copied/padded tail
+and best single-seed PGO build; retain the exact long-name byte comparison
+and separately verified BMI2 PDEP parity formula. No final gain claimed
+until another board run.
