@@ -175,12 +175,26 @@ public:
 class Words {
     const std::vector<Term>& terms_;
     std::vector<u64> slots_;
+    // Perfect base-36 direct map for query tokens of length 1, 2 or 3.
+    // Queries and scanned tokens are ASCII a-z/0-9, so no collisions exist.
+    std::array<u32, 36 + 1296 + 46656> short_ids_;
+    static u32 short_index(std::string_view text) {
+        u32 value = 0;
+        for (unsigned char c : text)
+            value = value * 36 + (c >= 'a' ? c - 'a' + 10u : c - '0');
+        return (text.size() == 1 ? 0u : text.size() == 2 ? 36u : 1332u) + value;
+    }
 public:
     explicit Words(const std::vector<Term>& terms) : terms_(terms) {
+        short_ids_.fill(missing);
         std::size_t capacity = 1;
         while (capacity < terms.size() * 2 + 1) capacity *= 2;
         slots_.resize(capacity);
         for (u32 i = 0; i < terms.size(); ++i) {
+            if (terms[i].text.size() <= 3) {
+                short_ids_[short_index(terms[i].text)] = i;
+                continue;
+            }
             const u64 hash = std::hash<std::string_view>{}(terms[i].text);
             auto slot = hash & (capacity - 1);
             while (slots_[slot]) slot = (slot + 1) & (capacity - 1);
@@ -188,6 +202,7 @@ public:
         }
     }
     u32 find(std::string_view text) const {
+        if (text.size() <= 3) return short_ids_[short_index(text)];
         const u64 hash = std::hash<std::string_view>{}(text);
         auto slot = hash & (slots_.size() - 1);
         while (slots_[slot]) {
