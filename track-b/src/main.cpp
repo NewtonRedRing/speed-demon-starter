@@ -8,8 +8,8 @@
 #include <exception>
 #include <fstream>
 #include <memory>
-#include <malloc.h>
 #include <queue>
+#include <malloc.h>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -113,10 +113,11 @@ class Automaton {
         return state ? transitions_.find(state, word) : root_[word];
     }
 public:
-    Automaton(const std::vector<Query>& queries, std::size_t terms, u32 phrases)
+    Automaton(const std::vector<Query>& queries, std::size_t terms, u32 phrases,
+              const std::vector<std::uint8_t>& anchored)
         : next_query_(phrases, missing), root_(terms, missing) {
         for (const Query& query : queries) {
-            if (query.phrase == missing) continue;
+            if (query.phrase == missing || anchored[query.phrase]) continue;
             const u32 q = query.phrase;
             u32 state = 0;
             for (u32 word : query.words) {
@@ -169,6 +170,66 @@ public:
             }
         }
         return state;
+    }
+};
+
+// Exact phrase matching driven by the selected rare query token.
+class AnchorMatcher {
+    struct Hit { u32 phrase, offset; };
+    std::vector<const Query*> phrases_;
+    std::vector<std::vector<Hit>> by_word_;
+    std::vector<std::uint8_t> anchored_;
+    u32 ac_phrases_ = 0;
+public:
+    AnchorMatcher(const std::vector<Query>& queries, const std::vector<Term>& terms)
+        : by_word_(terms.size()) {
+        std::vector<u32> frequency(terms.size());
+        for (const Query& q : queries)
+            if (q.phrase != missing) {
+                for (u32 word : q.words) ++frequency[word];
+                if (phrases_.size() <= q.phrase) phrases_.resize(q.phrase + 1);
+                phrases_[q.phrase] = &q;
+            }
+        anchored_.resize(phrases_.size());
+        for (const Query* q : phrases_) {
+            if (!q) throw std::runtime_error("missing phrase ID");
+            u32 chosen = 0;
+            for (u32 j = 1; j < q->words.size(); ++j) {
+                const u32 left = q->words[j], right = q->words[chosen];
+                if (frequency[left] < frequency[right] ||
+                    (frequency[left] == frequency[right] &&
+                     terms[left].text.size() > terms[right].text.size()))
+                    chosen = j;
+            }
+            // Aho-Corasick handles high-fanout anchors. Query frequency is a
+            // correctness-independent performance heuristic, never a filter
+            // for actual matches or document IDs.
+            if (frequency[q->words[chosen]] <= 8) {
+                by_word_[q->words[chosen]].push_back({q->phrase, chosen});
+                anchored_[q->phrase] = 1;
+            } else ++ac_phrases_;
+        }
+    }
+    const std::vector<std::uint8_t>& anchored() const { return anchored_; }
+    bool has_ac_phrases() const { return ac_phrases_ != 0; }
+    void match(const std::vector<u32>& tokens, u32 document,
+               std::vector<Matches>& results) const {
+        for (u32 position = 0; position < tokens.size(); ++position) {
+            const u32 word = tokens[position];
+            if (word == missing) continue;
+            for (const Hit& hit : by_word_[word]) {
+                Matches& result = results[hit.phrase];
+                if (result.last == document) continue;
+                const auto& phrase = phrases_[hit.phrase]->words;
+                if (position < hit.offset ||
+                    position - hit.offset + phrase.size() > tokens.size()) continue;
+                const u32 start = position - hit.offset;
+                bool equal = true;
+                for (u32 j = 0; j < phrase.size(); ++j)
+                    if (tokens[start + j] != phrase[j]) { equal = false; break; }
+                if (equal) result.add(document);
+            }
+        }
     }
 };
 
@@ -247,10 +308,13 @@ struct Local {
 };
 
 void scan(Local& local, const char* data, std::size_t begin, std::size_t end, const Words& words,
-          const std::vector<Term>& terms, const Automaton& automaton, std::size_t queries, u32 booleans) {
+          const std::vector<Term>& terms, const AnchorMatcher& anchors, const Automaton& automaton,
+          std::size_t queries, u32 booleans) {
     local.offsets.resize(static_cast<std::size_t>(booleans) + 1);
     local.matches.resize(queries);
     std::vector<u32> last(booleans, missing);
+    std::vector<u32> document_words;
+    document_words.reserve(256);
     if (begin && data[begin - 1] != '\n')
         while (data[begin++] != '\n') {}
     if (end && data[end - 1] != '\n')
@@ -265,6 +329,7 @@ void scan(Local& local, const char* data, std::size_t begin, std::size_t end, co
         while (*p >= '0' && *p <= '9') document = document * 10 + static_cast<unsigned>(*p++ - '0');
         if (*p++ != '\t') throw std::runtime_error("invalid document id");
         local.extent = document + 1;
+        document_words.clear();
         u32 state = 0;
         while (p < stop) {
             char token[32];
@@ -286,10 +351,13 @@ void scan(Local& local, const char* data, std::size_t begin, std::size_t end, co
                         last[index] = document;
                     }
                 }
-                state = automaton.advance(state, word, document, local.matches);
+                document_words.push_back(word);
+                if (anchors.has_ac_phrases())
+                    state = automaton.advance(state, word, document, local.matches);
             }
             if (p < stop) ++p;
         }
+        anchors.match(document_words, document, local.matches);
         p = stop + 1;
         const auto consumed = static_cast<std::size_t>(p - data);
         if (consumed > released && consumed - released >= 1024 * 1024) {
@@ -407,7 +475,8 @@ int solve() {
     ids.clear();
     ids.rehash(0);
     const Words words(terms);
-    const Automaton automaton(queries, terms.size(), phrases);
+    const AnchorMatcher anchors(queries, terms);
+    const Automaton automaton(queries, terms.size(), phrases, anchors.anchored());
     struct stat status{};
     if (stat("/data/docs.txt", &status)) throw std::runtime_error("cannot stat docs.txt");
     const auto size = static_cast<std::size_t>(status.st_size);
@@ -425,7 +494,7 @@ int solve() {
     const unsigned workers = size < 2 * 1024 * 1024 ? 1 : 12;
     std::vector<Local> locals(workers);
     parallel(workers, [&](unsigned w) {
-        scan(locals[w], data, size * w / workers, size * (w + 1) / workers, words, terms, automaton, phrases, booleans);
+        scan(locals[w], data, size * w / workers, size * (w + 1) / workers, words, terms, anchors, automaton, phrases, booleans);
     });
     parallel(workers, [&](unsigned w) {
         Local& local = locals[w];
