@@ -382,26 +382,18 @@ fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
 
 // --- Record parsing (spec section 2.1) ----------------------------------
 
-/// Quote bits and structural (comma or LF) bits for 64 bytes. Each half is
-/// loaded once; all classifiers reuse the same register.
+/// Bit mask of bytes equal to c in data[at..at+32].
 #[inline(always)]
-fn structure64(data: &[u8], at: usize) -> (u64, u64) {
+fn match32(data: &[u8], at: usize, c: u8) -> u32 {
     unsafe {
-        let half = |p: *const u8| {
-            let v = _mm256_loadu_si256(p.cast::<__m256i>());
-            let q = _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'"' as i8));
-            let comma = _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b',' as i8));
-            let nl = _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'\n' as i8));
-            let structural = std::arch::x86_64::_mm256_or_si256(comma, nl);
-            (
-                _mm256_movemask_epi8(q) as u32 as u64,
-                _mm256_movemask_epi8(structural) as u32 as u64,
-            )
-        };
-        let (q0, s0) = half(data.as_ptr().add(at));
-        let (q1, s1) = half(data.as_ptr().add(at + 32));
-        (q0 | q1 << 32, s0 | s1 << 32)
+        let v = _mm256_loadu_si256(data.as_ptr().add(at).cast::<__m256i>());
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c as i8))) as u32
     }
+}
+
+#[inline(always)]
+fn match64(data: &[u8], at: usize, c: u8) -> u64 {
+    match32(data, at, c) as u64 | ((match32(data, at + 32, c) as u64) << 32)
 }
 
 #[derive(Clone, Copy)]
@@ -437,8 +429,8 @@ impl<'a> Structure<'a> {
             let at = self.block;
             self.block += 64;
             self.before += self.q.count_ones() as u64;
-            let (q, structural) = structure64(self.data, at);
-            self.q = q;
+            self.q = match64(self.data, at, b'"');
+            let structural = match64(self.data, at, b',') | match64(self.data, at, b'\n');
             if self.q == 0 && self.carry == 0 {
                 self.bits = structural;
             } else {
