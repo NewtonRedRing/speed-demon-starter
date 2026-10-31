@@ -27,7 +27,7 @@ use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::Barrier;
 
 extern "C" {
@@ -49,13 +49,12 @@ unsafe fn map(len: usize, prot: i32, flags: i32, fd: i32) -> *mut u8 {
 
 const THREADS: usize = 12;
 const HOURS: usize = 72; // 2026-10-30T18:00Z to 2026-11-02T17:59:59Z
-// A record packs the latency above a 12-bit key: an 11-bit local endpoint id
-// and the 5xx flag. Latencies of 2^20 us or more (about 1% of lines) do not
-// fit and are kept on a side list with their key instead.
-const KEY_BITS: u32 = 12;
-const ERR: u32 = 1 << 11;
+// A record packs the latency above a 13-bit key: a 12-bit shared endpoint
+// slot and the 5xx flag. The shared slot removes the per-thread id merge.
+const KEY_BITS: u32 = 13;
+const ERR: u32 = 1 << 12;
 const ID_MASK: u32 = ERR - 1;
-const PACKED_MAX: u32 = 1 << 20;
+const PACKED_MAX: u32 = 1 << 19;
 
 // State the threads share, each touching its own part or waiting at a barrier
 // while one thread writes.
@@ -110,35 +109,54 @@ unsafe fn decode(end: *const u8, len: usize) -> u32 {
     (high * 100_000_000 + _mm_extract_epi32::<1>(v) as u64) as u32
 }
 
-// Endpoint names to dense ids in first-seen order. The exact bytes live in
-// one compact worker-local arena instead of pointing back into the 239 MB log:
-// the Zipf-heavy names therefore stay cache-hot. Hashes only select candidates;
-// every hit is resolved by complete byte equality.
-struct Interner {
-    names: Vec<(u32, u8)>, // (offset, length)
-    store: Vec<u8>,
-    slot: Vec<u16>,        // id + 1 per slot, 0 if free
+// One exact lock-free endpoint table shared by all workers. A slot is the
+// endpoint id. New names are copied into one compact arena and published only
+// after the bytes are ready; hashes select candidates but full bytes decide
+// equality.
+struct NameArena(UnsafeCell<Vec<u8>>);
+unsafe impl Sync for NameArena {}
+
+struct Names {
+    slot: Vec<AtomicU64>,
+    used: AtomicU32,
+    arena: NameArena,
 }
 
-impl Interner {
+impl Names {
     const SLOTS: usize = 1 << 12;
+    const ARENA: usize = Self::SLOTS * 128;
 
     fn new() -> Self {
-        Interner {
-            names: Vec::with_capacity(1842),
-            store: Vec::with_capacity(128 * 1842),
-            slot: vec![0; Self::SLOTS],
+        Self {
+            slot: (0..Self::SLOTS).map(|_| AtomicU64::new(0)).collect(),
+            used: AtomicU32::new(0),
+            arena: NameArena(UnsafeCell::new(vec![0u8; Self::ARENA + 32])),
         }
     }
 
     #[inline(always)]
-    fn name(&self, id: usize) -> &[u8] {
-        let (off, len) = self.names[id];
-        &self.store[off as usize..off as usize + len as usize]
+    fn name(&self, v: u64) -> &[u8] {
+        let off = (v as u32).wrapping_sub(1) as usize;
+        let len = (v >> 32) as usize;
+        unsafe { &(&*self.arena.0.get())[off..off + len] }
     }
 
     #[inline(always)]
-    fn id(&mut self, s: &[u8]) -> u32 {
+    fn same(a: &[u8], b: &[u8]) -> bool {
+        if a.len() != b.len() { return false; }
+        if a.len() <= 32 {
+            unsafe {
+                let va = _mm256_loadu_si256(a.as_ptr().cast());
+                let vb = _mm256_loadu_si256(b.as_ptr().cast());
+                let eq = _mm256_movemask_epi8(_mm256_cmpeq_epi8(va, vb)) as u32;
+                return (!eq & (!0u32 >> (32 - a.len()))) == 0;
+            }
+        }
+        a == b
+    }
+
+    #[inline(always)]
+    fn id(&self, s: &[u8]) -> u32 {
         let n = s.len();
         let a = if n >= 8 {
             unsafe { s.as_ptr().cast::<u64>().read_unaligned() }
@@ -149,26 +167,31 @@ impl Interner {
         };
         let b = if n >= 8 {
             unsafe { s.as_ptr().add(n - 8).cast::<u64>().read_unaligned() }
-        } else {
-            0
-        };
+        } else { 0 };
         let mut i = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as usize;
-        loop {
+        for _ in 0..Self::SLOTS {
             let slot = i & (Self::SLOTS - 1);
-            let id = self.slot[slot];
-            if id == 0 {
-                assert!(self.names.len() < Self::SLOTS / 2, "too many endpoints");
-                let off = self.store.len() as u32;
-                self.store.extend_from_slice(s);
-                self.names.push((off, n as u8));
-                self.slot[slot] = self.names.len() as u16;
-                return self.names.len() as u32 - 1;
+            let mut v = self.slot[slot].load(Acquire);
+            if v == 0 {
+                let off = self.used.fetch_add(n as u32, Relaxed) as usize;
+                assert!(off + n <= Self::ARENA, "endpoint arena exhausted");
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        s.as_ptr(),
+                        (&mut *self.arena.0.get()).as_mut_ptr().add(off),
+                        n,
+                    );
+                }
+                let new = (n as u64) << 32 | (off as u64 + 1);
+                match self.slot[slot].compare_exchange(0, new, Release, Acquire) {
+                    Ok(_) => return slot as u32,
+                    Err(winner) => v = winner,
+                }
             }
-            if self.name(id as usize - 1) == s {
-                return id as u32 - 1;
-            }
+            if Self::same(self.name(v), s) { return slot as u32; }
             i += 1;
         }
+        panic!("endpoint table full");
     }
 }
 
