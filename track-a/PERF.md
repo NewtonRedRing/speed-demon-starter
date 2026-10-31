@@ -156,3 +156,111 @@ All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
 strict warnings and all four offline sandbox checks pass. The A oracle checks
 every endpoint length from 1 to 125 and shared-prefix/shared-suffix names.
 No new official score is available; formatted-source penalties still apply.
+
+## Experimental compact pipeline and fused parsing
+
+Developed on `experiment/track-a-speed-first`, based on submitted commit `60e1b80`,
+then promoted to the submission branch `speed-demon` after validation.
+These are local experiments, not live-board runs; no official run ID or
+90-point result is available.
+
+### Measurement correction
+
+Each measured process runs in a fresh cgroup with 12 CPU quota, 8 GB/no swap,
+512 PIDs, no network, read-only root/input, unprivileged user and 1 GiB scratch.
+A separate live staging cgroup reads the entire official input before every
+run. A small static supervisor measures fork/exec-to-exit wall time, child CPU
+and RSS, then reads its cgroup's `memory.peak`. The cgroup peak includes that
+supervisor, output cache and kernel charges. It is not `ru_maxrss`.
+Output filenames and SHA-256 are checked outside the timed interval, every run.
+Warmups are excluded; executable order alternates and reverses between rounds.
+Inputs and expected outputs are verified against the live official manifest.
+
+This better models externally warmed page-cache accounting than the previous
+RSS-only reports. It does not reproduce the official scoring box, six physical
+P-cores, CPU affinity, disabled turbo, or the official five-run trimmed mean.
+Host load still changes timings. Source size must still be measured after the
+organisers' formatter; no official K is inferred from these local medians.
+
+### Retained changes
+
+- Pack each record into six bytes, preserving full uint32 latency, eleven
+  endpoint bits and one error bit. Remove parser-time hour/group counter
+  updates and reconstruct counts in the claimed hour's compact table.
+- Replace the dataset-sized secondary latency allocation with hour-local
+  arrays. Source vectors are freed immediately after their hour is scattered.
+- Fuse bounded endpoint delimiter scanning and CRC32C hashing. Hash table hits
+  always compare the entire endpoint, so CRC collisions cannot merge groups.
+- Use a shared SWAR delimiter mask for methods, endpoints and latencies.
+  Decimal pairs/four-digit halves parse up to eight digits at once; scalar
+  tails handle longer values and short final records.
+- Select exact percentiles directly for one/two values, with an unsigned AVX2
+  network for three/eight, `std::sort` for nine/32 and ordered `nth_element`
+  above 32. Masked vector accesses never read/write a neighboring group.
+- Right-size output by present groups and endpoint lengths, including numeric
+  field bounds and `to_chars`' writable range.
+- Increase initial hour-vector reservations moderately. This reduced cgroup
+  peak without a measurable time difference in its isolated comparison.
+
+Latest eight measured repetitions per executable:
+
+| Executable | Median process time (s) | Median cgroup peak (MiB) | Median child peak RSS (MiB) |
+|---|---:|---:|---:|
+| Submitted `60e1b80` implementation | 0.05048445 | 69.53 | 64.51 |
+| Retained experimental implementation | 0.04034590 | 36.39 | 33.16 |
+
+This is **20.1% lower median runtime**, **47.7% lower median cgroup peak**,
+and 23% less median child CPU time. Earlier complete comparisons measured
+0.06097745 -> 0.04922250 s and 0.07266175 -> 0.05171145 s, reductions of
+19.3% and 28.8%. These are separate batches, not cumulative percentages.
+All repetitions matched the official full seed-1 hash.
+
+### Individual experiments
+
+Each row is a separate comparison against its immediate baseline, not a
+comparison between timings on different rows.
+
+| Experiment | Before / candidate median (s) | Decision |
+|---|---|---|
+| Packed records, deferred counts, hour-local latencies | 0.04901685 / 0.04503785 | Retain |
+| Remove page-discard calls, first test | 0.04988105 / 0.04932015 | Inconclusive |
+| Fused SWAR/CRC endpoint scan | 0.04563525 / 0.04340485 | Retain |
+| Bounded chronological streaming writer | 0.03850400 / 0.04055525 | Reject: waits slow workers despite lower memory |
+| Right-sized output without writer waits | 0.04444265 / 0.04301715 | Retain |
+| Eight-lane AVX2 small-group sorting | 0.03893415 / 0.03679235 | Retain |
+| Extend network to sixteen lanes | 0.03703640 / 0.03793225 | Reject |
+| PGO on official generator sample seeds 349/719 | 0.04559000 / 0.04540945 | Reject: no reliable gain |
+| Six / eight / twelve workers | 0.07247620 / 0.05617310 / 0.04462865 | Keep twelve |
+| Direct singleton/pair formulas | 0.04286825 / 0.04260680 | Keep exact simple special cases; no isolated speed claim |
+| Reserve a shard-sized vector for each hour | 0.03996245 / 0.04248815 | Reject: slower |
+| Moderate hour-vector reservation increase | 0.04433575 / 0.04441350 | Neutral time, approximately 10.5% lower cgroup peak |
+| SWAR method delimiter | 0.04401195 / 0.04154160 | Retain |
+| SWAR decimal latency parsing | 0.05831835 / 0.05651125 | Retain |
+
+Repeated removal of page-discard calls did not establish a speed win.
+In the final combined three-way test, the resident version took 0.05386590 s
+versus 0.05171145 s with page release; cgroup peaks were 36.58 and 36.89 MiB,
+while RSS was 250.24 and 32.86 MiB. Keep page release, but do not mistake the
+RSS difference for an equivalent scoring-memory saving.
+
+PGO used a byte-identical official generator and an offline Python build stage,
+with atomic instrumentation counters and strict missing/mismatched-profile
+errors. Neither training inputs nor reference answers entered the runtime
+image. The unused generator and PGO build stages were removed after rejection.
+In-place American-flag record partitioning, two-line interleaving and radix
+multiselect were not implemented or benchmarked in this pass. Hour-local
+scatter already removes the dataset-sized secondary array; further changes
+need evidence, not assumed wins.
+
+### Correctness and build checks
+
+- All 15 software tests pass, including seeded ascending/descending/equal/
+  extreme/random groups, group sizes 1-72/513/4097, all decimal lengths and
+  full uint32 values.
+- All three A oracle methods pass ASan/UBSan, compiled for `-march=haswell`
+  (AVX2, without AVX-512), with strict warnings treated as errors.
+- Additional official-generator sample seeds 23 and 9871 match the original
+  Python reference byte for byte, twice each. These are correctness fixtures,
+  not performance or official-score evidence.
+- The pinned offline production image passes the sandbox and the manifest's
+  full seed-1 SHA-256. There are no added runtime dependencies or build tools.

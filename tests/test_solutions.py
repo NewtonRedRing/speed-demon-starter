@@ -26,6 +26,21 @@ class Solutions(unittest.TestCase):
             result = measure(track, data, digest, runs, prefix + track)
             self.assertEqual(result["sha256"], digest)
 
+    def check_a(self, rows, runs=1):
+            groups = {}
+            for row in rows:
+                timestamp, _, endpoint, status, latency = row.split()
+                group = groups.setdefault((timestamp[:13] + ":00:00Z", endpoint), [[], 0])
+                group[0].append(int(latency))
+                group[1] += 500 <= int(status) <= 599
+            expected = []
+            for (hour, endpoint), (values, errors) in sorted(groups.items()):
+                values.sort()
+                n = len(values)
+                p = [values[(rank * n + 99) // 100 - 1] for rank in [50, 95, 99]]
+                expected.append(f"{hour} {endpoint} {n} {p[0]} {p[1]} {p[2]} {errors} {errors * 1000000 // n}\n")
+            self.verify("a", {"requests.log": "".join(rows).encode()}, "".join(expected).encode(), runs)
+
     def test_a_empty_and_single_worker(self):
         self.verify("a", {"requests.log": b""}, b"")
         self.verify("a", {"requests.log": (
@@ -54,7 +69,7 @@ class Solutions(unittest.TestCase):
         endpoints = ["/", "/x", "/x-export", "/x.csv", "/x/{id}", "/X", "/" + "a" * 124]
         endpoints += [f"/catalogue/{i}" for i in range(1829)]
         dates = ["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"]
-        rows, groups = [], {}
+        rows = []
         for i in range(42000):
             h = rng.randrange(72)
             date = dates[(h + 18) // 24]
@@ -77,18 +92,32 @@ class Solutions(unittest.TestCase):
                 rows.append(f"2026-10-30T18:00:00.000000Z GET /threshold-{count} 200 {count - value}\n")
         rows += rows[:10]
         rng.shuffle(rows)
-        for row in rows:
-            timestamp, _, endpoint, status, latency = row.split()
-            group = groups.setdefault((timestamp[:13] + ":00:00Z", endpoint), [[], 0])
-            group[0].append(int(latency))
-            group[1] += 500 <= int(status) <= 599
-        expected = []
-        for (hour, endpoint), (values, errors) in sorted(groups.items()):
-            values.sort()
-            n = len(values)
-            p = [values[(rank * n + 99) // 100 - 1] for rank in [50, 95, 99]]
-            expected.append(f"{hour} {endpoint} {n} {p[0]} {p[1]} {p[2]} {errors} {errors * 1000000 // n}\n")
-        self.verify("a", {"requests.log": "".join(rows).encode()}, "".join(expected).encode(), 2)
+        self.check_a(rows, 2)
+
+    def test_a_quantile_networks_and_decimal_lengths(self):
+        dates = ["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"]
+        methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+        for seed in (23, 9871):
+            with self.subTest(seed=seed):
+                rng = random.Random(seed)
+                rows = []
+                for h in range(72):
+                    count = h + 1 if h < 70 else (513 if h == 70 else 4097)
+                    patterns = [
+                        list(range(count)), list(reversed(range(count))),
+                        [4294967295] * count, [0 if i % 2 else 4294967295 for i in range(count)],
+                        [rng.randrange(4294967296) for _ in range(count)],
+                    ]
+                    timestamp = f"{dates[(h + 18) // 24]}T{(h + 18) % 24:02}:00:00.000000Z"
+                    for kind, values in enumerate(patterns):
+                        endpoint = f"/pattern/{kind}" + "x" * (kind * 23)
+                        for i, value in enumerate(values):
+                            rows.append(f"{timestamp} {methods[i % 7]} {endpoint} {599 if i % 2 else 499} {value}\n")
+                for digits in range(1, 11):
+                    for value in (10 ** (digits - 1) - 1, min(10 ** digits - 1, 4294967295)):
+                        rows.append(f"2026-10-30T18:00:00.000000Z OPTIONS /digits/{digits} 500 {value}\n")
+                rng.shuffle(rows)
+                self.check_a(rows)
 
     def check_b(self, docs, queries):
         tokens = [re.findall(rb"[a-z0-9]+", doc.lower()) for doc in docs]

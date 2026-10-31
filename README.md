@@ -36,11 +36,12 @@ be globally optimal. In particular, C retains owned string/deque entries rather
 than the larger instrumented arena-backed experiment. Its latest changes are
 locally validated but do not yet have an official score.
 
-Latest full public seed-1 rechecks (five process-timed runs per track):
+Latest full public seed-1 rechecks (A: eight process-timed paired runs;
+B/C/D: five process-timed runs):
 
 | Track | Median time | Peak RSS | Official output hash |
 |---|---:|---:|---|
-| A | 0.045975 s | 65.67 MiB | PASS |
+| A | 0.040346 s | 34.41 MiB | PASS |
 | B | 0.509163 s | 278.18 MiB | PASS |
 | C | 0.113996 s | 21.89 MiB | PASS |
 | D | 0.394181 s | 130.77 MiB | PASS |
@@ -49,7 +50,7 @@ These are local measurements, not leaderboard scores or controlled comparisons
 with previous batches. All four also passed `check.py` with the live manifest's
 expected hashes, allowlisted offline builds and the production-style sandbox.
 Each benchmark run checks that `/out` contains exactly its required output file.
-All 14 regression tests passed. No dependency downloads are needed at build or
+All 15 regression tests passed. No dependency downloads are needed at build or
 run time.
 
 ## Official public dataset
@@ -226,6 +227,28 @@ offline production sandbox pass. No new official score is available.
 The [B performance log](track-b/PERF.md) records the source audit, rejected
 experiments and memory tradeoff.
 
+### Experimental Track A follow-up
+
+Developed on `experiment/track-a-speed-first`, the validated candidate is also
+promoted to the submitted `speed-demon` branch. A now uses six-byte records, deferred
+hour-local counts/scatter, fused SWAR/CRC endpoint parsing, SWAR decimal parsing
+and exact small-group AVX2 sorting. All latency bits and full endpoint equality
+are preserved.
+
+The latest eight-run alternating comparison measured **0.05048445 s before
+versus 0.04034590 s after, 20.1% lower median runtime**. Median fresh-cgroup
+`memory.peak` dropped from 69.53 to 36.39 MiB, **47.7% lower**. Input pages were
+prewarmed by another live cgroup; a small static measurement supervisor is
+included in the counter. This is not RSS, an official harness result, a
+verified 90-point score, or proof of scoring-CPU saturation.
+
+All 15 tests, three A sanitizer oracle methods, strict AVX2-only compiler
+checks, two additional official-generator sample seeds against the original
+reference, and the full-data production sandbox pass. Slower streaming,
+sixteen-lane sorting, six/eight-worker and oversized-reservation variants were
+removed; offline two-seed PGO showed no reliable gain and was also removed.
+The [A performance log](track-a/PERF.md) records individual experiments.
+
 ## Validation
 
 ```powershell
@@ -244,7 +267,7 @@ Verified for this candidate:
 
 - All four tiny outputs and five full repetitions per track match exact hashes.
 - All four full-data images pass the capability-free production-style sandbox.
-- Eight solution-oracle methods pass; six dataset-integrity tests check
+- Nine solution-oracle methods pass; six dataset-integrity tests check
   downloads, manifest validation and rejection of missing or modified inputs.
 - Solution oracles also pass AddressSanitizer and UndefinedBehaviorSanitizer.
   Sanitizer images are separate from optimized images; ASan's own allocator does
@@ -308,7 +331,7 @@ singleton postings and smaller CSV hash buckets when their speed, memory and
 source-size tradeoffs did not improve the score. A modest small-group sorting
 candidate for A was published in `1ba1831`; the table above still describes
 `dfdc930`, not that later commit.
-All 14 current software tests pass, including the new small-group threshold
+All 15 current software tests pass, including the new small-group threshold
 cases, and the changed A source passes strict compiler warnings.
 
 ## Remaining optimization work
