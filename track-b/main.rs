@@ -359,6 +359,114 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
     }
 }
 
+#[inline]
+fn sparse_segment<'a>(
+    id: u32,
+    thread: usize,
+    post: &'a [u16],
+    start: &[u32],
+    seg: &[u16],
+) -> &'a [u16] {
+    let i = id as usize;
+    let counts = &seg[i * THREADS..][..THREADS];
+    let before: usize = counts[..thread].iter().map(|&n| n as usize).sum();
+    let n = counts[thread] as usize;
+    let at = start[i] as usize + before;
+    &post[at..at + n]
+}
+
+#[inline]
+fn apply16(a: &[u16], b: &[u16], op: u8, out: &mut Vec<u16>) {
+    out.clear();
+    if a.is_empty() {
+        if op == b'O' { out.extend_from_slice(b); }
+        return;
+    }
+    if b.is_empty() {
+        if op != b'A' { out.extend_from_slice(a); }
+        return;
+    }
+    if op != b'O' && a.len() * 16 < b.len() {
+        let mut j = 0;
+        for &x in a {
+            j += b[j..].partition_point(|&y| y < x);
+            let hit = j < b.len() && b[j] == x;
+            if hit == (op == b'A') { out.push(x); }
+        }
+        return;
+    }
+    let (mut i, mut j) = (0, 0);
+    match op {
+        b'O' => {
+            out.reserve(a.len() + b.len());
+            while i < a.len() && j < b.len() {
+                let (x, y) = (a[i], b[j]);
+                out.push(x.min(y));
+                i += (x <= y) as usize;
+                j += (y <= x) as usize;
+            }
+            out.extend_from_slice(&a[i..]);
+            out.extend_from_slice(&b[j..]);
+        }
+        b'A' => {
+            out.reserve(a.len().min(b.len()));
+            while i < a.len() && j < b.len() {
+                let (x, y) = (a[i], b[j]);
+                if x == y { out.push(x); }
+                i += (x <= y) as usize;
+                j += (y <= x) as usize;
+            }
+        }
+        _ => {
+            out.reserve(a.len());
+            while i < a.len() && j < b.len() {
+                let (x, y) = (a[i], b[j]);
+                if x < y { out.push(x); }
+                i += (x <= y) as usize;
+                j += (y <= x) as usize;
+            }
+            out.extend_from_slice(&a[i..]);
+        }
+    }
+}
+
+fn line_sparse(
+    out: &mut String,
+    tids: &[u32],
+    ops: &[u8],
+    post: &[u16],
+    start: &[u32],
+    seg: &[u16],
+    firsts: &[u32],
+    a: &mut Vec<u16>,
+    b: &mut Vec<u16>,
+) {
+    let (mut count, mut sum) = (0u64, 0u64);
+    let mut first = [0u32; 10];
+    let mut nf = 0usize;
+    for t in 0..THREADS {
+        a.clear();
+        a.extend_from_slice(sparse_segment(tids[0], t, post, start, seg));
+        for (&op, &id) in ops.iter().zip(&tids[1..]) {
+            if a.is_empty() && op != b'O' { continue; }
+            apply16(a, sparse_segment(id, t, post, start, seg), op, b);
+            std::mem::swap(a, b);
+        }
+        let base = firsts[t];
+        count += a.len() as u64;
+        sum += a.iter().map(|&d| base as u64 + d as u64).sum::<u64>();
+        if nf < 10 {
+            for &d in a.iter().take(10 - nf) {
+                first[nf] = base + d as u32;
+                nf += 1;
+            }
+        }
+    }
+    write!(out, "{count} {sum}").unwrap();
+    first[..nf].iter().for_each(|d| write!(out, " {d}").unwrap());
+    out.push('\n');
+}
+
 /// "count sum id1 ... id10" for a set of documents.
 fn line(out: &mut String, docs: &Docs) {
     let (mut count, mut sum, mut first) = (0u64, 0u64, Vec::with_capacity(10));
@@ -661,12 +769,18 @@ fn main() {
     };
     let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
-    on_threads(|_| loop {
+    on_threads(|_| {
+        let (mut local_a, mut local_b) = (Vec::<u16>::new(), Vec::<u16>::new());
+        loop {
         let k = next.fetch_add(1, Relaxed);
         let Some(chunk) = chunks.get(k) else { return };
         let mut out = String::new();
         for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
             let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
+            if !phrase && tids.iter().all(|&id| (id as usize) >= nbits && (id as usize) < lists) {
+                line_sparse(&mut out, tids, ops, &post, &start, &seg, &firsts, &mut local_a, &mut local_b);
+                continue;
+            }
             let set = if phrase {
                 let at = found.partition_point(|m| m.0 < q as u32);
                 Docs::List(found[at..].iter().take_while(|m| m.0 == q as u32).map(|m| m.1).collect())
@@ -680,6 +794,7 @@ fn main() {
             line(&mut out, &set);
         }
         *chunk.lock().unwrap() = out;
+        }
     });
     let out: String = chunks.into_iter().map(|c| c.into_inner().unwrap()).collect();
     std::fs::write("/out/results.txt", out).expect("/out/results.txt");
