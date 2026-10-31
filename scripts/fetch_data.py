@@ -81,9 +81,12 @@ def fetch(path, url, expected, force=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--force", action="store_true", help="download even when local hashes already match")
+    parser.add_argument("--tracks", nargs="+", choices=sorted(INPUTS),
+                        default=sorted(INPUTS), help="tracks to fetch; default all")
     args = parser.parse_args()
     manifest = load_manifest()
-    for track, names in INPUTS.items():
+    for track in args.tracks:
+        names = INPUTS[track]
         checksums = manifest["tracks"][track]["inputs_sha256"]
         for name in names:
             expected = checksums[name]
