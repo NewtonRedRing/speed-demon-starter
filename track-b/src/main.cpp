@@ -3,6 +3,8 @@
 #include <atomic>
 #include <bit>
 #include <cstdint>
+#include <cstdlib>
+#include <new>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -211,28 +213,52 @@ void parallel(unsigned workers, Work work) {
     for (auto error : errors) if (error) std::rethrow_exception(error);
 }
 
+// A worker owns its postings. Eight IDs live in the 40-byte header;
+ // only terms occurring nine or more times allocate heap storage.
+ // This removes the 8-byte hit vector and the second 4-byte scatter array.
+struct SmallPosting {
+    u32 length = 0, capacity = 8;
+    union { u32 local[8]; u32* heap; };
+    SmallPosting() : local{} {}
+    SmallPosting(const SmallPosting&) = delete;
+    SmallPosting& operator=(const SmallPosting&) = delete;
+    ~SmallPosting() { if (capacity > 8) std::free(heap); }
+    const u32* data() const { return capacity == 8 ? local : heap; }
+    u32 size() const { return length; }
+    void add(u32 document) {
+        if (length == capacity) {
+            const u32 next = capacity * 2;
+            u32* replacement = static_cast<u32*>(std::malloc(std::size_t(next) * sizeof(u32)));
+            if (!replacement) throw std::bad_alloc();
+            std::memcpy(replacement, data(), std::size_t(length) * sizeof(u32));
+            if (capacity > 8) std::free(heap);
+            heap = replacement;
+            capacity = next;
+        }
+        if (capacity == 8) local[length++] = document;
+        else heap[length++] = document;
+    }
+};
+static_assert(sizeof(SmallPosting) == 40);
+
 struct Local {
-    struct Hit { u32 term, document; };
-    std::vector<Hit> hits;
-    std::unique_ptr<u32[]> documents;
-    std::vector<u32> offsets;
+    std::unique_ptr<SmallPosting[]> postings;
     std::vector<Matches> matches;
     u32 extent = 0;
     std::span<const u32> posting(u32 term) const {
-        return {documents.get() + offsets[term], offsets[term + 1] - offsets[term]};
+        return {postings[term].data(), postings[term].size()};
     }
 };
 
 void scan(Local& local, const char* data, std::size_t begin, std::size_t end, const Words& words,
           const std::vector<Term>& terms, const Automaton& automaton, std::size_t queries, u32 booleans) {
-    local.offsets.resize(static_cast<std::size_t>(booleans) + 1);
+    local.postings = std::make_unique<SmallPosting[]>(booleans);
     local.matches.resize(queries);
     std::vector<u32> last(booleans, missing);
     if (begin && data[begin - 1] != '\n')
         while (data[begin++] != '\n') {}
     if (end && data[end - 1] != '\n')
         while (data[end++] != '\n') {}
-    local.hits.reserve((end - begin) / 12 + 1);
     const char* p = data + begin;
     auto released = (begin + 4095) & ~std::size_t(4095);
     while (p < data + end) {
@@ -258,8 +284,7 @@ void scan(Local& local, const char* data, std::size_t begin, std::size_t end, co
                 if (word != missing && terms[word].boolean != missing) {
                     const u32 index = terms[word].boolean;
                     if (last[index] != document) {
-                        local.hits.push_back({index, document});
-                        ++local.offsets[index + 1];
+                        local.postings[index].add(document);
                         last[index] = document;
                     }
                 }
@@ -403,16 +428,6 @@ int solve() {
     std::vector<Local> locals(workers);
     parallel(workers, [&](unsigned w) {
         scan(locals[w], data, size * w / workers, size * (w + 1) / workers, words, terms, automaton, phrases, booleans);
-    });
-    parallel(workers, [&](unsigned w) {
-        Local& local = locals[w];
-        for (std::size_t i = 1; i < local.offsets.size(); ++i)
-            local.offsets[i] += local.offsets[i - 1];
-        local.documents = std::make_unique_for_overwrite<u32[]>(local.hits.size());
-        auto cursors = local.offsets;
-        for (const Local::Hit& hit : local.hits)
-            local.documents[cursors[hit.term]++] = hit.document;
-        std::vector<Local::Hit>().swap(local.hits);
     });
     std::vector<Matches> matches(phrases);
     u32 extent = 0;
