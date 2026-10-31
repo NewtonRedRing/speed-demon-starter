@@ -14,7 +14,7 @@ use std::arch::x86_64::*;
 use std::borrow::Cow;
 use std::fmt::Write;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::Mutex;
 
 extern "C" {
@@ -39,24 +39,6 @@ fn map(path: &str) -> &'static [u8] {
         let ok = len == 0 || mmap(p, len, 1, 0x12, file.as_raw_fd(), 0) == p; // MAP_PRIVATE | MAP_FIXED
         assert!(p as isize != -1 && ok, "mmap {path}");
         std::slice::from_raw_parts(p, len)
-    }
-}
-
-struct OwnedBits {
-    data: Vec<u64>,
-    ptr: *mut u64,
-}
-unsafe impl Send for OwnedBits {}
-unsafe impl Sync for OwnedBits {}
-impl OwnedBits {
-    fn new(n: usize) -> Self {
-        let mut data = vec![0u64; n];
-        let ptr = data.as_mut_ptr();
-        Self { data, ptr }
-    }
-    #[inline(always)]
-    unsafe fn or(&self, i: usize, x: u64) {
-        *self.ptr.add(i) |= x;
     }
 }
 
@@ -466,12 +448,6 @@ fn main() {
         while *c < text.len() && text[*c - 1] != b'\n' {
             *c += 1;
         }
-        // Dense ascending ids let every interior worker start at a 64-doc
-        // boundary. Bitmap words are then exclusively owned by one worker.
-        while *c < text.len() && number(text, *c) & 63 != 0 {
-            while *c < text.len() && text[*c] != b'\n' { *c += 1; }
-            *c += (*c < text.len()) as usize;
-        }
     }
     let mut last_line = text.len().saturating_sub(1);
     while last_line > 0 && text[last_line - 1] != b'\n' {
@@ -522,18 +498,6 @@ fn main() {
         new[i] = r as u32;
     }
     terms.renumber(&new);
-    // A tiny exact front table for the hottest sampled terms. At 50% load,
-    // collisions simply fall back to the complete dictionary; they never
-    // change identity. This keeps the common Zipf head in L1.
-    let mut hottest: Vec<usize> = (0..nterms).collect();
-    hottest.sort_unstable_by_key(|&i| std::cmp::Reverse(df[i]));
-    terms.hot = vec![NONE; 2048];
-    for old in hottest.into_iter().take(1024) {
-        let id = new[old];
-        let h = hash(terms.keys[id as usize]);
-        let slot = &mut terms.hot[h & 2047];
-        if *slot == NONE { *slot = id; }
-    }
     ids.iter_mut().for_each(|id| *id = new[*id as usize]);
     anchored.iter_mut().for_each(|a| a.0 = new[a.0 as usize]);
     anchored.sort_unstable();
@@ -541,7 +505,7 @@ fn main() {
     let astart: Vec<usize> = (a0..=nkeep).map(|i| anchored.partition_point(|a| (a.0 as usize) < i)).collect();
     let words = ndocs.div_ceil(64);
     // Zero pages from the kernel, written only where a bit is set.
-    let bits = OwnedBits::new(nbits * words);
+    let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
 
     // The scan: phrase matches, bitmap bits, and list postings by bucket.
     let found = Mutex::new(vec![]); // (query, document) phrase matches
@@ -556,7 +520,7 @@ fn main() {
         let (mut pending, mut block) = (vec![0u64; nbits + 1], first as usize / 64);
         let flush = |pending: &mut [u64], w: usize| {
             for (b, x) in pending[..nbits].iter_mut().enumerate().filter(|(_, x)| **x != 0) {
-                unsafe { bits.or(b * words + w, std::mem::take(x)); }
+                bits[b * words + w].fetch_or(std::mem::take(x), Relaxed);
             }
         };
         // Every token does the same work, kept or not by masks, so whether a
@@ -627,7 +591,7 @@ fn main() {
     });
     drop(scans);
     let post: Vec<u16> = unsafe { std::mem::transmute(post) };
-    let bits: Vec<u64> = bits.data;
+    let bits: Vec<u64> = unsafe { std::mem::transmute(bits) };
     let mut found = found.into_inner().unwrap();
     found.sort_unstable();
     found.dedup();
