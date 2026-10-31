@@ -112,6 +112,21 @@ unsafe fn decode(end: *const u8, len: usize) -> u32 {
     (high * 100_000_000 + _mm_extract_epi32::<1>(v) as u64) as u32
 }
 
+// For up to eight decimal digits, the preceding bytes are masked before
+// subtracting ASCII '0' to avoid a borrow propagating into the number.
+// SWAR folds byte pairs into 16-bit, then 32-bit, then full 8-digit values.
+#[inline(always)]
+unsafe fn decode_swar(end: *const u8, len: usize) -> u32 {
+    let raw = end.sub(8).cast::<u64>().read_unaligned();
+    let mask = !0u64 << ((8 - len) * 8);
+    let bytes = (raw & mask).wrapping_sub(0x3030_3030_3030_3030 & mask);
+    let pairs = (bytes & 0x00ff_00ff_00ff_00ff) * 10
+        + ((bytes >> 8) & 0x00ff_00ff_00ff_00ff);
+    let groups = (pairs & 0x0000_ffff_0000_ffff) * 100
+        + ((pairs >> 16) & 0x0000_ffff_0000_ffff);
+    ((groups & 0xffff_ffff) * 10000 + (groups >> 32)) as u32
+}
+
 // Endpoint names to dense ids in first-seen order. Open addressing on a CRC of
 // the name's first and last eight bytes (masked when the name is shorter; the
 // rest of the line keeps both loads in bounds). Names point into the log.
@@ -245,12 +260,7 @@ impl Parser {
             let name_bytes = from_raw_parts(name, name_end.offset_from(name) as usize);
             let key = self.local.id(name_bytes) | ERR * (*name_end.add(1) == b'5') as u32;
             let digits = eol.offset_from(name_end) as usize - 5; // after " SSS "
-            let latency = if digits <= 2 {
-                let ones = (*eol.sub(1) - b'0') as u32;
-                if digits == 2 { (*eol.sub(2) - b'0') as u32 * 10 + ones } else { ones }
-            } else {
-                decode(eol, digits)
-            };
+            let latency = if digits <= 8 { decode_swar(eol, digits) } else { decode(eol, digits) };
             p = eol.add(1);
 
             if latency >= PACKED_MAX {

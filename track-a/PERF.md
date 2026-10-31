@@ -328,3 +328,14 @@ inserts/lookups across 1,800 distinct names, including repeated hits and
 probe collisions. T26 maps each spawned worker to the corresponding CPU in
 the sandbox's **allowed** affinity mask, with a safe no-op fallback when the
 syscalls are blocked. These have not yet been benchmarked on the scorer.
+
+### 2026-10-31: SWAR latency decoder (T10)
+
+The parser now decodes one-to-eight decimal digits by masking bytes preceding
+the number, subtracting ASCII '0' and combining pairs/quadruples/eight-digit
+words with 64-bit arithmetic. The existing SSE routine is retained for 9- and
+10-digit latencies. An independent 100,000-case randomized Python model
+matched decimal parsing for lengths 1..8. A local Clang C microbenchmark
+suggested SWAR faster than the prior SSE path, but its small fixed input is
+not representative of full-process wall time. This optimization still needs
+Rust compilation and official correctness/time validation.
