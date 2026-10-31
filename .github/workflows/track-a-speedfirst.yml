@@ -1,0 +1,24 @@
+name: Track A speed-first correctness gate
+
+on:
+  push:
+    branches:
+      - experiment/track-a-speed-first-deferred-count
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exact-output:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile the exact candidate source with GCC
+        run: |
+          g++ -std=c++20 -O3 -DNDEBUG -flto -march=native -pthread \
+            -Wall -Wextra -Wpedantic -Werror \
+            -o solution track-a/src/main.cpp
+      - name: Empty input and independent random exact-output checks
+        run: python3 tests/test_speedfirst_a.py
