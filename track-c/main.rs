@@ -25,8 +25,8 @@
 
 use std::arch::x86_64::{
     __m128i, __m256i, _mm_clmulepi64_si128, _mm_crc32_u64, _mm_cvtsi128_si64,
-    _mm_cvtsi64_si128, _mm_set1_epi8, _mm256_and_si256, _mm256_cmpeq_epi8, _mm256_loadu_si256,
-    _mm256_movemask_epi8, _mm256_set1_epi8, _mm256_storeu_si256,
+    _mm_cvtsi64_si128, _mm_set1_epi8, _mm256_cmpeq_epi8, _mm256_loadu_si256,
+    _mm256_movemask_epi8, _mm256_set1_epi8,
 };
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering::{Acquire, Relaxed, Release}};
@@ -210,8 +210,8 @@ impl Names {
         if len <= 16 { return true; }
         let tail = len - 16;
         let arena = unsafe { &*self.arena.0.get() };
-        arena[k.tail as usize..k.tail as usize + tail]
-            == unsafe { *std::slice::from_raw_parts((p as *const u8).add(16), tail) }
+        &arena[k.tail as usize..k.tail as usize + tail]
+            == unsafe { std::slice::from_raw_parts((p as *const u8).add(16), tail) }
     }
 
     #[inline(always)]
