@@ -24,11 +24,12 @@
 //!   run past the mapping.
 
 use std::arch::x86_64::{
-    __m128i, __m256i, _mm_clmulepi64_si128, _mm_cvtsi128_si64, _mm_cvtsi64_si128,
-    _mm_set1_epi8, _mm256_and_si256, _mm256_cmpeq_epi8, _mm256_loadu_si256,
+    __m128i, __m256i, _mm_clmulepi64_si128, _mm_crc32_u64, _mm_cvtsi128_si64,
+    _mm_cvtsi64_si128, _mm_set1_epi8, _mm256_and_si256, _mm256_cmpeq_epi8, _mm256_loadu_si256,
     _mm256_movemask_epi8, _mm256_set1_epi8, _mm256_storeu_si256,
 };
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::{Acquire, Relaxed, Release}};
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering::{Acquire, Relaxed, Release}};
 
 /// Maps `path` read-only for the life of the process. The harness
 /// pre-warms `/data` into the page cache before the run, so those pages
@@ -145,25 +146,36 @@ impl Agg {
 
 // --- Distinct names -----------------------------------------------------
 
-/// Shared by all workers. `slots` is an open-addressing table with
-/// `2 << id_bits` entries; an entry is the hash with its low `id_bits`
-/// bits replaced by the name's number (1 up to `1 << id_bits`, 0 = empty),
-/// so the slot index and the stored bits together cover all 64 hash bits.
-/// `bits` holds one bit per (group, number).
-///
-/// A per-thread-local alternative (each thread its own set of (group, hash)
-/// pairs, unioned at the end) was prototyped and measured ~5x slower on
-/// full-seed1 (164ms vs 33ms) — a generic per-country `HashSet`, even with
-/// a capacity hint, can't match this batched/prefetched atomic design's
-/// locality. Keeping this design; see track-c/PERF.md step 6.
+/// Exact shared name table. The table slot itself is the name id, so there
+/// is no separate id allocator or pointer table. A short exact prefix and
+/// length live beside the tag; only bytes beyond 16 go into a compact arena.
+/// Hash/tag equality is only a candidate filter: every hit compares all bytes.
+const NAME_SLOTS: usize = 1 << 17;
+const NAME_WORDS: usize = NAME_SLOTS / 64;
+const BUSY_TAG: u16 = u16::MAX;
+const NAME_ARENA: usize = 1 << 20;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NameKey {
+    len: u32,
+    tail: u32,
+    head: [u8; 16],
+}
+impl Default for NameKey {
+    fn default() -> Self { Self { len: 0, tail: 0, head: [0; 16] } }
+}
+struct KeyCell(UnsafeCell<NameKey>);
+unsafe impl Sync for KeyCell {}
+struct ByteArena(UnsafeCell<Vec<u8>>);
+unsafe impl Sync for ByteArena {}
+
 struct Names {
-    slots: Vec<AtomicU64>,
+    tags: Vec<AtomicU16>,
+    keys: Vec<KeyCell>,
+    arena: ByteArena,
+    used: AtomicU32,
     bits: Vec<AtomicU64>,
-    ptrs: Vec<AtomicU64>,
-    lens: Vec<AtomicU32>,
-    issued: AtomicUsize,
-    full: AtomicBool,
-    id_bits: u32,
 }
 
 fn zeroed(n: usize) -> Vec<AtomicU64> {
@@ -171,70 +183,84 @@ fn zeroed(n: usize) -> Vec<AtomicU64> {
     unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast(), v.len(), v.capacity()) }
 }
 
-fn zeroed32(n: usize) -> Vec<AtomicU32> {
-    let mut v = std::mem::ManuallyDrop::new(vec![0u32; n]);
-    unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast(), v.len(), v.capacity()) }
-}
-
 impl Names {
-    fn new(id_bits: u32, groups: usize) -> Names {
-        let ids = 1usize << id_bits;
-        Names {
-            slots: zeroed(2 << id_bits),
-            bits: zeroed(groups << (id_bits - 6)),
-            ptrs: zeroed(ids),
-            lens: zeroed32(ids),
-            issued: AtomicUsize::new(0),
-            full: AtomicBool::new(false),
-            id_bits,
+    fn new(groups: usize) -> Self {
+        Self {
+            tags: (0..NAME_SLOTS).map(|_| AtomicU16::new(0)).collect(),
+            keys: (0..NAME_SLOTS).map(|_| KeyCell(UnsafeCell::new(NameKey::default()))).collect(),
+            arena: ByteArena(UnsafeCell::new(vec![0u8; NAME_ARENA])),
+            used: AtomicU32::new(0),
+            bits: zeroed(groups * NAME_WORDS),
         }
     }
 
-    #[inline]
-    fn same(&self, id: usize, p: usize, len: usize) -> bool {
-        if self.lens[id].load(Relaxed) as usize != len {
-            return false;
-        }
-        let q = self.ptrs[id].load(Relaxed) as *const u8;
-        unsafe { std::slice::from_raw_parts(q, len) == std::slice::from_raw_parts(p as *const u8, len) }
+    #[inline(always)]
+    fn tag(h: u64) -> u16 {
+        let t = (h >> 48) as u16;
+        if t == 0 || t == BUSY_TAG { 1 } else { t }
     }
 
-    /// Exact name number. Hash bits only reject non-candidates; identity is
-    /// always resolved by a complete raw canonical-byte comparison.
-    #[inline]
+    #[inline(always)]
+    fn same(&self, slot: usize, p: usize, len: usize) -> bool {
+        let k = unsafe { &*self.keys[slot].0.get() };
+        if k.len as usize != len { return false; }
+        let n = len.min(16);
+        let src = unsafe { std::slice::from_raw_parts(p as *const u8, n) };
+        if k.head[..n] != *src { return false; }
+        if len <= 16 { return true; }
+        let tail = len - 16;
+        let arena = unsafe { &*self.arena.0.get() };
+        arena[k.tail as usize..k.tail as usize + tail]
+            == unsafe { *std::slice::from_raw_parts((p as *const u8).add(16), tail) }
+    }
+
+    #[inline(always)]
     fn number(&self, h: u64, p: usize, len: usize) -> usize {
-        let mask = self.slots.len() - 1;
-        let id_mask = (1usize << self.id_bits) - 1;
-        let mut s = h as usize & mask;
+        let tag = Self::tag(h);
+        let mut i = h as usize & (NAME_SLOTS - 1);
         loop {
-            let mut cur = self.slots[s].load(Acquire);
-            if cur == 0 {
-                let id = self.issued.fetch_add(1, Relaxed) + 1;
-                if id >= 1 << self.id_bits {
-                    self.full.store(true, Relaxed);
-                    return 0;
-                }
-                self.ptrs[id].store(p as u64, Relaxed);
-                self.lens[id].store(len as u32, Relaxed);
-                let new = (h >> self.id_bits << self.id_bits) | id as u64;
-                match self.slots[s].compare_exchange(0, new, Release, Acquire) {
-                    Ok(_) => return id,
-                    Err(other) => cur = other,
-                }
+            let mut t = self.tags[i].load(Acquire);
+            while t == BUSY_TAG {
+                std::hint::spin_loop();
+                t = self.tags[i].load(Acquire);
             }
-            if (cur ^ h) >> self.id_bits == 0 {
-                let id = cur as usize & id_mask;
-                if id != 0 && self.same(id, p, len) {
-                    return id;
-                }
+            if t == tag && self.same(i, p, len) {
+                return i;
             }
-            s = (s + 1) & mask;
+            if t == 0 {
+                if self.tags[i].compare_exchange(0, BUSY_TAG, Acquire, Acquire).is_ok() {
+                    let tail_len = len.saturating_sub(16);
+                    let off = if tail_len == 0 {
+                        0
+                    } else {
+                        let off = self.used.fetch_add(tail_len as u32, Relaxed) as usize;
+                        assert!(off + tail_len <= NAME_ARENA, "name arena exhausted");
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                (p as *const u8).add(16),
+                                (&mut *self.arena.0.get()).as_mut_ptr().add(off),
+                                tail_len,
+                            );
+                        }
+                        off as u32
+                    };
+                    let k = unsafe { &mut *self.keys[i].0.get() };
+                    k.len = len as u32;
+                    k.tail = off;
+                    k.head.fill(0);
+                    unsafe { std::ptr::copy_nonoverlapping(p as *const u8, k.head.as_mut_ptr(), len.min(16)); }
+                    self.tags[i].store(tag, Release);
+                    return i;
+                }
+                continue;
+            }
+            i = (i + 1) & (NAME_SLOTS - 1);
         }
     }
 
     fn distinct(&self, group: usize) -> u64 {
-        let row = &self.bits[group << (self.id_bits - 6)..(group + 1) << (self.id_bits - 6)];
-        row.iter().map(|w| w.load(Relaxed).count_ones() as u64).sum()
+        self.bits[group * NAME_WORDS..(group + 1) * NAME_WORDS]
+            .iter().map(|w| w.load(Relaxed).count_ones() as u64).sum()
     }
 }
 
@@ -261,8 +287,9 @@ impl<'a> Sightings<'a> {
 
     #[inline]
     fn push(&mut self, group: usize, h: u64, p: usize, len: usize) {
-        let slot = &self.names.slots[h as usize & (self.names.slots.len() - 1)];
-        prefetch_read(slot as *const AtomicU64);
+        let home = h as usize & (NAME_SLOTS - 1);
+        prefetch_read(&self.names.tags[home] as *const AtomicU16);
+        prefetch_read(&self.names.keys[home] as *const KeyCell);
         self.seen[self.seen_len] = (group, h, p, len);
         self.seen_len += 1;
         if self.seen_len == BATCH {
@@ -277,12 +304,10 @@ impl<'a> Sightings<'a> {
         self.bits_len = 0;
         for &(group, h, p, len) in &self.seen[..self.seen_len] {
             let id = self.names.number(h, p, len);
-            if id != 0 {
-                let word = (group << (self.names.id_bits - 6)) + id / 64;
-                prefetch_write::<AtomicU64>(&self.names.bits[word]);
-                self.bits[self.bits_len] = (word, 1 << (id % 64));
-                self.bits_len += 1;
-            }
+            let word = group * NAME_WORDS + id / 64;
+            prefetch_write::<AtomicU64>(&self.names.bits[word]);
+            self.bits[self.bits_len] = (word, 1 << (id % 64));
+            self.bits_len += 1;
         }
         self.seen_len = 0;
     }
@@ -305,54 +330,23 @@ fn prefetch_write<T>(p: *const T) {
     unsafe { std::arch::asm!("prefetchw [{0}]", in(reg) p, options(nostack, preserves_flags)) };
 }
 
-#[inline]
-fn mum(a: u64, b: u64) -> u64 {
-    let p = a as u128 * b as u128;
-    p as u64 ^ (p >> 64) as u64
-}
-
-/// `data[at..at + 32]` as four words, the bytes from `left` on zeroed.
-#[inline]
-fn block(data: &[u8], at: usize, left: usize) -> [u64; 4] {
-    // The first `left` bytes of this 64-byte window's 32-byte slice are 0xFF.
-    static EDGE: [u8; 64] = {
-        let mut t = [0u8; 64];
-        let mut i = 0;
-        while i < 32 {
-            t[i] = 0xFF;
-            i += 1;
-        }
-        t
-    };
-    let (src, mask) = (&data[at..at + 32], &EDGE[32 - left.min(32)..][..32]);
-    let mut w = [0u64; 4];
-    // SAFETY: AVX2 is part of the build target; `src`, `mask` and `w` are 32 bytes each.
-    unsafe {
-        let v = _mm256_and_si256(
-            _mm256_loadu_si256(src.as_ptr().cast::<__m256i>()),
-            _mm256_loadu_si256(mask.as_ptr().cast::<__m256i>()),
-        );
-        _mm256_storeu_si256(w.as_mut_ptr().cast::<__m256i>(), v);
-    }
-    w
-}
-
-/// 64-bit hash of `data[from..to]`; `data` must extend 32 bytes past `to`.
-#[inline]
+#[inline(always)]
 fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
-    let mut h = (to - from) as u64 ^ 0x9E37_79B9_7F4A_7C15;
-    let mut at = from;
-    loop {
-        let w = block(data, at, to.saturating_sub(at));
-        h = mum(
-            mum(w[0] ^ 0xA076_1D64_78BD_642F, w[1] ^ 0xE703_7ED1_A0B4_28DB) ^ h,
-            mum(w[2] ^ 0x8EBC_6AF0_9C88_C6E3, w[3] ^ 0x5899_65CC_7537_4CC3),
-        );
-        at += 32;
-        if at >= to {
-            return h;
+    let len = to - from;
+    let mut h = len as u64;
+    let mut p = from;
+    unsafe {
+        while p + 8 <= to {
+            h = _mm_crc32_u64(h, (data.as_ptr().add(p) as *const u64).read_unaligned());
+            p += 8;
+        }
+        if p < to {
+            let mut tail = 0u64;
+            std::ptr::copy_nonoverlapping(data.as_ptr().add(p), (&mut tail as *mut u64).cast(), to - p);
+            h = _mm_crc32_u64(h, tail);
         }
     }
+    h.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (h.rotate_left(29))
 }
 
 // --- Record parsing (spec section 2.1) ----------------------------------
@@ -638,29 +632,14 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
 
 fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
     let n_groups = regions.countries.len() + 1;
-    let body = data
-        .iter()
-        .position(|&b| b == b'\n')
-        .map_or(data.len(), |p| p + 1); // skip the BOM + header line
-    if body >= data.len() {
-        return vec![Agg::new(); n_groups];
-    }
-    // Names are numbered from a table sized for 100 k distinct names (the
-    // generator's pool); if there are more, start over with a bigger one.
-    let mut id_bits = 17;
-    loop {
-        let names = Names::new(id_bits, n_groups);
-        let mut out = scan(data, body, regions, threads.max(1), &names);
-        if !names.full.load(Relaxed) {
-            out.iter_mut()
-                .enumerate()
-                .for_each(|(g, a)| a.names_distinct = names.distinct(g));
-            // The process ends soon; freeing the tables would only cost time.
-            std::mem::forget(names);
-            return out;
-        }
-        id_bits += 2;
-    }
+    let body = data.iter().position(|&b| b == b'\n').map_or(data.len(), |p| p + 1);
+    if body >= data.len() { return vec![Agg::new(); n_groups]; }
+    let names = Names::new(n_groups);
+    let mut out = scan(data, body, regions, threads.max(1), &names);
+    out.iter_mut().enumerate()
+        .for_each(|(g, a)| a.names_distinct = names.distinct(g));
+    std::mem::forget(names);
+    out
 }
 
 // --- Output (spec section 4) --------------------------------------------
