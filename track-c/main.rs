@@ -24,8 +24,7 @@
 //!   in place rather than being copied into a temporary tail buffer.
 
 use std::arch::x86_64::{
-    __m128i, __m256i, _mm_clmulepi64_si128, _mm_crc32_u64, _mm_cvtsi128_si64,
-    _mm_cvtsi64_si128, _mm_set1_epi8, _mm256_cmpeq_epi8, _mm256_loadu_si256,
+    __m256i, _pdep_u64, _mm_crc32_u64, _mm256_cmpeq_epi8, _mm256_loadu_si256,
     _mm256_movemask_epi8, _mm256_set1_epi8,
 };
 use std::cell::UnsafeCell;
@@ -392,7 +391,7 @@ struct Separator {
 }
 
 /// Streams commas/newlines that are outside quoted CSV fields. Quote parity
-/// for all 64 bytes is computed in one carry-less multiply (prefix XOR), so
+/// for all 64 bytes is computed with BMI2 alternating-bit deposit, so
 /// names and notes are not rescanned byte-by-byte just to locate separators.
 struct Structure<'a> {
     data: &'a [u8],
@@ -423,13 +422,12 @@ impl<'a> Structure<'a> {
             if self.q == 0 && self.carry == 0 {
                 self.bits = structural;
             } else {
-                let prefix = unsafe {
-                    let x: __m128i = _mm_clmulepi64_si128::<0x00>(
-                        _mm_cvtsi64_si128(self.q as i64),
-                        _mm_set1_epi8(-1),
-                    );
-                    _mm_cvtsi128_si64(x) as u64
-                } ^ self.carry;
+                // BMI2 PDEP marks alternating opening quote positions. Their
+                // paired closing positions minus openings produce inclusive
+                // quote parity in one subtraction, including unmatched opens.
+                // Incoming parity toggles every bit in the current block.
+                let opens = unsafe { _pdep_u64(0x5555_5555_5555_5555, self.q) };
+                let prefix = (self.q ^ opens).wrapping_sub(opens) ^ self.carry;
                 self.carry = ((prefix as i64) >> 63) as u64;
                 self.bits = structural & !prefix;
             }
