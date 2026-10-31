@@ -1,40 +1,18 @@
-# Track D: Traverse
+# Track D — Traverse
 
-The task, the input files and the exact output format are in the [spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/d-traverse.md).
+Exact zero-dependency Rust implementation of the official directed shortest-path
+Track D specification.
 
-## Approach
+The graph is memory-mapped and built into packed forward and reverse CSR arrays.
+Weights that do not fit the packed field use an exact full-width side table;
+parallel edges, zero weights and directedness are preserved.
 
-Two parallel block-buffered passes build forward and reverse compressed sparse-row
-graphs using atomic degree counts and fill cursors. Six-byte edges store a
-uint32 destination and uint16 weight; a sentinel routes weights of 65535 or more
-to exact uint32 overflow maps. Directedness, parallel edges and zero weights are
-preserved.
-Edge arrays are allocated without initialization, since the checked degree
-counts and unique atomic fill cursors ensure every edge is written before use.
-Each block locates its last complete line once; numeric parsing advances
-directly through complete rows without a separate newline search per edge.
+Queries run in parallel with exact bidirectional Dijkstra. Each direction uses
+a monotone radix heap and sparse generation-stamped distance table, with 64-bit
+distances throughout. The search stops only at the valid minimum-frontier bound;
+unreachable queries produce -1.
 
-Twelve workers independently answer queries with bidirectional Dijkstra,
-64-bit monotone radix queues and sparse distance tables reused by generation
-stamp. Packed twelve-byte queue items retain full 64-bit distances; bucket
-minimum selection compares only distance, not irrelevant node tie-breakers.
-Search balances queue sizes rather than distances to avoid pathological
-imbalance from large weights. The exact minimum-frontier bound terminates a
-query; unreachable pairs produce -1. Distances above uint32 remain exact.
-Relaxations at or above the current best path are skipped before looking up
-the opposite frontier. Nonnegative weights preserve radix-key monotonicity.
+Dependencies: none.
 
-## Dependencies
-
-None.
-
-## With another 24 hours
-
-Profile graph construction and queue expansion on the scoring CPU. A dense
-distance-array experiment was rejected because it increased runtime and memory.
-Latest local five-run full seed-1 median: 0.394181 s, 130.77 MiB peak RSS.
-The latest same-sandbox alternating queue/storage tuning measured a further
-3.0% time reduction against the preceding implementation;
-shared-host load prevents comparison against older isolated timings.
-No official run ID is available
-for this candidate; see [PERF.md](PERF.md).
+With another 24 hours: profile CSR construction versus frontier expansion and
+test exact preprocessing only when its complete build+query cost improves K.

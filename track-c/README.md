@@ -1,49 +1,21 @@
-# Track C: Join
+# Track C — Join
 
-The task, the input files and the exact output format are in the [spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/c-join.md).
+Exact zero-dependency Rust implementation of the official hostile-CSV Track C
+specification.
 
-## Approach
+The input is memory-mapped and split into quote-safe ranges, preserving embedded
+newlines, CRLF/LF, BOM rules, escaped quotes, empty fields and exact byte
+semantics. Region IDs use a dense lookup table and numeric aggregation remains
+thread-local.
 
-A buffered quote-parity prepass aligns twelve memory-mapped CSV shards to real
-record boundaries, including quoted embedded newlines. The byte parser only
-materializes names containing escaped quotes; note contents are counted without
-copying. These two modes are compile-time specializations rather than a runtime
-flag in the escaped-field loop. The decode buffer is cleared only when an escaped name needs it.
-Consumed full pages are released with `madvise` in 1 MiB batches, without
-discarding the partial page preceding a shard. BOMs, CRLF/LF, trailing
-spaces and integer cents are preserved exactly.
+Distinct names use a fixed-capacity concurrent atomic table. Slots carry a
+fingerprint plus the first occurrence's offset into the immutable mapping;
+fingerprint matches are always resolved by full decoded CSV byte equality.
+Per-country membership is tracked with atomic bitsets so races cannot double
+count a name. No probabilistic/hash-only equality is used. Transparent huge
+pages are disabled.
 
-A dense region lookup joins countries, including `_UNMATCHED`. Numeric aggregates
-are thread-local. Three-letter country codes use a dense base-26 lookup rather
-than hashing an allocated string for every region. Region loading overlaps the
-quote prepass. Quote parity uses a byte XOR reduction, and unquoted fields use
-`memchr` to find their delimiter.
+Dependencies: none.
 
-Names are stored once in a striped exact dictionary with
-immutable full strings, lock-free read lookups, insertion mutexes and atomic
-country-membership bits. Full byte comparisons resolve hash collisions; each
-country's distinct count increments exactly once per decoded name.
-An already-set membership bit is read without a write; first membership still
-uses atomic `fetch_or`, so racing insertions cannot overcount.
-Each stripe owns stable deque entries, avoiding a separate allocation and
-bucket-chain deletion for every name.
-
-## Dependencies
-
-None.
-
-## With another 24 hours
-
-Separate parsing and shared-name cache costs on the scoring CPU. Initial phase
-profiling found 75-84 ms in their combined stage, versus 10-13 ms loading regions
-and 9-11 ms preparing quote-safe boundaries.
-
-The latest local five-run full seed-1 median is 0.113996 s, 21.89 MiB peak RSS.
-A same-sandbox alternating comparison measured an 8.3% median time reduction
-against the earlier published implementation. Subsequent lazy decoding and
-page-release tuning reduced its immediate baseline by 3.1%, with higher RSS.
-Compile-time field specialization subsequently reduced its own controlled
-baseline from 0.125930 s to 0.121983 s (another 3.1%).
-Shared-host timings from different batches are not directly comparable.
-This candidate has no official run ID;
-80 points has not been reached. See [PERF.md](PERF.md).
+With another 24 hours: profile structural CSV scanning and exact-name cache
+misses on the scoring CPU, then tune only exact full-process improvements.
