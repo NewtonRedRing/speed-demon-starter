@@ -120,3 +120,21 @@ The full mapped input could raise the official cgroup memory high-water mark,
 potentially offsetting the runtime benefit. Test the exact official hash,
 correctness oracles, and complete-process K before promotion. **No verified
 official score or global speedup is claimed.**
+
+
+## Second-round speed-first study (October 31)
+
+The bidirectional Dijkstra loop now requests each radix frontier top only
+once after discarding stale entries, caches the valid top distance/node
+for each side, then performs the usual exact lower-bound termination
+and smallest-queue expansion. This avoids repeated `top()` calls in
+the stop test and chosen-side expansion. The previous mapped two-pass
+CSR construction remains in place.
+
+The transformation preserves the exact stale-entry condition and
+nonnegative-weight stopping bound. This is a source-level optimization
+candidate: **no end-to-end timing or independent full-graph oracle
+has yet been completed for the changed source**, and it may be
+neutral after compiler optimization. Do not promote without random-graph
+64-bit-distance oracles and full official-data benchmark including cgroup
+memory and the full K coefficient.
