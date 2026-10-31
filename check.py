@@ -49,9 +49,11 @@ def allowlisted_digests():
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return {e["digest"] for e in json.load(resp)["images"]}
-    except Exception as exc:  # offline or unreachable: the board still checks
-        print(f"note  could not fetch {ALLOWLIST_URL} ({type(exc).__name__}); skipping the FROM check")
-        return None
+    except Exception as exc:
+        fail(
+            f"cannot verify the official Docker image allowlist at {ALLOWLIST_URL}: {exc}. "
+            "For offline reruns of an already validated image, use --skip-build."
+        )
 
 
 def from_problems(dockerfile, digests):
