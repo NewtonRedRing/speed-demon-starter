@@ -77,7 +77,7 @@ Five/six alternating full-size synthetic runs:
 - One-pass packed-arc buffer + CSR: 250.389, 289.303, 205.878,
   271.320, 255.205 ms; peak RSS ~219,016–219,260 KiB.
 
-**Result:** median graph-build improvement about 1.11x (300.5 to
+**Result:** median graph-build improvement about 1.18x (300.5 to
 255.2 ms) but ~21.6% higher peak RSS. Whole-process D still includes
 2000 searches, so this is unlikely to close the 14.128-point gap alone.
 On the target machine, the extra 40MB of memory traffic may further
