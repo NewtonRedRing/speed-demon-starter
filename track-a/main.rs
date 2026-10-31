@@ -47,7 +47,7 @@ unsafe fn map(len: usize, prot: i32, flags: i32, fd: i32) -> *mut u8 {
     p
 }
 
-const MAX_THREADS: usize = 12; // Scoring uses 12; respect smaller local CPU sets.
+const THREADS: usize = 12;
 const HOURS: usize = 72; // 2026-10-30T18:00Z to 2026-11-02T17:59:59Z
 // A record packs the latency above a 12-bit key: an 11-bit local endpoint id
 // and the 5xx flag. Latencies of 2^20 us or more (about 1% of lines) do not
@@ -115,12 +115,11 @@ unsafe fn decode(end: *const u8, len: usize) -> u32 {
 // rest of the line keeps both loads in bounds). Names point into the log.
 struct Interner {
     names: Vec<&'static [u8]>,
-    // Compact 16 KiB probe table stays inside the scoring CPU's L1 data cache.
-    slot: Vec<u16>,
+    slot: Vec<u16>, // id + 1 per slot, 0 if free
 }
 
 impl Interner {
-    const SLOTS: usize = 1 << 12;
+    const SLOTS: usize = 1 << 12; // ids fit 11 bits; a seed has 1,842
 
     fn new() -> Self {
         Interner { names: vec![], slot: vec![0; Self::SLOTS] }
@@ -131,19 +130,18 @@ impl Interner {
         let word = |i: usize| unsafe { s.as_ptr().add(i).cast::<u64>().read_unaligned() };
         let a = word(0) & if n >= 8 { !0 } else { (1 << (8 * n)) - 1 };
         let b = if n >= 8 { word(n - 8) } else { 0 };
-        let mut i = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as usize
-            & (Self::SLOTS - 1);
+        let mut i = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as usize;
         loop {
-            let id = &mut self.slot[i];
+            let id = &mut self.slot[i % Self::SLOTS];
             if *id == 0 {
-                assert!(self.names.len() < ERR as usize, "too many endpoints");
+                assert!(self.names.len() < Self::SLOTS / 2, "too many endpoints"); // 11 bits
                 self.names.push(s);
                 *id = self.names.len() as u16;
             }
             if same(self.names[*id as usize - 1], s) {
                 return *id as u32 - 1;
             }
-            i = (i + 1) & (Self::SLOTS - 1);
+            i += 1;
         }
     }
 }
@@ -198,25 +196,21 @@ impl Parser {
         while p < end {
             // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
             let d = |i: usize| (*p.add(i) - b'0') as usize;
-            let day = d(8) * 10 + d(9) + d(6) * 31;
+            let day = d(8) * 10 + d(9) + if d(6) == 0 { 0 } else { 31 };
             let h = (day - 30) * 24 + d(11) * 10 + d(12) - 18;
 
             // Spaces and newlines in the 64 bytes after the timestamp. Only an
             // endpoint near its 125-byte maximum pushes past the window.
             let m = p.add(28);
-            let lo = _mm256_loadu_si256(m.cast());
-            let hi = _mm256_loadu_si256(m.add(32).cast());
-            let cmp = |v, b: u8| _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b as i8))) as u32 as u64;
-            let sp = cmp(lo, b' ') | (cmp(hi, b' ') << 32);
-            let nl = cmp(lo, b'\n') | (cmp(hi, b'\n') << 32);
+            let sp = eq32(m, b' ') as u64 | (eq32(m.add(32), b' ') as u64) << 32;
+            let nl = eq32(m, b'\n') as u64 | (eq32(m.add(32), b'\n') as u64) << 32;
             let at = |bits: u64| m.add(bits.trailing_zeros() as usize);
             let name = at(sp).add(1);
             let name_end = find(nl != 0, at(sp & (sp - 1)), name, b' ');
             let eol = find(nl != 0, at(nl), name_end.add(5), b'\n');
             let name_bytes = from_raw_parts(name, name_end.offset_from(name) as usize);
             let key = self.local.id(name_bytes) | ERR * (*name_end.add(1) == b'5') as u32;
-            let digits = eol.offset_from(name_end) as usize - 5; // after " SSS "
-            let latency = decode(eol, digits);
+            let latency = decode(eol, eol.offset_from(name_end) as usize - 5); // after " SSS "
             p = eol.add(1);
 
             if latency >= PACKED_MAX {
@@ -237,8 +231,8 @@ impl Parser {
 
     // The log is in arrival order, so chunks are carved roughly hour by hour
     // and hours finish in the same order: the run of chunks at the front whose
-    // hours are all finished grows steadily. Hand it back in 256 KB batches,
-    // rather than a madvise/TLB shootdown per chunk.
+    // hours are all finished grows steadily. Hand it back once it reaches 256
+    // KB, in one madvise, instead of one call (and TLB shootdown) per chunk.
     unsafe fn release(&mut self, finished: &[AtomicBool]) {
         let mut c = self.kept;
         while c < self.next && finished[(*c).hour as usize].load(Acquire) {
@@ -264,139 +258,6 @@ impl Parser {
             g(latency, key);
         }
     }
-}
-
-// Exact MSB-first radix selection for all three nearest-rank percentiles.
-// Each level scans the input only once and maintains three 256-bin histograms.
-// The prefix predicate retains exactly those values in the chosen bucket;
-// duplicate latencies and the full u32 range remain exact.
-fn radix_percentiles(values: &[u32], targets: [usize; 3]) -> [u32; 3] {
-    let mut prefixes = [0u32; 3];
-    let mut ranks = targets;
-    let mut used_bits = 0u32;
-    for shift in [24, 16, 8, 0] {
-        let mut bins = [[0usize; 256]; 3];
-        for &value in values {
-            let digit = ((value >> shift) & 255) as usize;
-            for q in 0..3 {
-                if value & used_bits == prefixes[q] {
-                    bins[q][digit] += 1;
-                }
-            }
-        }
-        for q in 0..3 {
-            let mut rank = ranks[q];
-            let mut found = false;
-            for digit in 0..256 {
-                if rank < bins[q][digit] {
-                    prefixes[q] |= (digit as u32) << shift;
-                    ranks[q] = rank;
-                    found = true;
-                    break;
-                }
-                rank -= bins[q][digit];
-            }
-            assert!(found, "radix rank outside its bucket");
-        }
-        used_bits |= 255u32 << shift;
-    }
-    prefixes
-}
-
-// AVX2 bitonic sorting network for eight, sixteen or thirty-two lanes.
-// Incomplete vectors are padded with u32::MAX; only the original n entries
-// are copied back, so genuine u32::MAX values are handled normally.
-#[inline]
-unsafe fn bitonic_sort_small(values: &mut [u32]) {
-    debug_assert!((8..=32).contains(&values.len()));
-    let width = values.len().div_ceil(8).next_power_of_two() * 8;
-    let blocks = width / 8;
-    let mut padded = [u32::MAX; 32];
-    padded[..values.len()].copy_from_slice(values);
-    let mut vectors = [_mm256_set1_epi32(-1); 4];
-    for b in 0..blocks {
-        vectors[b] = _mm256_loadu_si256(padded.as_ptr().add(b * 8).cast());
-    }
-    let mut k = 2;
-    while k <= width {
-        let mut j = k / 2;
-        while j != 0 {
-            if j >= 8 {
-                // Cross-vector partners must be read from the same stage,
-                // before any lane is overwritten.
-                let previous = vectors;
-                for b in 0..blocks {
-                    let partner = previous[b ^ (j / 8)];
-                    vectors[b] = if ((b * 8 & j) == 0) == ((b * 8 & k) == 0) {
-                        _mm256_min_epu32(previous[b], partner)
-                    } else {
-                        _mm256_max_epu32(previous[b], partner)
-                    };
-                }
-            } else {
-                let partner_lanes: [i32; 8] =
-                    std::array::from_fn(|i| (i ^ j) as i32);
-                let indices = _mm256_loadu_si256(partner_lanes.as_ptr().cast());
-                for b in 0..blocks {
-                    let other = _mm256_permutevar8x32_epi32(vectors[b], indices);
-                    let small = _mm256_min_epu32(vectors[b], other);
-                    let large = _mm256_max_epu32(vectors[b], other);
-                    let choose_small: [i32; 8] = std::array::from_fn(|i| {
-                        if (((b * 8 + i) & j) == 0) == (((b * 8 + i) & k) == 0) {
-                            -1
-                        } else {
-                            0
-                        }
-                    });
-                    let mask = _mm256_loadu_si256(choose_small.as_ptr().cast());
-                    vectors[b] = _mm256_blendv_epi8(large, small, mask);
-                }
-            }
-            j /= 2;
-        }
-        k *= 2;
-    }
-    for b in 0..blocks {
-        _mm256_storeu_si256(padded.as_mut_ptr().add(b * 8).cast(), vectors[b]);
-    }
-    values.copy_from_slice(&padded[..values.len()]);
-}
-
-// Never use approximate quantile sketches: the reference requires the
-// exact ceil(p*n/100)-1 order statistics, including repeated and maximum u32s.
-#[inline]
-unsafe fn exact_percentiles(values: &mut [u32]) -> [u32; 3] {
-    let n = values.len();
-    assert!(n != 0);
-    if n == 1 {
-        return [values[0]; 3];
-    }
-    if n == 2 {
-        return [values[0].min(values[1]), values[0].max(values[1]), values[0].max(values[1])];
-    }
-    let targets = [50, 95, 99].map(|p| (p * n + 99) / 100 - 1);
-    // The AVX2 network is available for every 8..32 group, but measured
-    // sorting is preferable for shorter groups on the local x86 proxy.
-    if n <= 27 {
-        values.sort_unstable();
-        return targets.map(|i| values[i]);
-    }
-    if n <= 32 {
-        bitonic_sort_small(values);
-        return targets.map(|i| values[i]);
-    }
-    if n <= 64 {
-        values.sort_unstable();
-        return targets.map(|i| values[i]);
-    }
-    // Small selection groups do not amortize four radix histogram rounds.
-    if n < 256 {
-        values.select_nth_unstable(targets[2]);
-        values[..targets[2]].select_nth_unstable(targets[1]);
-        values[..targets[1]].select_nth_unstable(targets[0]);
-        return targets.map(|i| values[i]);
-    }
-    radix_percentiles(values, targets)
 }
 
 // Writes x in decimal at o, returns the end.
@@ -426,22 +287,21 @@ fn main() {
     let log: &'static [u8] = unsafe {
         let p = map(size + 4096, 1, ANONYMOUS, -1);
         if size > 0 {
-            assert_eq!(mmap(p.cast(), size, 1, 0x12, input, 0), p, "file mmap failed");
+            mmap(p.cast(), size, 1, 0x12, input, 0); // PROT_READ, MAP_PRIVATE | MAP_FIXED
         }
         from_raw_parts(p, size)
     };
-    let nthreads = std::thread::available_parallelism().map_or(MAX_THREADS, |n| n.get().min(MAX_THREADS));
-    let mut cut = vec![size; nthreads + 1];
+    let mut cut = vec![size; THREADS + 1];
     cut[0] = 0;
-    for t in 1..nthreads {
-        cut[t] = cut[t - 1].max(size * t / nthreads);
+    for t in 1..THREADS {
+        cut[t] = cut[t - 1].max(size * t / THREADS);
         while cut[t] > 0 && cut[t] < size && log[cut[t] - 1] != b'\n' {
             cut[t] += 1;
         }
     }
 
     let parser = |t: usize| Shared::new(Parser::new(cut[t + 1] - cut[t]));
-    let parsers: Vec<_> = (0..nthreads).map(parser).collect();
+    let parsers: Vec<_> = (0..THREADS).map(parser).collect();
     let names = Shared::new(Vec::<&[u8]>::new());
     let finished: Vec<AtomicBool> = (0..HOURS).map(|_| AtomicBool::new(false)).collect();
     let releasing = AtomicBool::new(false);
@@ -450,7 +310,7 @@ fn main() {
     let lines: Vec<Shared<Vec<[u32; 7]>>> = (0..HOURS).map(|_| Shared::new(vec![])).collect();
     let at: Vec<AtomicU64> = (0..HOURS).map(|_| AtomicU64::new(0)).collect(); // size, then offset
     let text = Shared::new(null_mut::<u8>());
-    let barrier = Barrier::new(nthreads);
+    let barrier = Barrier::new(THREADS);
 
     let work = |t: usize| unsafe {
         let (from, to) = (log.as_ptr().add(cut[t]), log.as_ptr().add(cut[t + 1]));
@@ -479,34 +339,23 @@ fn main() {
 
         let names = &*names.get();
         let ne = names.len();
-        let (mut start, mut errors, mut latency, mut cursor, mut flat) =
-            (vec![0u32; ne + 1], vec![0u32; ne], vec![], vec![0u32; ne], Vec::<u64>::new());
+        let (mut start, mut errors, mut latency) = (vec![0u32; ne + 1], vec![0u32; ne], vec![]);
         while let h @ 0..HOURS = claim.fetch_add(1, Relaxed) {
-            // Traverse the mmap chunk chains exactly once. Keep (global rank,
-            // 5xx flag, latency) in a contiguous worker-local buffer; a second
-            // pass over this *flat* buffer scatters latencies by endpoint.
-            // All 32-bit latencies remain exact, including the wide side list.
+            // Counting sort of the hour's latencies by endpoint rank: count into
+            // start[e + 1], prefix, then place each latency at its group's cursor.
             start.fill(0);
             errors.fill(0);
-            flat.clear();
             for ps in &parsers {
-                ps.get().each(h, |e, err, l| {
-                    start[e + 1] += 1;
-                    errors[e] += err as u32;
-                    flat.push(((e as u64) << 33) | ((err as u64) << 32) | l as u64);
-                });
+                ps.get().each(h, |e, err, _| (start[e + 1], errors[e]) = (start[e + 1] + 1, errors[e] + err as u32));
             }
             for e in 0..ne {
                 start[e + 1] += start[e];
             }
-            latency.resize(flat.len(), 0);
-            cursor.copy_from_slice(&start[..ne]);
-            for &row in &flat {
-                let e = (row >> 33) as usize;
-                latency[cursor[e] as usize] = row as u32;
-                cursor[e] += 1;
+            latency.resize(start[ne] as usize, 0);
+            let mut cursor = start[..ne].to_vec();
+            for ps in &parsers {
+                ps.get().each(h, |e, _, l| (latency[cursor[e] as usize], cursor[e]) = (l, cursor[e] + 1));
             }
-            flat.clear();
             // An hour is finished once its records are copied out; one thread
             // at a time then releases whatever chunks that frees.
             finished[h].store(true, Release);
@@ -522,8 +371,18 @@ fn main() {
                 if n == 0 {
                     continue;
                 }
-                let p = exact_percentiles(a);
-                let err = errors[e];
+                // Nearest rank p is index ceil(p * n / 100) - 1. Selecting the
+                // highest rank first leaves everything below it in front, so
+                // each later selection only needs the front part.
+                let r = [50, 95, 99].map(|p| (p * n + 99) / 100 - 1);
+                if n <= 64 {
+                    a.sort_unstable(); // most groups; cheaper than three selections
+                } else {
+                    a.select_nth_unstable(r[2]);
+                    a[..r[2]].select_nth_unstable(r[1]);
+                    a[..r[1]].select_nth_unstable(r[0]);
+                }
+                let (p, err) = (r.map(|i| a[i]), errors[e]);
                 let ppm = (err as u64 * 1_000_000 / n as u64) as u32;
                 let line = [e as u32, n as u32, p[0], p[1], p[2], err, ppm];
                 // Label, name, six numbers each after a space, newline.
@@ -564,6 +423,5 @@ fn main() {
             }
         }
     };
-    std::thread::scope(|s| (0..nthreads).for_each(|t| _ = s.spawn(move || work(t))));
-    std::process::exit(0);
+    std::thread::scope(|s| (0..THREADS).for_each(|t| _ = s.spawn(move || work(t))));
 }
