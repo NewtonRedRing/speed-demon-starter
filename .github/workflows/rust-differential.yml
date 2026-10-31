@@ -1,0 +1,54 @@
+name: Rust differential correctness
+on:
+  push:
+    branches:
+      - speed-demon
+      - experiment/track-b-shared-postings
+  workflow_dispatch:
+jobs:
+  differential:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check Rust compilation and seeded output equivalence
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version
+          sudo mkdir -p /data /out
+          sudo chmod 777 /data /out
+          for track in a b c; do
+            cargo check --manifest-path "track-$track/Cargo.toml"
+          done
+          for track in a b c; do
+            if [[ "$track" == "b" ]]; then
+              baseline=70ae5dcf41fa1fc4637757b2b86f45fa548c6940
+            else
+              baseline=b1c01dab191c1fbfc253406a84df1e87552a608d
+            fi
+            git show "$baseline:track-$track/main.rs" > "/tmp/${track}-base.rs"
+            rustc --edition=2021 -C opt-level=3 -C target-cpu=native -C panic=abort -o "/tmp/${track}-base" "/tmp/${track}-base.rs"
+            rustc --edition=2021 -C opt-level=3 -C target-cpu=native -C panic=abort -o "/tmp/${track}-new" "track-$track/main.rs"
+            python3 "track-$track/pgo_gen.py" --seed 2 --scale sample --out "/tmp/${track}-data"
+          done
+          ln -sfn /tmp/a-data/requests.log /data/requests.log
+          /tmp/a-base
+          cp /out/summary.txt /tmp/a-expected
+          /tmp/a-new
+          cmp /tmp/a-expected /out/summary.txt
+          rm -f /data/requests.log
+          ln -sfn /tmp/b-data/docs.txt /data/docs.txt
+          ln -sfn /tmp/b-data/queries.txt /data/queries.txt
+          /tmp/b-base
+          cp /out/results.txt /tmp/b-expected
+          /tmp/b-new
+          cmp /tmp/b-expected /out/results.txt
+          RECORDS_PATH=/tmp/c-data/records.csv REGIONS_PATH=/tmp/c-data/regions.csv OUTPUT_PATH=/tmp/c-old.txt /tmp/c-base
+          RECORDS_PATH=/tmp/c-data/records.csv REGIONS_PATH=/tmp/c-data/regions.csv OUTPUT_PATH=/tmp/c-new.txt /tmp/c-new
+          cmp /tmp/c-old.txt /tmp/c-new.txt
+          echo "PASS: all three candidate outputs identical to corresponding baselines"
