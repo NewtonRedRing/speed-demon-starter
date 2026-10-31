@@ -67,81 +67,49 @@ static WORD: [bool; 256] = {
     t
 };
 
-/// Exact compact key for generated corpus tokens. The frozen generator's
-/// longest token is 17 bytes, so two words plus byte 16 cover the whole token.
-/// Query terms longer than that are necessarily absent from every generated
-/// corpus; their presence bit is therefore always false on public and holdout.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-struct Key {
-    a: u64,
-    b: u64,
-    meta: u16, // low byte = length, high byte = byte 16 when present
+/// The key of the token of len (at most 32) bytes at p: its bytes lowercased
+/// (OR-ing 0x20 lowercases letters and keeps digits) and zero padded.
+unsafe fn key(p: *const u8, len: usize) -> __m256i {
+    static KEEP: [u8; 64] = {
+        let (mut k, mut i) = ([0; 64], 0);
+        while i < 32 {
+            (k[i], i) = (0xFF, i + 1);
+        }
+        k
+    };
+    let v = _mm256_or_si256(_mm256_loadu_si256(p.cast()), _mm256_set1_epi8(0x20));
+    _mm256_and_si256(v, _mm256_loadu_si256(KEEP.as_ptr().add(32 - len).cast()))
 }
 
-#[inline(always)]
-unsafe fn token_key(p: *const u8, len: usize) -> Key {
-    let lower = 0x2020_2020_2020_2020u64;
-    let mut a = p.cast::<u64>().read_unaligned() | lower;
-    let mut b = p.add(8).cast::<u64>().read_unaligned() | lower;
-    if len < 8 {
-        a &= (1u64 << (8 * len)) - 1;
-        b = 0;
-    } else if len < 16 {
-        b &= (1u64 << (8 * (len - 8))) - 1;
-    }
-    let c = if len == 17 { *p.add(16) | 0x20 } else { 0 };
-    Key { a, b, meta: (len as u16) | ((c as u16) << 8) }
-}
-
-fn query_key(term: &[u8]) -> Key {
-    let mut bytes = [0u8; 17];
-    let n = term.len().min(17);
-    bytes[..n].copy_from_slice(&term[..n]);
-    let a = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-    let b = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-    Key { a, b, meta: (term.len() as u16) | ((bytes[16] as u16) << 8) }
-}
-
-#[inline(always)]
-fn hash(k: Key) -> usize {
-    let mut h = k.a ^ k.b.rotate_left(29) ^ (k.meta as u64).wrapping_mul(0xD6E8_FD9D_50B5_8C6D);
-    h = h.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+fn hash(k: __m256i) -> usize {
+    let w: [u64; 4] = unsafe { std::mem::transmute(k) };
+    let h = (w[0] ^ w[2].rotate_left(29)).wrapping_mul(0x9E3779B97F4A7C15);
+    let h = h ^ (w[1] ^ w[3].rotate_left(29)).wrapping_mul(0xBF58476D1CE4E5B9);
     (h ^ h >> 29) as usize
 }
 
-/// Query terms to dense ids. The hot negative-lookup path probes one-byte
-/// fingerprints in a compact control table; the parallel id/key arrays are
-/// touched only on a fingerprint match. With ~76k terms this keeps the miss
-/// filter around L2 size instead of reading an 8-byte multi-megabyte slot on
-/// every one of the corpus's ~36M tokens. Equality is still the complete Key.
-const EMPTY: u8 = 0x80;
+fn same(a: __m256i, b: __m256i) -> bool {
+    unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, b)) == -1 }
+}
+
+/// Query terms to dense ids: open addressing, each slot the top 32 hash bits
+/// above id + 1 (0 if free), so a mismatch rarely loads a key. A token that
+/// is no term gets the id one past the last term, so callers need no branch.
 struct Terms {
-    ctrl: Vec<u8>,
-    ids: Vec<u32>, // id + 1, meaningful only when ctrl != EMPTY
-    keys: Vec<Key>,
+    slot: Vec<u64>,
+    keys: Vec<__m256i>,
 }
 
 impl Terms {
-    #[inline(always)]
-    fn tag(h: usize) -> u8 { (h >> (usize::BITS - 7)) as u8 }
-
-    #[inline(always)]
-    fn find(&self, k: Key, h: usize) -> u32 {
-        let mask = self.ctrl.len() - 1;
-        let tag = Self::tag(h);
+    fn find(&self, k: __m256i, h: usize) -> u32 {
+        let mask = self.slot.len() - 1;
         let mut i = h & mask;
         loop {
-            let c = unsafe { *self.ctrl.get_unchecked(i) };
-            if c == EMPTY {
-                return self.keys.len() as u32;
+            match self.slot[i] {
+                0 => return self.keys.len() as u32,
+                s if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) => return s as u32 - 1,
+                _ => i = (i + 1) & mask,
             }
-            if c == tag {
-                let id = unsafe { *self.ids.get_unchecked(i) } - 1;
-                if unsafe { *self.keys.get_unchecked(id as usize) } == k {
-                    return id;
-                }
-            }
-            i = (i + 1) & mask;
         }
     }
 
@@ -152,35 +120,25 @@ impl Terms {
             keys[n as usize] = k;
         }
         self.keys = keys;
-        for (c, id) in self.ctrl.iter().zip(&mut self.ids) {
-            if *c != EMPTY {
-                *id = new[*id as usize - 1] + 1;
-            }
+        for s in self.slot.iter_mut().filter(|s| **s != 0) {
+            *s = *s >> 32 << 32 | (new[*s as u32 as usize - 1] + 1) as u64;
         }
     }
 
     fn insert(&mut self, term: &[u8]) -> u32 {
-        let k = query_key(term);
-        let h = hash(k);
-        let tag = Self::tag(h);
-        let mask = self.ctrl.len() - 1;
+        let k = unsafe { key(term.as_ptr(), term.len()) };
+        let (h, mask) = (hash(k), self.slot.len() - 1);
         let mut i = h & mask;
-        loop {
-            let c = self.ctrl[i];
-            if c == EMPTY {
-                self.keys.push(k);
-                self.ctrl[i] = tag;
-                self.ids[i] = self.keys.len() as u32;
-                return self.keys.len() as u32 - 1;
-            }
-            if c == tag {
-                let id = self.ids[i] - 1;
-                if self.keys[id as usize] == k {
-                    return id;
-                }
+        while self.slot[i] != 0 {
+            let s = self.slot[i];
+            if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) {
+                return s as u32 - 1;
             }
             i = (i + 1) & mask;
         }
+        self.keys.push(k);
+        self.slot[i] = (h as u64 >> 32) << 32 | self.keys.len() as u64;
+        self.keys.len() as u32 - 1
     }
 }
 
@@ -206,32 +164,35 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 /// looked up LAG tokens later, so the misses overlap.
 unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, usize)) -> *const u8 {
     const LAG: usize = 8;
-    let mut ring = [(Key::default(), 0usize, p, 0usize); LAG];
-    let mut look = |r: &(Key, usize, *const u8, usize)| f(t.find(r.0, r.1), r.2, r.3);
+    let mut ring = [(_mm256_setzero_si256(), 0, p, 0); LAG];
+    let mut look = |r: &(__m256i, usize, *const u8, usize)| f(t.find(r.0, r.1), r.2, r.3);
     let mut n = 0usize;
     loop {
         let (word, nl) = classes(p);
-        let stop = if nl != 0 { nl.trailing_zeros() } else { 64 };
+        let stop = if nl != 0 { nl.trailing_zeros() } else { 64 }; // the window's bytes in this document
         let mut m = word & ((1u128 << stop) - 1) as u64;
         let mut next = 64;
         while m != 0 {
             let s = m.trailing_zeros();
             let len = (!(m >> s)).trailing_zeros();
             if s + len == 64 && nl == 0 {
-                next = s;
+                next = s; // the token may go on: start the next window at it
                 if s == 0 {
-                    while WORD[*p.add(next as usize) as usize] { next += 1; }
+                    while WORD[*p.add(next as usize) as usize] {
+                        next += 1; // 64 bytes or more: never a term
+                    }
                 }
                 break;
             }
-            m &= !0u64 << (s + len);
-            // The published generator guarantees corpus tokens are at most
-            // 17 bytes. Longer runs can therefore never be query hits.
-            if len <= 17 {
-                let k = token_key(p.add(s as usize), len as usize);
+            m &= !0u64 << (s + len); // here the token ends inside the window
+            if len <= 32 {
+                let k = key(p.add(s as usize), len as usize);
                 let h = hash(k);
-                _mm_prefetch::<_MM_HINT_T0>(t.ctrl.as_ptr().add(h & (t.ctrl.len() - 1)).cast());
-                if n >= LAG { look(&ring[n % LAG]); }
+                let slot = t.slot.as_ptr().add(h & (t.slot.len() - 1));
+                _mm_prefetch::<_MM_HINT_T0>(slot.cast());
+                if n >= LAG {
+                    look(&ring[n % LAG]);
+                }
                 (ring[n % LAG], n) = ((k, h, p.add(s as usize), len as usize), n + 1);
             }
         }
@@ -249,7 +210,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
 unsafe fn around(terms: &Terms, s: *const u8, len: usize, phrase: &[u32], j: usize) -> bool {
     let is = |p: *const u8, q: *const u8, id: u32| {
         let n = q.offset_from(p) as usize;
-        n <= 17 && token_key(p, n) == terms.keys[id as usize]
+        n <= 32 && same(key(p, n), terms.keys[id as usize])
     };
     let mut q = s;
     for &id in phrase[..j].iter().rev() {
@@ -359,114 +320,6 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
     }
 }
 
-#[inline]
-fn sparse_segment<'a>(
-    id: u32,
-    thread: usize,
-    post: &'a [u16],
-    start: &[u32],
-    seg: &[u16],
-) -> &'a [u16] {
-    let i = id as usize;
-    let counts = &seg[i * THREADS..][..THREADS];
-    let before: usize = counts[..thread].iter().map(|&n| n as usize).sum();
-    let n = counts[thread] as usize;
-    let at = start[i] as usize + before;
-    &post[at..at + n]
-}
-
-#[inline]
-fn apply16(a: &[u16], b: &[u16], op: u8, out: &mut Vec<u16>) {
-    out.clear();
-    if a.is_empty() {
-        if op == b'O' { out.extend_from_slice(b); }
-        return;
-    }
-    if b.is_empty() {
-        if op != b'A' { out.extend_from_slice(a); }
-        return;
-    }
-    if op != b'O' && a.len() * 16 < b.len() {
-        let mut j = 0;
-        for &x in a {
-            j += b[j..].partition_point(|&y| y < x);
-            let hit = j < b.len() && b[j] == x;
-            if hit == (op == b'A') { out.push(x); }
-        }
-        return;
-    }
-    let (mut i, mut j) = (0, 0);
-    match op {
-        b'O' => {
-            out.reserve(a.len() + b.len());
-            while i < a.len() && j < b.len() {
-                let (x, y) = (a[i], b[j]);
-                out.push(x.min(y));
-                i += (x <= y) as usize;
-                j += (y <= x) as usize;
-            }
-            out.extend_from_slice(&a[i..]);
-            out.extend_from_slice(&b[j..]);
-        }
-        b'A' => {
-            out.reserve(a.len().min(b.len()));
-            while i < a.len() && j < b.len() {
-                let (x, y) = (a[i], b[j]);
-                if x == y { out.push(x); }
-                i += (x <= y) as usize;
-                j += (y <= x) as usize;
-            }
-        }
-        _ => {
-            out.reserve(a.len());
-            while i < a.len() && j < b.len() {
-                let (x, y) = (a[i], b[j]);
-                if x < y { out.push(x); }
-                i += (x <= y) as usize;
-                j += (y <= x) as usize;
-            }
-            out.extend_from_slice(&a[i..]);
-        }
-    }
-}
-
-fn line_sparse(
-    out: &mut String,
-    tids: &[u32],
-    ops: &[u8],
-    post: &[u16],
-    start: &[u32],
-    seg: &[u16],
-    firsts: &[u32],
-    a: &mut Vec<u16>,
-    b: &mut Vec<u16>,
-) {
-    let (mut count, mut sum) = (0u64, 0u64);
-    let mut first = [0u32; 10];
-    let mut nf = 0usize;
-    for t in 0..THREADS {
-        a.clear();
-        a.extend_from_slice(sparse_segment(tids[0], t, post, start, seg));
-        for (&op, &id) in ops.iter().zip(&tids[1..]) {
-            if a.is_empty() && op != b'O' { continue; }
-            apply16(a, sparse_segment(id, t, post, start, seg), op, b);
-            std::mem::swap(a, b);
-        }
-        let base = firsts[t];
-        count += a.len() as u64;
-        sum += a.iter().map(|&d| base as u64 + d as u64).sum::<u64>();
-        if nf < 10 {
-            for &d in a.iter().take(10 - nf) {
-                first[nf] = base + d as u32;
-                nf += 1;
-            }
-        }
-    }
-    write!(out, "{count} {sum}").unwrap();
-    first[..nf].iter().for_each(|d| write!(out, " {d}").unwrap());
-    out.push('\n');
-}
-
 /// "count sum id1 ... id10" for a set of documents.
 fn line(out: &mut String, docs: &Docs) {
     let (mut count, mut sum, mut first) = (0u64, 0u64, Vec::with_capacity(10));
@@ -543,15 +396,11 @@ impl Units {
         self.chunks.push(c);
     }
 
-    #[inline(always)]
     fn add(&mut self, keep: bool, offset: u32, doc: u32) {
-        if !keep {
-            return;
-        }
         let gap = doc - self.prev;
-        self.put((offset << 4 | gap.min(GAP)) as u16, true);
-        self.prev = doc;
-        if gap >= GAP {
+        self.put((offset << 4 | gap.min(GAP)) as u16, keep);
+        self.prev = if keep { doc } else { self.prev };
+        if keep & (gap >= GAP) {
             self.put(gap as u16, true);
         }
     }
@@ -570,12 +419,8 @@ fn main() {
     // PR_SET_THP_DISABLE: the box backs part-written regions with whole 2 MB pages.
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) };
     let qtext = map("/data/queries.txt");
-    let table = (qtext.len() / 8).next_power_of_two();
-    let mut terms = Terms {
-        ctrl: vec![EMPTY; table],
-        ids: vec![0; table],
-        keys: Vec::with_capacity(qtext.len() / 16),
-    };
+    let slots = vec![0; (qtext.len() / 8).next_power_of_two()];
+    let mut terms = Terms { slot: slots, keys: Vec::with_capacity(qtext.len() / 16) };
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
@@ -769,18 +614,12 @@ fn main() {
     };
     let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
-    on_threads(|_| {
-        let (mut local_a, mut local_b) = (Vec::<u16>::new(), Vec::<u16>::new());
-        loop {
+    on_threads(|_| loop {
         let k = next.fetch_add(1, Relaxed);
         let Some(chunk) = chunks.get(k) else { return };
         let mut out = String::new();
         for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
             let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
-            if !phrase && tids.iter().all(|&id| (id as usize) >= nbits && (id as usize) < lists) {
-                line_sparse(&mut out, tids, ops, &post, &start, &seg, &firsts, &mut local_a, &mut local_b);
-                continue;
-            }
             let set = if phrase {
                 let at = found.partition_point(|m| m.0 < q as u32);
                 Docs::List(found[at..].iter().take_while(|m| m.0 == q as u32).map(|m| m.1).collect())
@@ -794,7 +633,6 @@ fn main() {
             line(&mut out, &set);
         }
         *chunk.lock().unwrap() = out;
-        }
     });
     let out: String = chunks.into_iter().map(|c| c.into_inner().unwrap()).collect();
     std::fs::write("/out/results.txt", out).expect("/out/results.txt");
