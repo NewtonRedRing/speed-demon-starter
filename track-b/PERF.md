@@ -190,3 +190,47 @@ oracle methods under ASan/UBSan, strict GCC warnings and the allowlisted offline
 production-style sandbox pass. Added coverage exercises global density choices
 with sparse worker slices, 255/256 memberships, a nonzero bitmap base, duplicate
 tokens, partial final words and mixed sparse/dense Boolean operations.
+
+
+## October 31 rare-anchor + Aho-Corasick hybrid experiment (draft)
+
+The candidate extends the actual Track B query-first tokenizer with a second
+exact phrase engine. For every phrase, count its token occurrences across the
+query vocabulary, select its lowest-frequency term (break ties by token
+length), and use that as a correctness-preserving anchor. Phrases with selected
+query-term frequency <= 8 are checked by direct whole-token comparison at
+anchor occurrences. All remaining phrases are handled by the original exact
+Aho-Corasick automaton with failure/output links. Each phrase belongs to
+exactly one engine. Per-document `Matches.last` stamping still suppresses
+duplicate occurrences, preserves duplicate query lines as distinct queries,
+and retains the first ten matching document IDs in input order.
+
+A standalone GCC 14.2 C++20 (-O3 -march=native) benchmark with
+19,000 generated phrases and 180,000 documents / **32.4 million tokens**,
+including 380 deliberately common-anchor phrases, verified **every phrase's
+last matching document against an independent full Aho-Corasick reference**.
+The hybrid selected 18,620 anchored phrases and 380 AC fallback phrases.
+Two runs on this synthetic workload:
+
+- 0.979 s hybrid vs 1.918 s full AC (1.96x matching-stage speedup).
+- 1.201 s hybrid vs 2.635 s full AC (2.19x matching-stage speedup;
+  CPU contention and host load varied).
+
+A pure anchored engine with 2% high-fanout phrases was slower than the
+hybrid on a 23.4M-token synthetic workload, supporting the fallback policy.
+Without the 2% common cases, an all-anchor synthetic kernel achieved
+0.17 s vs ~2.09 s AC on 32.4M tokens. These are **kernel measurements
+only**; they exclude file parsing, Boolean postings, query evaluation,
+output, peak cgroup memory and official event CPU controls. They do **not**
+prove a 2x end-to-end Track B gain or a 69.556 machine-point outcome.
+
+Known limitation: query-term frequency estimates select anchors without
+knowing the corpus's actual document frequencies; this is a performance
+heuristic, not a correctness shortcut. The current implementation keeps
+the original short-token base-36 direct map from main branch, with exact
+full-byte hash/table verification for longer terms.
+
+**Do not promote to `speed-demon`:** first compile with pinned GCC 15,
+run sanitizer and independent UTF-8/Boolean/phrase oracles, verify the
+official full seed-1 output SHA and multiple holdout-style seeds, and compare
+alternating complete-process K including cgroup memory and source lines.
