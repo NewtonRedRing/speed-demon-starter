@@ -178,6 +178,26 @@ class Solutions(unittest.TestCase):
                 query += " " + rng.choice(["AND", "OR", "NOT"]) + " " + rng.choice(vocabulary)
             queries.append(query)
         self.check_b(docs, queries)
+        docs = []
+        for i in range(8193):
+            words = [b"common"] + [b"filler"] * 40
+            if i % 4 == 0:
+                words += [b"quarter"] * 5
+            if i < 255:
+                words.append(b"below")
+            if i < 256:
+                words.append(b"cutover")
+            if 2048 <= i < 2304:
+                words.append(b"late")
+            if i in (0, 63, 64, 8192):
+                words.append(b"sparse")
+            docs.append(b" ".join(words))
+        self.check_b(docs, [
+            "BOOL quarter", "BOOL below", "BOOL cutover", "BOOL late", "BOOL sparse",
+            "BOOL common NOT quarter AND late", "BOOL sparse OR late",
+            "BOOL below OR late NOT sparse", "BOOL absent AND late",
+            'PHRASE "quarter quarter"', 'PHRASE "filler quarter"',
+        ])
 
     def test_c_exact_csv_names_boms_and_parallel_quote_boundaries(self):
         rng = random.Random(578)

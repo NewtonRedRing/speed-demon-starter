@@ -10,6 +10,7 @@
 #include <memory>
 #include <malloc.h>
 #include <queue>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -94,33 +95,6 @@ struct Posting {
     std::vector<u32> ids;
     std::unique_ptr<std::vector<u64>> bits;
     u32 base = 0;
-    void promote() {
-        base = ids.front() & ~u32{63};
-        bits = std::make_unique<std::vector<u64>>((ids.back() - base) / 64 + 1);
-        for (u32 id : ids) (*bits)[(id - base) / 64] |= u64{1} << (id % 64);
-        std::vector<u32>().swap(ids);
-    }
-    void add(u32 id) {
-        if (bits) {
-            const auto word = (id - base) / 64;
-            if (word >= bits->size()) bits->resize(word + 1);
-            (*bits)[word] |= u64{1} << (id % 64);
-        } else {
-            ids.push_back(id);
-            if (ids.size() >= 256 && id - ids.front() < ids.size() * 32) promote();
-        }
-    }
-    void merge(Posting& source) {
-        if (ids.empty() && !bits) { *this = std::move(source); return; }
-        if (!source.bits) {
-            for (u32 id : source.ids) add(id);
-        } else {
-            if (!bits) promote();
-            const auto offset = (source.base - base) / 64;
-            if (bits->size() < offset + source.bits->size()) bits->resize(offset + source.bits->size());
-            for (std::size_t i = 0; i < source.bits->size(); ++i) (*bits)[offset + i] |= (*source.bits)[i];
-        }
-    }
 };
 struct Term {
     std::string text;
@@ -238,20 +212,27 @@ void parallel(unsigned workers, Work work) {
 }
 
 struct Local {
-    std::vector<Posting> documents;
+    struct Hit { u32 term, document; };
+    std::vector<Hit> hits;
+    std::unique_ptr<u32[]> documents;
+    std::vector<u32> offsets;
     std::vector<Matches> matches;
     u32 extent = 0;
+    std::span<const u32> posting(u32 term) const {
+        return {documents.get() + offsets[term], offsets[term + 1] - offsets[term]};
+    }
 };
 
 void scan(Local& local, const char* data, std::size_t begin, std::size_t end, const Words& words,
           const std::vector<Term>& terms, const Automaton& automaton, std::size_t queries, u32 booleans) {
-    local.documents.resize(booleans);
+    local.offsets.resize(static_cast<std::size_t>(booleans) + 1);
     local.matches.resize(queries);
     std::vector<u32> last(booleans, missing);
     if (begin && data[begin - 1] != '\n')
         while (data[begin++] != '\n') {}
     if (end && data[end - 1] != '\n')
         while (data[end++] != '\n') {}
+    local.hits.reserve((end - begin) / 12 + 1);
     const char* p = data + begin;
     auto released = (begin + 4095) & ~std::size_t(4095);
     while (p < data + end) {
@@ -277,7 +258,8 @@ void scan(Local& local, const char* data, std::size_t begin, std::size_t end, co
                 if (word != missing && terms[word].boolean != missing) {
                     const u32 index = terms[word].boolean;
                     if (last[index] != document) {
-                        local.documents[index].add(document);
+                        local.hits.push_back({index, document});
+                        ++local.offsets[index + 1];
                         last[index] = document;
                     }
                 }
@@ -362,6 +344,7 @@ int solve() {
     std::vector<Query> queries;
     std::vector<Term> terms;
     std::unordered_map<std::string, u32> ids;
+    std::vector<u32> boolean_terms;
     u32 booleans = 0, phrases = 0;
     std::ifstream input("/data/queries.txt");
     if (!input) throw std::runtime_error("cannot open queries.txt");
@@ -385,8 +368,10 @@ int solve() {
                 auto [it, fresh] = ids.try_emplace(word, static_cast<u32>(terms.size()));
                 if (fresh) terms.push_back({word, missing, {}});
                 query.words.push_back(it->second);
-                if (!phrase && terms[it->second].boolean == missing)
+                if (!phrase && terms[it->second].boolean == missing) {
                     terms[it->second].boolean = booleans++;
+                    boolean_terms.push_back(it->second);
+                }
             }
             ++part;
             if (space == text.npos) break;
@@ -419,16 +404,55 @@ int solve() {
     parallel(workers, [&](unsigned w) {
         scan(locals[w], data, size * w / workers, size * (w + 1) / workers, words, terms, automaton, phrases, booleans);
     });
+    parallel(workers, [&](unsigned w) {
+        Local& local = locals[w];
+        for (std::size_t i = 1; i < local.offsets.size(); ++i)
+            local.offsets[i] += local.offsets[i - 1];
+        local.documents = std::make_unique_for_overwrite<u32[]>(local.hits.size());
+        auto cursors = local.offsets;
+        for (const Local::Hit& hit : local.hits)
+            local.documents[cursors[hit.term]++] = hit.document;
+        std::vector<Local::Hit>().swap(local.hits);
+    });
     std::vector<Matches> matches(phrases);
     u32 extent = 0;
     for (Local& local : locals) {
         extent = std::max(extent, local.extent);
-        for (u32 i = 0; i < terms.size(); ++i) {
-            if (terms[i].boolean != missing)
-                terms[i].documents.merge(local.documents[terms[i].boolean]);
-        }
         for (u32 q = 0; q < phrases; ++q) matches[q].merge(local.matches[q]);
     }
+    std::atomic<u32> next_term{0};
+    parallel(workers, [&](unsigned) {
+      for (;;) {
+        const u32 begin = next_term.fetch_add(32, std::memory_order_relaxed);
+        if (begin >= booleans) break;
+        for (u32 b = begin; b < std::min<u32>(begin + 32, booleans); ++b) {
+            std::size_t count = 0;
+            u32 first = missing, last = 0;
+            for (const Local& local : locals) {
+                const auto ids = local.posting(b);
+                count += ids.size();
+                if (!ids.empty()) {
+                    if (first == missing) first = ids.front();
+                    last = ids.back();
+                }
+            }
+            if (!count) continue;
+            Posting& posting = terms[boolean_terms[b]].documents;
+            const bool dense = count >= 256 && last - first < count * 32;
+            if (dense) {
+                posting.base = first & ~u32{63};
+                posting.bits = std::make_unique<std::vector<u64>>((last - posting.base) / 64 + 1);
+            } else posting.ids.reserve(count);
+            for (const Local& local : locals) {
+                const auto ids = local.posting(b);
+                if (dense) {
+                    for (u32 id : ids)
+                        (*posting.bits)[(id - posting.base) / 64] |= u64{1} << (id % 64);
+                } else posting.ids.insert(posting.ids.end(), ids.begin(), ids.end());
+            }
+        }
+      }
+    });
     parallel(workers, [&](unsigned w) { locals[w] = Local{}; });
     std::vector<std::string> results(queries.size());
     std::atomic<std::size_t> next{0};

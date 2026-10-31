@@ -106,3 +106,87 @@ and was removed rather than adding an unnecessary algorithm.
 All full official hashes, all 14 tests, all eight solution methods under
 ASan/UBSan, strict warnings and all four offline sandbox checks pass. No new
 official score exists; the memory tradeoff must be included when judging points.
+
+## Complete source audit: flat posting construction
+
+The full source was reviewed, not just output formatting. Corrected shard-level
+diagnostics on the full official input found approximately 36.3 million tokens,
+28.7 million known query-token occurrences and 21.1 million distinct Boolean
+term/document memberships. There are 75,747 query terms, 53,444 Boolean terms
+and 19,000 phrase queries. The automaton has 54,509 nodes: 18,886 leaves,
+34,225 single-child nodes and 1,398 branching nodes.
+
+This explains why B is not comparable to simply parsing 250,000 document IDs:
+it performs tens of millions of exact dictionary, phrase and membership
+operations over 253.8 MB of text.
+
+### Findings across the source
+
+| Source area | Finding and disposition |
+|---|---|
+| `mix`, `Transitions`, `Automaton` | Exact failure/output behavior is necessary. Inline single-child transitions did not give a reliable whole-process win; removed. |
+| `Query`, `Term`, `Words` | Query-only dictionary and fingerprint-plus-full-equality checks retained. No hash-only matches or truncated long-token matches. |
+| `Matches` | Count/sum/first-ten summaries and per-document phrase deduplication retained, including overlapping and duplicate queries. |
+| `Posting` | Per-hit vector growth and incremental promotion/merge methods removed. Final representations are now built once. |
+| `parallel` | Worker joins and exception propagation retained; they prevent silent partial results. |
+| `Local`, `scan` | Replaced one dynamic posting per term per worker with a flat hit vector and compact counts. ASCII/Unicode separator semantics and mapping bounds retained. |
+| Partition/build stages in `solve` | Worker-local prefix/scatter preserves document order; batched term owners build final postings in parallel without shared writes. |
+| `apply`, `format_bits` | Left-to-right Boolean operations and exact dense population summaries retained. |
+| Query parsing, mapping, output, `main` | Required syntax, I/O and error checks retained. Output is still exactly one deterministic file. |
+
+Temporary phase timers, removed from retained source, measured:
+
+| Stage | Before redesign | Flat-layout candidate |
+|---|---:|---:|
+| Query preparation | 55-65 ms | 43-89 ms |
+| Corpus scan | 709-730 ms | 368-485 ms |
+| Local partition | Not present | 20-25 ms |
+| Serial merge | 120-127 ms | Removed |
+| Final posting construction and cleanup | Cleanup alone 6-7 ms | 18-25 ms |
+| Query evaluation | 42-44 ms | 33-45 ms |
+| Output | 4-5 ms | 2-3 ms |
+
+These are diagnostic ranges from separate batches, not controlled stage-specific
+speedups. Before-redesign counters also add instrumentation overhead. The
+uninstrumented total-process comparisons below establish the retained gain.
+
+### Retained algorithm and controlled result
+
+Scanning appends one compact hit per distinct Boolean term/document pair.
+Each worker count/prefix-scatters its own hits into contiguous ID slices,
+without cross-worker cache-line contention. Workers then claim 32-term batches:
+each final term is either reserved once and filled from sorted slices, or
+constructed directly as a bitmap. There is no comparison sort and no per-ID
+merge into a growing global vector. Temporary hit buffers and posting slices
+are released at their last use.
+
+Eight alternating runs per executable in one sandbox, using staged official
+full seed-1 inputs and live manifest hashes for every output:
+
+| Executable | Median process time (s) | Maximum RSS (MiB) |
+|---|---:|---:|
+| Published `b03b834` implementation | 0.786195 | 219.28 |
+| Flat collection/scatter and one-shot posting build | 0.625108 | 280.30 |
+
+This is **20.5% lower elapsed time (1.26x throughput)**, trading about 61 MiB
+for speed. Two earlier controlled batches measured 0.807776 to 0.632046 s and
+0.804912 to 0.638640 s, confirming roughly 20.5-21.8% reductions.
+A separate final five-run batch measured 0.509163 s / 278.18 MiB.
+No new official score exists; memory and formatted-source penalties still
+affect points, and the shared local host is not the scoring CPU.
+
+### Rejected alternatives and validation
+
+Inline single-child automaton transitions, per-worker monotonic allocation
+pools, bounds-safe AVX2 token scanning, bulk insertion into the old posting
+layout and moving document stamps into posting headers were tested. They either
+did not improve repeatably or increased memory without enough time benefit.
+All were removed. The retained redesign differs from earlier rejected parallel
+term merges: it removes the per-worker posting-vector allocation/growth scheme
+and presents already-partitioned contiguous slices to the final builders.
+
+All full official output hashes pass. All 14 regression tests, all three B
+oracle methods under ASan/UBSan, strict GCC warnings and the allowlisted offline
+production-style sandbox pass. Added coverage exercises global density choices
+with sparse worker slices, 255/256 memberships, a nonzero bitmap base, duplicate
+tokens, partial final words and mixed sparse/dense Boolean operations.

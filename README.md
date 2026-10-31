@@ -41,7 +41,7 @@ Latest full public seed-1 rechecks (five process-timed runs per track):
 | Track | Median time | Peak RSS | Official output hash |
 |---|---:|---:|---|
 | A | 0.045975 s | 65.67 MiB | PASS |
-| B | 0.774453 s | 219.74 MiB | PASS |
+| B | 0.509163 s | 278.18 MiB | PASS |
 | C | 0.113996 s | 21.89 MiB | PASS |
 | D | 0.394181 s | 130.77 MiB | PASS |
 
@@ -203,6 +203,28 @@ inline name hashing and smaller dictionary, and D's speculative prefetch and
 early own-distance lookup. Full official hashes, all 14 tests, all eight
 solution methods under ASan/UBSan, strict warnings and all four offline sandbox
 checks passed again. A's oracle now checks every endpoint length from 1 to 125.
+
+### Track B follow-up: remove incremental posting construction
+
+A complete B source review identified approximately 36.3 million corpus tokens
+and 21.1 million Boolean memberships. The published implementation spent about
+709-730 ms scanning plus 120-127 ms merging in diagnostic runs. Output was only
+4-5 ms, so formatting was not the main problem.
+
+B now collects hits into contiguous per-worker vectors, prefix-scatters into
+worker-owned posting slices, and builds each final sparse vector or bitmap once
+in parallel. Incremental `Posting::add`, `promote` and `merge` are no longer
+needed and were removed. Exact phrase matching, full token equality and
+left-to-right Boolean semantics are unchanged.
+
+Latest eight-run alternating comparison: **0.786195 s before versus
+0.625108 s after, 20.5% lower median runtime**. Peak RSS increased from
+219.28 to 280.30 MiB. Two earlier controlled batches confirmed 20.5-21.8% gains.
+The separate five-run B recheck appears above; cross-batch timings are not
+speedup evidence. All 14 tests, B's sanitizer oracles, strict warnings and its
+offline production sandbox pass. No new official score is available.
+The [B performance log](track-b/PERF.md) records the source audit, rejected
+experiments and memory tradeoff.
 
 ## Validation
 
