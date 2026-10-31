@@ -114,6 +114,11 @@ def download(track, directory=None):
     directory = Path(directory) if directory is not None else dataset_path(track)
     directory.mkdir(parents=True, exist_ok=True)
     expected_names = TRACKS[track]["inputs"]
+    # Remove only our own incomplete downloads, never a user-provided file.
+    for name in expected_names:
+        part = directory / (name + ".official-download")
+        if part.exists():
+            part.unlink()
     extra = {p.name for p in directory.iterdir()} - set(expected_names)
     if extra:
         raise DatasetError(f"{directory} contains files not in the official dataset: {sorted(extra)}")
