@@ -435,11 +435,15 @@ impl Units {
         self.chunks.push(c);
     }
 
+    #[inline(always)]
     fn add(&mut self, keep: bool, offset: u32, doc: u32) {
+        if !keep {
+            return;
+        }
         let gap = doc - self.prev;
-        self.put((offset << 4 | gap.min(GAP)) as u16, keep);
-        self.prev = if keep { doc } else { self.prev };
-        if keep & (gap >= GAP) {
+        self.put((offset << 4 | gap.min(GAP)) as u16, true);
+        self.prev = doc;
+        if gap >= GAP {
             self.put(gap as u16, true);
         }
     }
