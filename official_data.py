@@ -76,7 +76,18 @@ def sha256_file(filename):
 
 
 def dataset_path(track):
-    return CACHE / track
+    """Locate the original public inputs in either supported on-disk layout.
+
+    Legacy checkouts contain data/<track>/full-seed1/ alongside tiny-ref/
+    and tiny-seed1/. Newer checkouts may have official files directly in
+    data/<track>/. We never inspect or modify the unrelated tiny folders.
+    Every selected file still must pass the organizer's SHA-256 gate.
+    """
+    parent = CACHE / track
+    nested = parent / "full-seed1"
+    if nested.is_dir():
+        return nested
+    return parent
 
 
 def verify(track, directory=None):
