@@ -149,3 +149,27 @@ quote-parity scan and its extra prepass worker.
 All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
 strict warnings and all four offline sandbox checks pass. No new official
 score or 80-point result is claimed.
+
+
+## October 31 follow-up: mapped `regions.csv` lookup (experimental)
+
+The existing `speed-demon` submission now already uses mapped CSV quote parity.
+This isolated C candidate changes **only** lookup-table loading: one
+read-only `mmap`, direct integer parsing and a one-million-entry dense
+country-ID allocation, with safe growth up to the original region-ID
+bound 9,999,999. It preserves exact three-letter country mapping, stable
+first-seen country numbering, `_UNMATCHED`, integer cents, and handling of
+a valid final row without a trailing LF. The CSV records parser and exact
+name dictionary are unchanged.
+
+A standalone C++20 synthetic 200,000-row lookup benchmark produced identical
+aggregate country-ID checksums for `getline` and mapped implementations.
+One ten-run set measured **11.434 ms** buffered versus **3.214 ms**
+mapped on this local 5-vCPU host. Earlier sets measured 7.37 vs 2.28 ms.
+This is a **region-loading stage** benchmark, not the whole Track C
+executable and not the official scoring CPU.
+
+Before merge: compile full C with GCC 15 under pinned offline Docker; run
+hostile CSV, empty/missing regions and trailing-LF oracles; verify full seed-1
+SHA-256 and holdout-style seeds, then compare complete-process K including
+cgroup peak and source lines. No 76.840-point claim.
