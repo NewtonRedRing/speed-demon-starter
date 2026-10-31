@@ -103,3 +103,24 @@ training data.
 
 The final machine score is the geometric mean of the best three eligible
 track totals; each track's correctness and sandbox gates must pass.
+
+## Optional Track A algorithm / PGO validation
+
+The Track A code has a root-level Rust regression test (outside the scored
+track directory). Run `rustc --edition=2021 -C target-cpu=native --test
+tests/track_a_algorithms.rs -o /tmp/track-a-tests && /tmp/track-a-tests`.
+
+To benchmark a separately trained PGO candidate **without changing the
+official submission Dockerfile**, run:
+
+```bash
+docker build --network=none -t speeddemon-pgo/track-a \
+  -f scripts/track-a-pgo.Dockerfile track-a
+python3 check.py a --skip-build --image speeddemon-pgo/track-a
+```
+
+The two seed-2/3 generated files are exclusively **build-time training
+inputs**; `check.py` always verifies the real full public seed-1 input and
+the organizer's exact expected output SHA-256. Neither the optional Dockerfile
+nor the algorithm test is inside `track-a/`, so they do not inflate the
+submission's source-size count.

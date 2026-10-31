@@ -339,3 +339,71 @@ matched decimal parsing for lengths 1..8. A local Clang C microbenchmark
 suggested SWAR faster than the prior SSE path, but its small fixed input is
 not representative of full-process wall time. This optimization still needs
 Rust compilation and official correctness/time validation.
+
+## 2026-10-31: Fused aggregation / exact radix / AVX2 sort experiment
+
+**Current change, not an official measurement.** The previous latest scored
+Track A run was `run-c42954603af9` at `a2c6f51d`: 0.046989 s,
+22,585,344 B, 431 scc code lines, 74.238468 points (correctness passed).
+The best earlier run was `run-5fbf4e3e8868`: 0.030690 s,
+21,938,176 B, 348 lines, 79.686448 points.
+
+This patch removes explicit 192-byte T0 software prefetch, CRC-tagged u32
+slots plus the hot hash cache, affinity pinning and the unproven SWAR path.
+The 4,096-entry u16 interner, 16 KiB chunk size, single SSE decoder and
+baseline image were restored. The old board regression bundled multiple
+changes, so its **cause cannot be isolated** to any one micro-optimization.
+
+### Algorithmic changes
+
+1. For each hour, count/error and append a packed 64-bit
+   `(global_rank << 33)|(error << 32)|latency` record in one pass
+   through the mmap chunks, including wide latencies. Prefix and scatter
+   using the contiguous worker-local buffer. This removes the second
+   linked-list traversal, at the cost of a transient 8-byte-per-row staging
+   buffer (roughly 344 KiB for a typical 43k-record hour).
+2. Exact three-target, four-round MSB-first radix histogram selection for
+   at least 256 records. Three 256-bin histograms are updated in one scan
+   at each byte level. Duplicate values and full `u32` range are exact.
+3. Exact AVX2 bitonic sorting network, padded with `u32::MAX` to the next
+   power-of-two vector width up to 32. Enabled only for 28..32 values;
+   small groups still use ordinary `sort_unstable`.
+4. Original chained `select_nth_unstable` retained for 65..255 values.
+   Zero to two records use previously validated exact fast paths.
+5. Optional pinned PGO build under `scripts/track-a-pgo.Dockerfile`, with
+   sample and tiny edge-case training, **not** in the submitted Dockerfile.
+
+AVX2 lacks the AVX-512CD `VPCONFLICT` instruction and vector scatter.
+The proposed conflict-detecting eight-lane histogram is therefore not
+available on the scoring ISA; its exact scalar counting path remains.
+
+### Independent local algorithm probes (NOT board or Rust measurements)
+
+- Python order-statistic model: randomized nearest ranks over hundreds of
+  lengths, repeated small values and 32-bit extremes.
+- Equivalent compiled AVX2 intrinsic sorting network: 500,000 randomized
+  cases for sizes 8..32, all compared against `std::sort`.
+- Proxy C++ selection timing, ratio radix / chained select:
+  65=1.33x, 128=1.12x, 256=0.93x, 512=0.86x,
+  1024=0.89x, 9223=0.87x.
+- Proxy C++ small-group timing, ratio bitonic / `std::sort`:
+  8=2.74x, 10=3.45x, 16=1.37x, 24=1.02x, 32=0.68x.
+  These tests were on a different CPU/compiler and **do not establish**
+  the crossover points for Rust on the official i5-13500.
+
+### Required verification before claiming an improvement
+
+```bash
+rustc --edition=2021 -C target-cpu=native --test tests/track_a_algorithms.rs \
+  -o /tmp/track-a-tests && /tmp/track-a-tests
+python3 check.py a            # original public full seed-1, 5 exact SHA gates
+
+# Optionally compare with independently built PGO:
+docker build --network=none -t speeddemon-pgo/track-a \
+  -f scripts/track-a-pgo.Dockerfile track-a
+python3 check.py a --skip-build --image speeddemon-pgo/track-a
+```
+
+The extra scored lines and transient memory can outweigh small speed wins.
+Only an actual official run can establish the new score; no low-90s claim is
+supported by this implementation alone.
