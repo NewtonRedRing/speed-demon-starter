@@ -351,30 +351,26 @@ fn main() {
         let (from, to) = (log.as_ptr().add(cut[t]), log.as_ptr().add(cut[t + 1]));
         parsers[t].get().parse(&endpoints, from, to);
 
-        // Global ids are ranks in unsigned byte order (a proper prefix first),
-        // which is the order lines are printed in within an hour.
+        // Slot ids are already global. Only rank the ~1,842 occupied slots.
         if barrier.wait().is_leader() {
-            let mut all = Interner::new();
-            for ps in &parsers {
-                let ps = ps.get();
-                ps.rank = (0..ps.local.names.len())
-                    .map(|id| all.id(ps.local.name(id)))
-                    .collect();
+            let mut by_name: Vec<(Vec<u8>, u32)> = endpoints.slot.iter().enumerate()
+                .filter_map(|(id, s)| {
+                    let v = s.load(Acquire);
+                    (v != 0).then(|| (endpoints.name(v).to_vec(), id as u32))
+                }).collect();
+            by_name.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            let rank = ranks.get();
+            let out = names.get();
+            out.clear();
+            for (r, (name, id)) in by_name.into_iter().enumerate() {
+                rank[id as usize] = r as u32;
+                out.push(name);
             }
-            let mut order: Vec<u32> = (0..all.names.len() as u32).collect();
-            order.sort_unstable_by(|&a, &b| all.name(a as usize).cmp(all.name(b as usize)));
-            let mut rank_of = vec![0u32; order.len()];
-            for (r, &id) in order.iter().enumerate() {
-                rank_of[id as usize] = r as u32;
-            }
-            for id in parsers.iter().flat_map(|ps| ps.get().rank.iter_mut()) {
-                *id = rank_of[*id as usize];
-            }
-            *names.get() = order.iter().map(|&id| all.name(id as usize).to_vec()).collect();
         }
         barrier.wait();
 
         let names = &*names.get();
+        let rank = &*ranks.get();
         let ne = names.len();
         let (mut start, mut errors, mut latency) = (vec![0u32; ne + 1], vec![0u32; ne], vec![]);
         while let h @ 0..HOURS = claim.fetch_add(1, Relaxed) {
@@ -383,7 +379,7 @@ fn main() {
             start.fill(0);
             errors.fill(0);
             for ps in &parsers {
-                ps.get().each(h, |e, err, _| (start[e + 1], errors[e]) = (start[e + 1] + 1, errors[e] + err as u32));
+                ps.get().each(h, rank, |e, err, _| (start[e + 1], errors[e]) = (start[e + 1] + 1, errors[e] + err as u32));
             }
             for e in 0..ne {
                 start[e + 1] += start[e];
@@ -391,7 +387,7 @@ fn main() {
             latency.resize(start[ne] as usize, 0);
             let mut cursor = start[..ne].to_vec();
             for ps in &parsers {
-                ps.get().each(h, |e, _, l| (latency[cursor[e] as usize], cursor[e]) = (l, cursor[e] + 1));
+                ps.get().each(h, rank, |e, _, l| (latency[cursor[e] as usize], cursor[e]) = (l, cursor[e] + 1));
             }
             // An hour is finished once its records are copied out; one thread
             // at a time then releases whatever chunks that frees.
