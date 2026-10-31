@@ -375,7 +375,9 @@ unsafe fn exact_percentiles(values: &mut [u32]) -> [u32; 3] {
         return [values[0].min(values[1]), values[0].max(values[1]), values[0].max(values[1])];
     }
     let targets = [50, 95, 99].map(|p| (p * n + 99) / 100 - 1);
-    if n <= 7 {
+    // The AVX2 network is available for every 8..32 group, but measured
+    // sorting is preferable for shorter groups on the local x86 proxy.
+    if n <= 27 {
         values.sort_unstable();
         return targets.map(|i| values[i]);
     }
@@ -385,6 +387,13 @@ unsafe fn exact_percentiles(values: &mut [u32]) -> [u32; 3] {
     }
     if n <= 64 {
         values.sort_unstable();
+        return targets.map(|i| values[i]);
+    }
+    // Small selection groups do not amortize four radix histogram rounds.
+    if n < 256 {
+        values.select_nth_unstable(targets[2]);
+        values[..targets[2]].select_nth_unstable(targets[1]);
+        values[..targets[1]].select_nth_unstable(targets[0]);
         return targets.map(|i| values[i]);
     }
     radix_percentiles(values, targets)
