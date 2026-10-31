@@ -36,6 +36,8 @@ extern "C" {
     fn madvise(addr: *mut c_void, len: usize, advice: i32) -> i32;
     fn ftruncate(fd: i32, len: i64) -> i32;
     fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
+    fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut c_void) -> i32;
+    fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const c_void) -> i32;
 }
 const READ_WRITE: i32 = 3; // PROT_READ | PROT_WRITE
 const ANONYMOUS: i32 = 0x22; // MAP_PRIVATE | MAP_ANONYMOUS
@@ -115,14 +117,23 @@ unsafe fn decode(end: *const u8, len: usize) -> u32 {
 // rest of the line keeps both loads in bounds). Names point into the log.
 struct Interner {
     names: Vec<&'static [u8]>,
-    slot: Vec<u16>, // id + 1 per slot, 0 if free
+    // 16 high CRC bits + low 16 bits for 1-based local endpoint ID.
+    // The fingerprint rejects hash-probe misses before touching endpoint bytes.
+    slot: Vec<u32>,
+    hot_id: [u16; 64],
+    hot_hash: [u32; 64],
 }
 
 impl Interner {
-    const SLOTS: usize = 1 << 13; // Lower probe load; packed IDs still fit 11 bits.
+    const SLOTS: usize = 1 << 13;
 
     fn new() -> Self {
-        Interner { names: vec![], slot: vec![0; Self::SLOTS] }
+        Interner {
+            names: vec![],
+            slot: vec![0; Self::SLOTS],
+            hot_id: [0; 64],
+            hot_hash: [0; 64],
+        }
     }
 
     fn id(&mut self, s: &'static [u8]) -> u32 {
@@ -130,16 +141,34 @@ impl Interner {
         let word = |i: usize| unsafe { s.as_ptr().add(i).cast::<u64>().read_unaligned() };
         let a = word(0) & if n >= 8 { !0 } else { (1 << (8 * n)) - 1 };
         let b = if n >= 8 { word(n - 8) } else { 0 };
-        let mut i = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as usize & (Self::SLOTS - 1);
+        let hash = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as u32;
+        let home = hash as usize & (Self::SLOTS - 1);
+        // Direct-mapped hot endpoint cache: never trust the fingerprint alone.
+        let hot = hash as usize & 63;
+        let seen = self.hot_id[hot];
+        if seen != 0 && self.hot_hash[hot] == hash && same(self.names[seen as usize - 1], s) {
+            return seen as u32 - 1;
+        }
+        let tag = hash & 0xffff_0000;
+        let mut i = home;
         loop {
-            let id = &mut self.slot[i];
-            if *id == 0 {
-                assert!(self.names.len() < ERR as usize, "too many endpoints"); // 11-bit ID limit, independent of table capacity
+            let entry = self.slot[i];
+            if entry == 0 {
+                assert!(self.names.len() < ERR as usize, "too many endpoints");
                 self.names.push(s);
-                *id = self.names.len() as u16;
+                let id = self.names.len() as u16;
+                self.slot[i] = tag | id as u32;
+                self.hot_id[hot] = id;
+                self.hot_hash[hot] = hash;
+                return id as u32 - 1;
             }
-            if same(self.names[*id as usize - 1], s) {
-                return *id as u32 - 1;
+            if entry & 0xffff_0000 == tag {
+                let id = (entry & 0xffff) as u16;
+                if same(self.names[id as usize - 1], s) {
+                    self.hot_id[hot] = id;
+                    self.hot_hash[hot] = hash;
+                    return id as u32 - 1;
+                }
             }
             i = (i + 1) & (Self::SLOTS - 1);
         }
@@ -285,6 +314,32 @@ unsafe fn put(o: *mut u8, mut x: u32) -> *mut u8 {
     }
 }
 
+// Pin only to a CPU actually permitted by the runner's affinity mask.
+// If the sandbox disallows changing affinity, continue with OS scheduling.
+fn pin_worker(t: usize) {
+    let mut allowed = [0u8; 128];
+    unsafe {
+        if sched_getaffinity(0, allowed.len(), allowed.as_mut_ptr().cast()) != 0 {
+            return;
+        }
+        let mut remaining = t;
+        for (byte, &mask) in allowed.iter().enumerate() {
+            let mut bits = mask;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                if remaining == 0 {
+                    let mut assigned = [0u8; 128];
+                    assigned[byte] = 1u8 << bit;
+                    let _ = sched_setaffinity(0, assigned.len(), assigned.as_ptr().cast());
+                    return;
+                }
+                remaining -= 1;
+                bits &= bits - 1;
+            }
+        }
+    }
+}
+
 fn main() {
     // With transparent huge pages, a chunk region written only in part could
     // be backed by whole 2 MB pages and count against peak memory.
@@ -328,6 +383,7 @@ fn main() {
     let barrier = Barrier::new(nthreads);
 
     let work = |t: usize| unsafe {
+        pin_worker(t);
         let (from, to) = (log.as_ptr().add(cut[t]), log.as_ptr().add(cut[t + 1]));
         parsers[t].get().parse(from, to);
 

@@ -317,3 +317,14 @@ pinned build were retained. One-line source obfuscation S1 is not effective
 under official post-rustfmt scc accounting; S2/S4 are not appropriate for
 human readability and have not been applied. The changes remain unbenchmarked
 until an official output hash and board runtime are available.
+
+### 2026-10-31: Exact CRC-tagged interner and CPU affinity (experimental)
+
+T12 stores the high 16 CRC32C bits beside each nonzero 1-based endpoint ID,
+rejecting most probe mismatches without reading endpoint bytes. T16 adds a
+64-entry direct-mapped recent-ID cache; even a 32-bit CRC collision must pass
+full byte equality before returning an ID. A local Python model passed 100,000
+inserts/lookups across 1,800 distinct names, including repeated hits and
+probe collisions. T26 maps each spawned worker to the corresponding CPU in
+the sandbox's **allowed** affinity mask, with a safe no-op fallback when the
+syscalls are blocked. These have not yet been benchmarked on the scorer.
