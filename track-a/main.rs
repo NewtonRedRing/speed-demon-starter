@@ -160,11 +160,11 @@ fn same(x: &[u8], s: &[u8]) -> bool {
     }
 }
 
-// One hour's records from one thread, in a chain of 16 KB chunks carved in
+// One hour's records from one thread, in a chain of 8 KB chunks carved in
 // order from a region the thread maps up front. The output file's pages count
 // toward peak memory as it is written, so chunks are handed back while it
 // grows: see Parser::release.
-const CAP: usize = (16384 - 16) / 4;
+const CAP: usize = (8192 - 16) / 4;
 #[repr(C)]
 struct Chunk {
     prev: *mut Chunk,
@@ -194,23 +194,34 @@ impl Parser {
 
     unsafe fn parse(&mut self, mut p: *const u8, end: *const u8) {
         while p < end {
+            // The scan is sequential: bring the next cache lines into L1/L2.
+            _mm_prefetch::<_MM_HINT_T0>(p.add(192).cast());
             // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
             let d = |i: usize| (*p.add(i) - b'0') as usize;
-            let day = d(8) * 10 + d(9) + if d(6) == 0 { 0 } else { 31 };
+            let day = d(8) * 10 + d(9) + d(6) * 31;
             let h = (day - 30) * 24 + d(11) * 10 + d(12) - 18;
 
             // Spaces and newlines in the 64 bytes after the timestamp. Only an
             // endpoint near its 125-byte maximum pushes past the window.
             let m = p.add(28);
-            let sp = eq32(m, b' ') as u64 | (eq32(m.add(32), b' ') as u64) << 32;
-            let nl = eq32(m, b'\n') as u64 | (eq32(m.add(32), b'\n') as u64) << 32;
+            let lo = _mm256_loadu_si256(m.cast());
+            let hi = _mm256_loadu_si256(m.add(32).cast());
+            let cmp = |v, b: u8| _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b as i8))) as u32 as u64;
+            let sp = cmp(lo, b' ') | (cmp(hi, b' ') << 32);
+            let nl = cmp(lo, b'\n') | (cmp(hi, b'\n') << 32);
             let at = |bits: u64| m.add(bits.trailing_zeros() as usize);
             let name = at(sp).add(1);
             let name_end = find(nl != 0, at(sp & (sp - 1)), name, b' ');
             let eol = find(nl != 0, at(nl), name_end.add(5), b'\n');
             let name_bytes = from_raw_parts(name, name_end.offset_from(name) as usize);
             let key = self.local.id(name_bytes) | ERR * (*name_end.add(1) == b'5') as u32;
-            let latency = decode(eol, eol.offset_from(name_end) as usize - 5); // after " SSS "
+            let digits = eol.offset_from(name_end) as usize - 5; // after " SSS "
+            let latency = if digits <= 2 {
+                let ones = (*eol.sub(1) - b'0') as u32;
+                if digits == 2 { (*eol.sub(2) - b'0') as u32 * 10 + ones } else { ones }
+            } else {
+                decode(eol, digits)
+            };
             p = eol.add(1);
 
             if latency >= PACKED_MAX {
@@ -231,8 +242,8 @@ impl Parser {
 
     // The log is in arrival order, so chunks are carved roughly hour by hour
     // and hours finish in the same order: the run of chunks at the front whose
-    // hours are all finished grows steadily. Hand it back once it reaches 256
-    // KB, in one madvise, instead of one call (and TLB shootdown) per chunk.
+    // hours are all finished grows steadily. Hand it back in 128 KB batches,
+    // rather than a madvise/TLB shootdown for every 8 KB chunk.
     unsafe fn release(&mut self, finished: &[AtomicBool]) {
         let mut c = self.kept;
         while c < self.next && finished[(*c).hour as usize].load(Acquire) {
@@ -287,7 +298,10 @@ fn main() {
     let log: &'static [u8] = unsafe {
         let p = map(size + 4096, 1, ANONYMOUS, -1);
         if size > 0 {
-            mmap(p.cast(), size, 1, 0x12, input, 0); // PROT_READ, MAP_PRIVATE | MAP_FIXED
+            assert_eq!(mmap(p.cast(), size, 1, 0x12, input, 0), p, "file mmap failed");
+            // Advise sequential access on the file-backed mapping, not the
+            // anonymous chunks used for temporary records.
+            madvise(p.cast(), size, 2); // MADV_SEQUENTIAL
         }
         from_raw_parts(p, size)
     };
@@ -340,7 +354,7 @@ fn main() {
 
         let names = &*names.get();
         let ne = names.len();
-        let (mut start, mut errors, mut latency) = (vec![0u32; ne + 1], vec![0u32; ne], vec![]);
+        let (mut start, mut errors, mut latency, mut cursor) = (vec![0u32; ne + 1], vec![0u32; ne], vec![], vec![0u32; ne]);
         while let h @ 0..HOURS = claim.fetch_add(1, Relaxed) {
             // Counting sort of the hour's latencies by endpoint rank: count into
             // start[e + 1], prefix, then place each latency at its group's cursor.
@@ -353,7 +367,7 @@ fn main() {
                 start[e + 1] += start[e];
             }
             latency.resize(start[ne] as usize, 0);
-            let mut cursor = start[..ne].to_vec();
+            cursor.copy_from_slice(&start[..ne]);
             for ps in &parsers {
                 ps.get().each(h, |e, _, l| (latency[cursor[e] as usize], cursor[e]) = (l, cursor[e] + 1));
             }
@@ -375,15 +389,22 @@ fn main() {
                 // Nearest rank p is index ceil(p * n / 100) - 1. Selecting the
                 // highest rank first leaves everything below it in front, so
                 // each later selection only needs the front part.
-                let r = [50, 95, 99].map(|p| (p * n + 99) / 100 - 1);
-                if n <= 64 {
-                    a.sort_unstable(); // most groups; cheaper than three selections
+                let p = if n == 1 {
+                    [a[0]; 3]
+                } else if n == 2 {
+                    [a[0].min(a[1]), a[0].max(a[1]), a[0].max(a[1])]
                 } else {
-                    a.select_nth_unstable(r[2]);
-                    a[..r[2]].select_nth_unstable(r[1]);
-                    a[..r[1]].select_nth_unstable(r[0]);
-                }
-                let (p, err) = (r.map(|i| a[i]), errors[e]);
+                    let r = [50, 95, 99].map(|p| (p * n + 99) / 100 - 1);
+                    if n <= 64 {
+                        a.sort_unstable();
+                    } else {
+                        a.select_nth_unstable(r[2]);
+                        a[..r[2]].select_nth_unstable(r[1]);
+                        a[..r[1]].select_nth_unstable(r[0]);
+                    }
+                    r.map(|i| a[i])
+                };
+                let err = errors[e];
                 let ppm = (err as u64 * 1_000_000 / n as u64) as u32;
                 let line = [e as u32, n as u32, p[0], p[1], p[2], err, ppm];
                 // Label, name, six numbers each after a space, newline.

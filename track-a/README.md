@@ -39,3 +39,13 @@ Board comparison (run `run-3b8f1a6bdd06`) showed that pair-digit output
 plus the later build pipeline did not beat the earlier best A result. The
 writer was restored to simple single-digit emission and the fast baseline
 pinned offline Rust build. This is a measured rejection, not a missing feature.
+
+## 2026-10-31 candidate optimizations
+
+The parser now reuses AVX2 byte-classification loads, prefetches the input,
+and handles short latencies without vector decimal decoding. Hours reuse
+scatter cursor storage and shortcut single-/two-record percentile groups.
+Records are stored in 8 KiB mmap chunks, and the input mapping receives
+MADV_SEQUENTIAL. These are correctness-preserving algorithmic changes on paper;
+a new full-output hash and board time/memory measurement are required before
+calling them improvements. The Rust remains readable, not minified.

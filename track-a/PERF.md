@@ -305,3 +305,15 @@ M=21,938,176 B, S=348. This is a comparison of two full submissions,
 not a controlled attribution; nonetheless the new larger writer and PGO
 pipeline showed no measured speed improvement. Revert to the simpler writer
 and the pinned baseline build, retaining CPU-set and endpoint fixes.
+
+## 2026-10-31: Track A proposed improvements (unmeasured candidate)
+
+Applied: M1 (8 KiB chunks), T1 (MADV_SEQUENTIAL input map), T5 (reuse
+AVX2 vector loads for space and newline comparisons), T6 (branchless
+Oct/Nov day offset), T7 (sequential prefetch), T11 (one-/two-digit
+latency fast path), T21 (reuse per-worker cursor), and T23 (exact n=1/2
+percentile shortcuts). Existing runtime CPU-set discovery and offline,
+pinned build were retained. One-line source obfuscation S1 is not effective
+under official post-rustfmt scc accounting; S2/S4 are not appropriate for
+human readability and have not been applied. The changes remain unbenchmarked
+until an official output hash and board runtime are available.
