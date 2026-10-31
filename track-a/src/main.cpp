@@ -39,10 +39,6 @@ struct Group {
     u32 errors = 0;
     u32 offset = 0;
 };
-struct Counts {
-    u32 count = 0;
-    u32 errors = 0;
-};
 struct Record {
     u32 latency;
     u32 key;
@@ -50,7 +46,6 @@ struct Record {
 struct Local {
     std::array<u64, 4096> ids{};
     std::vector<std::string> endpoints;
-    std::vector<Counts> groups;
     std::array<std::vector<Record>, hours> records;
     std::vector<u32> remap;
 };
@@ -73,7 +68,6 @@ void parse(Local& local, const char* data, std::size_t begin, std::size_t end) {
     if (end && data[end - 1] != '\n')
         while (data[end++] != '\n') {}
     local.endpoints.reserve(endpoint_capacity);
-    local.groups.resize(endpoint_capacity * hours);
     const auto row = [&](const char* p, const char* limit) {
         const unsigned month = (p[5] - '0') * 10 + p[6] - '0';
         const unsigned day = (p[8] - '0') * 10 + p[9] - '0';
@@ -103,13 +97,9 @@ void parse(Local& local, const char* data, std::size_t begin, std::size_t end) {
         p += 5;
         u32 latency = 0;
         while (*p >= '0' && *p <= '9') latency = latency * 10 + static_cast<unsigned>(*p++ - '0');
-        const u32 key = h * endpoint_capacity + id;
-        Counts& group = local.groups[key];
-        ++group.count;
-        group.errors += error;
         auto& records = local.records[h];
         if (records.empty()) records.reserve((end - begin) / (64 * hours) + 1);
-        records.push_back({latency, id});
+        records.push_back({latency, id | (u32(error) << 11)});
         return p + 1;
     };
     const char* p = data + begin;
@@ -188,12 +178,13 @@ int solve() {
         const unsigned h = next.fetch_add(1, std::memory_order_relaxed);
         if (h >= hours) break;
         Group* hour_groups = endpoint_count ? groups.data() + h * endpoint_count : nullptr;
+        // Count in an hour-local cache-resident table instead of issuing random
+        // counter writes while parsing the input file.
         for (const Local& local : locals)
-            for (u32 i = 0; i < local.endpoints.size(); ++i) {
-                const Counts& source = local.groups[h * endpoint_capacity + i];
-                Group& target = hour_groups[local.remap[i]];
-                target.count += source.count;
-                target.errors += source.errors;
+            for (const Record& record : local.records[h]) {
+                Group& target = hour_groups[local.remap[record.key & 2047u]];
+                ++target.count;
+                target.errors += record.key >> 11;
             }
         u32 offset = hour_offsets[h];
         for (u32 id = 0; id < endpoint_count; ++id) {
@@ -202,7 +193,7 @@ int solve() {
         }
         for (Local& local : locals) {
             for (const Record& record : local.records[h])
-                values[hour_groups[local.remap[record.key]].offset++] = record.latency;
+                values[hour_groups[local.remap[record.key & 2047u]].offset++] = record.latency;
             std::vector<Record>().swap(local.records[h]);
         }
         for (u32 id = 0; id < endpoint_count; ++id) hour_groups[id].offset -= hour_groups[id].count;
