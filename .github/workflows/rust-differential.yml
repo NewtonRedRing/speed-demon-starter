@@ -1,54 +1,50 @@
-name: Rust differential correctness
+name: Official full public seed-1 correctness
 on:
   push:
     branches:
       - speed-demon
-      - experiment/track-b-shared-postings
   workflow_dispatch:
 jobs:
-  differential:
+  full-official:
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     permissions:
       contents: read
-    timeout-minutes: 15
+    # GitHub's small runner cannot emulate the official 12 P-core CPU set.
+    # Only CPU placement is changed; input/output hashes stay EXACTLY official.
+    env:
+      SPEED_DEMON_CPUSET_CPUS: "0-3"
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Check Rust compilation and seeded output equivalence
+      - name: Pull the contest's digest-pinned Docker base images
         shell: bash
         run: |
           set -euo pipefail
-          rustc --version
-          sudo mkdir -p /data /out
-          sudo chmod 777 /data /out
-          for track in a b c; do
-            cargo check --manifest-path "track-$track/Cargo.toml"
-          done
-          for track in a b c; do
-            if [[ "$track" == "b" ]]; then
-              baseline=70ae5dcf41fa1fc4637757b2b86f45fa548c6940
-            else
-              baseline=b1c01dab191c1fbfc253406a84df1e87552a608d
-            fi
-            git show "$baseline:track-$track/main.rs" > "/tmp/${track}-base.rs"
-            rustc --edition=2021 -C opt-level=3 -C target-cpu=native -C panic=abort -o "/tmp/${track}-base" "/tmp/${track}-base.rs"
-            rustc --edition=2021 -C opt-level=3 -C target-cpu=native -C panic=abort -o "/tmp/${track}-new" "track-$track/main.rs"
-            python3 "track-$track/pgo_gen.py" --seed 2 --scale sample --out "/tmp/${track}-data"
-          done
-          ln -sfn /tmp/a-data/requests.log /data/requests.log
-          /tmp/a-base
-          cp /out/summary.txt /tmp/a-expected
-          /tmp/a-new
-          cmp /tmp/a-expected /out/summary.txt
-          rm -f /data/requests.log
-          ln -sfn /tmp/b-data/docs.txt /data/docs.txt
-          ln -sfn /tmp/b-data/queries.txt /data/queries.txt
-          /tmp/b-base
-          cp /out/results.txt /tmp/b-expected
-          /tmp/b-new
-          cmp /tmp/b-expected /out/results.txt
-          RECORDS_PATH=/tmp/c-data/records.csv REGIONS_PATH=/tmp/c-data/regions.csv OUTPUT_PATH=/tmp/c-old.txt /tmp/c-base
-          RECORDS_PATH=/tmp/c-data/records.csv REGIONS_PATH=/tmp/c-data/regions.csv OUTPUT_PATH=/tmp/c-new.txt /tmp/c-new
-          cmp /tmp/c-old.txt /tmp/c-new.txt
-          echo "PASS: all three candidate outputs identical to corresponding baselines"
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          images = set()
+          for path in sorted(Path().glob("track-*/Dockerfile")):
+              for line in path.read_text().splitlines():
+                  words = line.split()
+                  if len(words) >= 2 and words[0].upper() == "FROM":
+                      image = words[1]
+                      if "@sha256:" in image:
+                          images.add(image)
+          if not images:
+              raise SystemExit("No pinned Docker base images")
+          for image in sorted(images):
+              print("pull", image, flush=True)
+              subprocess.run(["docker", "pull", image], check=True)
+          PY
+      - name: Download the ORIGINAL full public dataset for A B C D
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 official_data.py download
+          python3 official_data.py verify
+      - name: Build offline and verify all four official output hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 check.py all
