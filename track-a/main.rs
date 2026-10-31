@@ -110,53 +110,56 @@ unsafe fn decode(end: *const u8, len: usize) -> u32 {
     (high * 100_000_000 + _mm_extract_epi32::<1>(v) as u64) as u32
 }
 
-// Endpoint names to dense ids in first-seen order. Open addressing on a CRC of
-// the name's first and last eight bytes (masked when the name is shorter; the
-// rest of the line keeps both loads in bounds). Names point into the log.
+// Endpoint names to dense ids in first-seen order. The exact bytes live in
+// one compact worker-local arena instead of pointing back into the 239 MB log:
+// the Zipf-heavy names therefore stay cache-hot. Hashes only select candidates;
+// every hit is resolved by complete byte equality.
 struct Interner {
-    names: Vec<&'static [u8]>,
-    slot: Vec<u16>, // id + 1 per slot, 0 if free
+    names: Vec<(u32, u8)>, // (offset, length)
+    store: Vec<u8>,
+    slot: Vec<u16>,        // id + 1 per slot, 0 if free
 }
 
 impl Interner {
-    const SLOTS: usize = 1 << 12; // ids fit 11 bits; a seed has 1,842
+    const SLOTS: usize = 1 << 12;
 
     fn new() -> Self {
-        Interner { names: vec![], slot: vec![0; Self::SLOTS] }
+        Interner {
+            names: Vec::with_capacity(1842),
+            store: Vec::with_capacity(128 * 1842),
+            slot: vec![0; Self::SLOTS],
+        }
     }
 
-    fn id(&mut self, s: &'static [u8]) -> u32 {
+    #[inline(always)]
+    fn name(&self, id: usize) -> &[u8] {
+        let (off, len) = self.names[id];
+        &self.store[off as usize..off as usize + len as usize]
+    }
+
+    #[inline(always)]
+    fn id(&mut self, s: &[u8]) -> u32 {
         let n = s.len();
         let word = |i: usize| unsafe { s.as_ptr().add(i).cast::<u64>().read_unaligned() };
-        let a = word(0) & if n >= 8 { !0 } else { (1 << (8 * n)) - 1 };
+        let a = word(0) & if n >= 8 { !0 } else { (1u64 << (8 * n)) - 1 };
         let b = if n >= 8 { word(n - 8) } else { 0 };
         let mut i = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as usize;
         loop {
-            let id = &mut self.slot[i % Self::SLOTS];
-            if *id == 0 {
-                assert!(self.names.len() < Self::SLOTS / 2, "too many endpoints"); // 11 bits
-                self.names.push(s);
-                *id = self.names.len() as u16;
+            let slot = i & (Self::SLOTS - 1);
+            let id = self.slot[slot];
+            if id == 0 {
+                assert!(self.names.len() < Self::SLOTS / 2, "too many endpoints");
+                let off = self.store.len() as u32;
+                self.store.extend_from_slice(s);
+                self.names.push((off, n as u8));
+                self.slot[slot] = self.names.len() as u16;
+                return self.names.len() as u32 - 1;
             }
-            if same(self.names[*id as usize - 1], s) {
-                return *id as u32 - 1;
+            if self.name(id as usize - 1) == s {
+                return id as u32 - 1;
             }
             i += 1;
         }
-    }
-}
-
-// Both names point into the log, where 32 bytes can always be read (the rest
-// of the line and the spare page follow), so a name of up to 32 bytes is
-// compared in one step.
-fn same(x: &[u8], s: &[u8]) -> bool {
-    if x.len() != s.len() || s.len() > 32 {
-        return x == s;
-    }
-    unsafe {
-        let v = |p: &[u8]| _mm256_loadu_si256(p.as_ptr().cast());
-        let eq = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v(x), v(s))) as u32;
-        !eq & (!0u32 >> (32 - s.len())) == 0
     }
 }
 
@@ -302,7 +305,7 @@ fn main() {
 
     let parser = |t: usize| Shared::new(Parser::new(cut[t + 1] - cut[t]));
     let parsers: Vec<_> = (0..THREADS).map(parser).collect();
-    let names = Shared::new(Vec::<&[u8]>::new());
+    let names = Shared::new(Vec::<Vec<u8>>::new());
     let finished: Vec<AtomicBool> = (0..HOURS).map(|_| AtomicBool::new(false)).collect();
     let releasing = AtomicBool::new(false);
     let (claim, claim_text) = (AtomicUsize::new(0), AtomicUsize::new(0));
@@ -322,18 +325,20 @@ fn main() {
             let mut all = Interner::new();
             for ps in &parsers {
                 let ps = ps.get();
-                ps.rank = ps.local.names.iter().map(|&n| all.id(n)).collect();
+                ps.rank = (0..ps.local.names.len())
+                    .map(|id| all.id(ps.local.name(id)))
+                    .collect();
             }
-            let mut sorted = all.names.clone();
-            sorted.sort_unstable();
-            let mut rank_of = vec![0; sorted.len()];
-            for (r, &n) in sorted.iter().enumerate() {
-                rank_of[all.id(n) as usize] = r as u32;
+            let mut order: Vec<u32> = (0..all.names.len() as u32).collect();
+            order.sort_unstable_by(|&a, &b| all.name(a as usize).cmp(all.name(b as usize)));
+            let mut rank_of = vec![0u32; order.len()];
+            for (r, &id) in order.iter().enumerate() {
+                rank_of[id as usize] = r as u32;
             }
             for id in parsers.iter().flat_map(|ps| ps.get().rank.iter_mut()) {
                 *id = rank_of[*id as usize];
             }
-            *names.get() = sorted;
+            *names.get() = order.iter().map(|&id| all.name(id as usize).to_vec()).collect();
         }
         barrier.wait();
 
@@ -410,7 +415,8 @@ fn main() {
             let label = format!("2026-{date}T{:02}:00:00Z ", (h + 18) % 24);
             let mut o = (*text.get()).add(at[h].load(Relaxed) as usize);
             for line in std::mem::take(lines[h].get()) {
-                for part in [label.as_bytes(), names[line[0] as usize]] {
+                let name = names[line[0] as usize].as_slice();
+                for part in [label.as_bytes(), name] {
                     o.copy_from_nonoverlapping(part.as_ptr(), part.len());
                     o = o.add(part.len());
                 }
