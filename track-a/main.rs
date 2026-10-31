@@ -27,7 +27,7 @@ use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::Barrier;
 
 extern "C" {
@@ -149,19 +149,18 @@ impl NameArena {
 
 struct Names {
     slot: Vec<AtomicU64>,
-    used: AtomicU32,
     arena: NameArena,
 }
 
 impl Names {
     const SLOTS: usize = 1 << 12;
-    const ARENA: usize = Self::SLOTS * 128;
+    const CELL: usize = 128;
+    const BUSY: u64 = u64::MAX;
 
     fn new() -> Self {
         Self {
             slot: (0..Self::SLOTS).map(|_| AtomicU64::new(0)).collect(),
-            used: AtomicU32::new(0),
-            arena: NameArena::new(Self::ARENA + 32),
+            arena: NameArena::new(Self::SLOTS * Self::CELL + 32),
         }
     }
 
@@ -203,15 +202,19 @@ impl Names {
         for _ in 0..Self::SLOTS {
             let slot = i & (Self::SLOTS - 1);
             let mut v = self.slot[slot].load(Acquire);
+            while v == Self::BUSY {
+                std::hint::spin_loop();
+                v = self.slot[slot].load(Acquire);
+            }
             if v == 0 {
-                let off = self.used.fetch_add(n as u32, Relaxed) as usize;
-                assert!(off + n <= Self::ARENA, "endpoint arena exhausted");
-                unsafe { self.arena.write(off, s.as_ptr(), n); }
-                let new = (n as u64) << 32 | (off as u64 + 1);
-                match self.slot[slot].compare_exchange(0, new, Release, Acquire) {
-                    Ok(_) => return slot as u32,
-                    Err(winner) => v = winner,
+                if self.slot[slot].compare_exchange(0, Self::BUSY, Acquire, Acquire).is_ok() {
+                    let off = slot * Self::CELL;
+                    unsafe { self.arena.write(off, s.as_ptr(), n); }
+                    let new = (n as u64) << 32 | (off as u64 + 1);
+                    self.slot[slot].store(new, Release);
+                    return slot as u32;
                 }
+                continue;
             }
             if Self::same(self.name(v), s) { return slot as u32; }
             i += 1;
