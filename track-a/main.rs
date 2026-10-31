@@ -266,6 +266,130 @@ impl Parser {
     }
 }
 
+// Exact MSB-first radix selection for all three nearest-rank percentiles.
+// Each level scans the input only once and maintains three 256-bin histograms.
+// The prefix predicate retains exactly those values in the chosen bucket;
+// duplicate latencies and the full u32 range remain exact.
+fn radix_percentiles(values: &[u32], targets: [usize; 3]) -> [u32; 3] {
+    let mut prefixes = [0u32; 3];
+    let mut ranks = targets;
+    let mut used_bits = 0u32;
+    for shift in [24, 16, 8, 0] {
+        let mut bins = [[0usize; 256]; 3];
+        for &value in values {
+            let digit = ((value >> shift) & 255) as usize;
+            for q in 0..3 {
+                if value & used_bits == prefixes[q] {
+                    bins[q][digit] += 1;
+                }
+            }
+        }
+        for q in 0..3 {
+            let mut rank = ranks[q];
+            let mut found = false;
+            for digit in 0..256 {
+                if rank < bins[q][digit] {
+                    prefixes[q] |= (digit as u32) << shift;
+                    ranks[q] = rank;
+                    found = true;
+                    break;
+                }
+                rank -= bins[q][digit];
+            }
+            assert!(found, "radix rank outside its bucket");
+        }
+        used_bits |= 255u32 << shift;
+    }
+    prefixes
+}
+
+// AVX2 bitonic sorting network for eight, sixteen or thirty-two lanes.
+// Incomplete vectors are padded with u32::MAX; only the original n entries
+// are copied back, so genuine u32::MAX values are handled normally.
+#[inline]
+unsafe fn bitonic_sort_small(values: &mut [u32]) {
+    debug_assert!((8..=32).contains(&values.len()));
+    let width = values.len().div_ceil(8).next_power_of_two() * 8;
+    let blocks = width / 8;
+    let mut padded = [u32::MAX; 32];
+    padded[..values.len()].copy_from_slice(values);
+    let mut vectors = [_mm256_set1_epi32(-1); 4];
+    for b in 0..blocks {
+        vectors[b] = _mm256_loadu_si256(padded.as_ptr().add(b * 8).cast());
+    }
+    let mut k = 2;
+    while k <= width {
+        let mut j = k / 2;
+        while j != 0 {
+            if j >= 8 {
+                // Cross-vector partners must be read from the same stage,
+                // before any lane is overwritten.
+                let previous = vectors;
+                for b in 0..blocks {
+                    let partner = previous[b ^ (j / 8)];
+                    vectors[b] = if ((b * 8 & j) == 0) == ((b * 8 & k) == 0) {
+                        _mm256_min_epu32(previous[b], partner)
+                    } else {
+                        _mm256_max_epu32(previous[b], partner)
+                    };
+                }
+            } else {
+                let partner_lanes: [i32; 8] =
+                    std::array::from_fn(|i| (i ^ j) as i32);
+                let indices = _mm256_loadu_si256(partner_lanes.as_ptr().cast());
+                for b in 0..blocks {
+                    let other = _mm256_permutevar8x32_epi32(vectors[b], indices);
+                    let small = _mm256_min_epu32(vectors[b], other);
+                    let large = _mm256_max_epu32(vectors[b], other);
+                    let choose_small: [i32; 8] = std::array::from_fn(|i| {
+                        if (((b * 8 + i) & j) == 0) == (((b * 8 + i) & k) == 0) {
+                            -1
+                        } else {
+                            0
+                        }
+                    });
+                    let mask = _mm256_loadu_si256(choose_small.as_ptr().cast());
+                    vectors[b] = _mm256_blendv_epi8(large, small, mask);
+                }
+            }
+            j /= 2;
+        }
+        k *= 2;
+    }
+    for b in 0..blocks {
+        _mm256_storeu_si256(padded.as_mut_ptr().add(b * 8).cast(), vectors[b]);
+    }
+    values.copy_from_slice(&padded[..values.len()]);
+}
+
+// Never use approximate quantile sketches: the reference requires the
+// exact ceil(p*n/100)-1 order statistics, including repeated and maximum u32s.
+#[inline]
+unsafe fn exact_percentiles(values: &mut [u32]) -> [u32; 3] {
+    let n = values.len();
+    assert!(n != 0);
+    if n == 1 {
+        return [values[0]; 3];
+    }
+    if n == 2 {
+        return [values[0].min(values[1]), values[0].max(values[1]), values[0].max(values[1])];
+    }
+    let targets = [50, 95, 99].map(|p| (p * n + 99) / 100 - 1);
+    if n <= 7 {
+        values.sort_unstable();
+        return targets.map(|i| values[i]);
+    }
+    if n <= 32 {
+        bitonic_sort_small(values);
+        return targets.map(|i| values[i]);
+    }
+    if n <= 64 {
+        values.sort_unstable();
+        return targets.map(|i| values[i]);
+    }
+    radix_percentiles(values, targets)
+}
+
 // Writes x in decimal at o, returns the end.
 unsafe fn put(o: *mut u8, mut x: u32) -> *mut u8 {
     let end = o.add(width(x));
@@ -389,24 +513,7 @@ fn main() {
                 if n == 0 {
                     continue;
                 }
-                // Nearest rank p is index ceil(p * n / 100) - 1. Selecting the
-                // highest rank first leaves everything below it in front, so
-                // each later selection only needs the front part.
-                let p = if n == 1 {
-                    [a[0]; 3]
-                } else if n == 2 {
-                    [a[0].min(a[1]), a[0].max(a[1]), a[0].max(a[1])]
-                } else {
-                    let r = [50, 95, 99].map(|p| (p * n + 99) / 100 - 1);
-                    if n <= 64 {
-                        a.sort_unstable();
-                    } else {
-                        a.select_nth_unstable(r[2]);
-                        a[..r[2]].select_nth_unstable(r[1]);
-                        a[..r[1]].select_nth_unstable(r[0]);
-                    }
-                    r.map(|i| a[i])
-                };
+                let p = exact_percentiles(a);
                 let err = errors[e];
                 let ppm = (err as u64 * 1_000_000 / n as u64) as u32;
                 let line = [e as u32, n as u32, p[0], p[1], p[2], err, ppm];
