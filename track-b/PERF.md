@@ -212,3 +212,24 @@ Before promotion: compile with strict warnings, run all independent B oracles,
 verify seed-1 full result SHA-256, and run alternating official performance
 comparisons against the submitted version. Keep it only if the complete
 scoring coefficient improves.
+
+
+## Second-round speed-first study (October 31)
+
+Adds a chunked, exact-collision-checked 64-bit query-token fingerprint in
+`Words`. The dictionary's insertion fingerprint and lookup fingerprint
+use the same function; full token-string equality remains required before
+returning a hit. The earlier direct base-36 lookup for length <=3 remains
+on this branch. Very long scanned tokens retain the existing `missing`
+fallback, so ASCII tokenization semantics are unchanged.
+
+A standalone local 20M-token hash-only microbenchmark (random 4-17-byte
+tokens with a hot dictionary) measured medians of 415.8 ms using
+`std::hash<string_view>` versus 372.0 ms with the custom word-at-a-time
+hash, a 10.5% isolated hash reduction. The experiment has **not** been
+benchmarked on official query and corpus files; scanner and automaton costs
+could erase the gain. No new machine score is claimed.
+
+Promotion gate: full official output hash, independent UTF-8 and
+phrase/Boolean oracles, sanitizer run, then alternating complete-process
+benchmarks and measured K coefficient.
