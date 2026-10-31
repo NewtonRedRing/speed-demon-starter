@@ -172,6 +172,20 @@ public:
     }
 };
 
+// Word-at-a-time token fingerprint. Exact string comparison remains
+// mandatory after a fingerprint match; collisions never change results.
+u64 fast_word_hash(std::string_view token) {
+    u64 hash = 0x9e3779b97f4a7c15ULL ^ token.size();
+    while (token.size() >= 8) {
+        u64 word;
+        std::memcpy(&word, token.data(), 8);
+        hash = mix(hash ^ word);
+        token.remove_prefix(8);
+    }
+    for (unsigned char c : token) hash = (hash ^ c) * 0x100000001b3ULL;
+    return mix(hash);
+}
+
 class Words {
     const std::vector<Term>& terms_;
     std::vector<u64> slots_;
@@ -195,7 +209,7 @@ public:
                 short_ids_[short_index(terms[i].text)] = i;
                 continue;
             }
-            const u64 hash = std::hash<std::string_view>{}(terms[i].text);
+            const u64 hash = fast_word_hash(terms[i].text);
             auto slot = hash & (capacity - 1);
             while (slots_[slot]) slot = (slot + 1) & (capacity - 1);
             slots_[slot] = (hash & 0xffffffff00000000ULL) | (u64{i} + 1);
@@ -203,7 +217,7 @@ public:
     }
     u32 find(std::string_view text) const {
         if (text.size() <= 3) return short_ids_[short_index(text)];
-        const u64 hash = std::hash<std::string_view>{}(text);
+        const u64 hash = fast_word_hash(text);
         auto slot = hash & (slots_.size() - 1);
         while (slots_[slot]) {
             const u32 id = static_cast<u32>(slots_[slot]) - 1;
