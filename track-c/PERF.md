@@ -169,3 +169,22 @@ prepass and page-cache behavior may differ.
 Before promotion: compile, test all hostile CSV fixtures (including multiline
 quoted notes), verify the official full output hash and compare five/eight
 alternating complete-process runs. **No official score is claimed.**
+
+
+## Second-round speed-first study (October 31)
+
+After the earlier zero-copy mapped CSV parity scan, the region lookup now
+uses one read-only mapping of `regions.csv`, direct digit parsing and one
+dense one-million-byte default country table. Region IDs beyond that table
+remain supported with bounded dynamic growth to 9,999,999, matching the
+original input validation. Region-to-country assignment and exact
+`_UNMATCHED` behavior are unchanged.
+
+A standalone 200,000-row synthetic lookup microbenchmark checked that the
+buffered and mapped loaders produced equal aggregate country IDs. It
+measured 7.29 ms buffered versus 2.84 ms mapped for ten measurement
+repetitions (about 2.6x on lookup stage alone). This is not a Track C
+end-to-end speedup: parsing and exact-name aggregation dominate overall.
+All hostile CSV and exact distinct-name oracles must still pass.
+
+No official output SHA or score for this second-round candidate is claimed.
