@@ -140,9 +140,18 @@ impl Interner {
     #[inline(always)]
     fn id(&mut self, s: &[u8]) -> u32 {
         let n = s.len();
-        let word = |i: usize| unsafe { s.as_ptr().add(i).cast::<u64>().read_unaligned() };
-        let a = word(0) & if n >= 8 { !0 } else { (1u64 << (8 * n)) - 1 };
-        let b = if n >= 8 { word(n - 8) } else { 0 };
+        let a = if n >= 8 {
+            unsafe { s.as_ptr().cast::<u64>().read_unaligned() }
+        } else {
+            let mut x = 0u64;
+            unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), (&mut x as *mut u64).cast(), n) };
+            x
+        };
+        let b = if n >= 8 {
+            unsafe { s.as_ptr().add(n - 8).cast::<u64>().read_unaligned() }
+        } else {
+            0
+        };
         let mut i = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as usize;
         loop {
             let slot = i & (Self::SLOTS - 1);
