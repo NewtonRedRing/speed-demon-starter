@@ -171,7 +171,7 @@ struct MetaCell(UnsafeCell<u64>);
 unsafe impl Sync for MetaCell {}
 
 struct ByteArena {
-    bytes: Vec<u8>,
+    _bytes: Vec<u8>,
     ptr: *mut u8,
 }
 unsafe impl Send for ByteArena {}
@@ -180,7 +180,7 @@ impl ByteArena {
     fn new(n: usize) -> Self {
         let mut bytes = vec![0u8; n];
         let ptr = bytes.as_mut_ptr();
-        Self { bytes, ptr }
+        Self { _bytes: bytes, ptr }
     }
     #[inline(always)]
     unsafe fn write(&self, off: usize, src: *const u8, n: usize) {
@@ -244,8 +244,10 @@ impl Names {
         if (m >> 32) as usize != len { return false; }
         let off = m as u32 as usize;
         let tail = len - 16;
-        unsafe { self.arena.slice(off, tail) }
-            == unsafe { std::slice::from_raw_parts((p as *const u8).add(16), tail) }
+        unsafe {
+            self.arena.slice(off, tail)
+                == std::slice::from_raw_parts((p as *const u8).add(16), tail)
+        }
     }
 
     #[inline(always)]
