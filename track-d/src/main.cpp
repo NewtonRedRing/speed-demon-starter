@@ -18,6 +18,13 @@
 #include <sys/stat.h>
 
 using u32 = std::uint32_t;
+#ifndef SD_TUNE_WORKERS
+#define SD_TUNE_WORKERS 12
+#endif
+#ifndef SD_TUNE_PARAM
+#define SD_TUNE_PARAM 256
+#endif
+
 using u64 = std::uint64_t;
 constexpr u64 infinity = UINT64_MAX;
 struct __attribute__((packed)) Edge { u32 to; std::uint16_t weight; };
@@ -44,7 +51,7 @@ u32 number(const char*& p) {
 
 template<class Visit>
 void edges_in_range(std::size_t begin, std::size_t end, Visit visit) {
-    std::vector<char> buffer(256 * 1024);
+    std::vector<char> buffer(SD_TUNE_PARAM * 1024);
     auto close_file = [](FILE* file) { if (file) std::fclose(file); };
     std::unique_ptr<FILE, decltype(close_file)> file(std::fopen("/data/graph.txt", "rb"), close_file);
     if (!file) throw std::runtime_error("cannot open graph.txt");
@@ -224,7 +231,7 @@ int solve() {
     struct stat status{};
     if (stat("/data/graph.txt", &status)) throw std::runtime_error("cannot stat graph.txt");
     const auto size = static_cast<std::size_t>(status.st_size);
-    const unsigned workers = m < 10000 ? 1 : 12;
+    const unsigned workers = m < 10000 ? 1 : SD_TUNE_WORKERS;
     Graph graph;
     for (unsigned d = 0; d < 2; ++d) graph.offsets[d].resize(static_cast<std::size_t>(n) + 1);
     const auto read = [&](auto visit) {
