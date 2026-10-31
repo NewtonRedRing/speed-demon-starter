@@ -190,3 +190,25 @@ oracle methods under ASan/UBSan, strict GCC warnings and the allowlisted offline
 production-style sandbox pass. Added coverage exercises global density choices
 with sparse worker slices, 255/256 memberships, a nonzero bitmap base, duplicate
 tokens, partial final words and mixed sparse/dense Boolean operations.
+
+## October 31 speed-first experiment: perfect short-token lookup (draft)
+
+The experimental `Words` lookup now uses a collision-free, fixed base-36 array
+for every queried token of length 1-3 (digits and lowercase ASCII). A length
+offset makes all 47,988 possible keys distinct: 36 + 1,296 + 46,656.
+Tokens longer than three bytes use the existing exact fingerprint and string
+equality hash table. Short tokens absent from queries still return `missing`.
+
+The optimization attacks the approximately 36.3M-token full scan by avoiding
+hashing and hash-table probing on short query terms. The perfect-map indexing
+was independently enumerated across all 47,988 possible keys, with no
+collisions. A lookup-only synthetic benchmark with 60% short query tokens
+measured 681.2 ms baseline versus 480.8 ms with the fast path across 20M
+lookups. A contrasting distribution dominated by long tokens measured
+573.9 ms versus 596.3 ms (regression). Neither distribution is the official
+corpus, and **no whole-process speed improvement or official score is claimed**.
+
+Before promotion: compile with strict warnings, run all independent B oracles,
+verify seed-1 full result SHA-256, and run alternating official performance
+comparisons against the submitted version. Keep it only if the complete
+scoring coefficient improves.
