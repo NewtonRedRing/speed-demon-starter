@@ -19,6 +19,13 @@
 #include <sys/stat.h>
 
 using u32 = std::uint32_t;
+#ifndef SD_TUNE_WORKERS
+#define SD_TUNE_WORKERS 12
+#endif
+#ifndef SD_TUNE_PARAM
+#define SD_TUNE_PARAM 512
+#endif
+
 using u64 = std::uint64_t;
 constexpr unsigned hours = 72;
 constexpr unsigned endpoint_capacity = 1842;
@@ -143,7 +150,7 @@ void parse(Local& local, const char* data, std::size_t begin, std::size_t end) {
         p += 5;
         const u32 value = latency(p, limit);
         auto& records = local.records[h];
-        if (records.empty()) records.reserve((end - begin) / 512 + 1);
+        if (records.empty()) records.reserve((end - begin) / SD_TUNE_PARAM + 1);
         records.push_back({value, static_cast<std::uint16_t>(id | (u32{error} << 11))});
         return p + 1;
     };
@@ -206,7 +213,7 @@ int solve() {
         mapping.reset(p);
     }
     const char* data = size ? static_cast<const char*>(mapping.get()) : "";
-    const unsigned workers = size < 1024 * 1024 ? 1 : 12;
+    const unsigned workers = size < 1024 * 1024 ? 1 : SD_TUNE_WORKERS;
     std::vector<Local> locals(workers);
     parallel(workers, [&](unsigned w) { parse(locals[w], data, size * w / workers, size * (w + 1) / workers); });
     std::unordered_map<std::string, u32> ids;
