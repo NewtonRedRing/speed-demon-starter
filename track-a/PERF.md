@@ -264,3 +264,27 @@ need evidence, not assumed wins.
   not performance or official-score evidence.
 - The pinned offline production image passes the sandbox and the manifest's
   full seed-1 SHA-256. There are no added runtime dependencies or build tools.
+
+## 2026-10-31: Scoring review and Track A portability patch
+
+Reviewed the current published rules against a proposed source-size/build.rs
+rewrite. The effective formula is
+`K=(T_ref/T)^0.50*(M_ref/M)^0.20*(S_ref/S)^0.15*(D_ref/D)^0.15`,
+with source and dependency advantages capped at 1× and memory capped at 50×;
+there is no scaling X axis, and runtime speed is uncapped. For Track A the
+published reference is 32.05 s / 228 MB / 56 scc code lines. The proposed
+claim that hiding source in an `.inc` file guarantees 90 points was wrong.
+We retained the readable `main.rs` and digest-pinned, offline, PGO-enabled
+Dockerfile rather than replace them with an unpinned build.
+
+Implementation change: bound the worker count by the available CPU set and
+12 scoring threads. Use an 8,192-slot CRC32C interner table with explicit
+power-of-two wrapping to reduce probes while retaining the exact bytewise
+collision check. Keep the independent 11-bit packed local ID limit (2,048):
+increasing table slots alone does not increase the representable ID range.
+The official generator has 1,842 distinct endpoint templates.
+
+This is a code review and engineering change, **not** a claimed performance
+improvement. No new local benchmark or seed-1 hash was run in this environment;
+the live board must independently validate the pushed commit. No run ID or
+score is fabricated.

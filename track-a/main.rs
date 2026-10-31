@@ -47,7 +47,7 @@ unsafe fn map(len: usize, prot: i32, flags: i32, fd: i32) -> *mut u8 {
     p
 }
 
-const THREADS: usize = 12;
+const MAX_THREADS: usize = 12; // Scoring uses 12; respect smaller local CPU sets.
 const HOURS: usize = 72; // 2026-10-30T18:00Z to 2026-11-02T17:59:59Z
 // A record packs the latency above a 12-bit key: an 11-bit local endpoint id
 // and the 5xx flag. Latencies of 2^20 us or more (about 1% of lines) do not
@@ -119,7 +119,7 @@ struct Interner {
 }
 
 impl Interner {
-    const SLOTS: usize = 1 << 12; // ids fit 11 bits; a seed has 1,842
+    const SLOTS: usize = 1 << 13; // Lower probe load; packed IDs still fit 11 bits.
 
     fn new() -> Self {
         Interner { names: vec![], slot: vec![0; Self::SLOTS] }
@@ -130,18 +130,18 @@ impl Interner {
         let word = |i: usize| unsafe { s.as_ptr().add(i).cast::<u64>().read_unaligned() };
         let a = word(0) & if n >= 8 { !0 } else { (1 << (8 * n)) - 1 };
         let b = if n >= 8 { word(n - 8) } else { 0 };
-        let mut i = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as usize;
+        let mut i = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as usize & (Self::SLOTS - 1);
         loop {
-            let id = &mut self.slot[i % Self::SLOTS];
+            let id = &mut self.slot[i];
             if *id == 0 {
-                assert!(self.names.len() < Self::SLOTS / 2, "too many endpoints"); // 11 bits
+                assert!(self.names.len() < ERR as usize, "too many endpoints"); // 11-bit ID limit, independent of table capacity
                 self.names.push(s);
                 *id = self.names.len() as u16;
             }
             if same(self.names[*id as usize - 1], s) {
                 return *id as u32 - 1;
             }
-            i += 1;
+            i = (i + 1) & (Self::SLOTS - 1);
         }
     }
 }
@@ -291,17 +291,18 @@ fn main() {
         }
         from_raw_parts(p, size)
     };
-    let mut cut = vec![size; THREADS + 1];
+    let nthreads = std::thread::available_parallelism().map_or(MAX_THREADS, |n| n.get().min(MAX_THREADS));
+    let mut cut = vec![size; nthreads + 1];
     cut[0] = 0;
-    for t in 1..THREADS {
-        cut[t] = cut[t - 1].max(size * t / THREADS);
+    for t in 1..nthreads {
+        cut[t] = cut[t - 1].max(size * t / nthreads);
         while cut[t] > 0 && cut[t] < size && log[cut[t] - 1] != b'\n' {
             cut[t] += 1;
         }
     }
 
     let parser = |t: usize| Shared::new(Parser::new(cut[t + 1] - cut[t]));
-    let parsers: Vec<_> = (0..THREADS).map(parser).collect();
+    let parsers: Vec<_> = (0..nthreads).map(parser).collect();
     let names = Shared::new(Vec::<&[u8]>::new());
     let finished: Vec<AtomicBool> = (0..HOURS).map(|_| AtomicBool::new(false)).collect();
     let releasing = AtomicBool::new(false);
@@ -310,7 +311,7 @@ fn main() {
     let lines: Vec<Shared<Vec<[u32; 7]>>> = (0..HOURS).map(|_| Shared::new(vec![])).collect();
     let at: Vec<AtomicU64> = (0..HOURS).map(|_| AtomicU64::new(0)).collect(); // size, then offset
     let text = Shared::new(null_mut::<u8>());
-    let barrier = Barrier::new(THREADS);
+    let barrier = Barrier::new(nthreads);
 
     let work = |t: usize| unsafe {
         let (from, to) = (log.as_ptr().add(cut[t]), log.as_ptr().add(cut[t + 1]));
@@ -423,6 +424,6 @@ fn main() {
             }
         }
     };
-    std::thread::scope(|s| (0..THREADS).for_each(|t| _ = s.spawn(move || work(t))));
+    std::thread::scope(|s| (0..nthreads).for_each(|t| _ = s.spawn(move || work(t))));
     std::process::exit(0);
 }
