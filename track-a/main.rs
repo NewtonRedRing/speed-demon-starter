@@ -209,12 +209,10 @@ struct Chunk {
 }
 
 struct Parser {
-    local: Interner,
     last: [*mut Chunk; HOURS],
-    wide: Vec<Vec<(u32, u32)>>, // (latency, key) of the long ones
-    rank: Vec<u32>,             // local id -> global rank
-    next: *mut Chunk,           // where the next chunk is carved
-    kept: *mut Chunk,           // the first chunk not yet released
+    wide: Vec<Vec<(u32, u32)>>,
+    next: *mut Chunk,
+    kept: *mut Chunk,
 }
 
 impl Parser {
@@ -224,10 +222,10 @@ impl Parser {
         let bytes = (len / 40 / CAP + 1 + HOURS) * size_of::<Chunk>();
         let next = unsafe { map(bytes, READ_WRITE, ANONYMOUS, -1).cast() };
         let wide = vec![vec![]; HOURS];
-        Parser { local: Interner::new(), last: [null_mut(); HOURS], wide, rank: vec![], next, kept: next }
+        Parser { last: [null_mut(); HOURS], wide, next, kept: next }
     }
 
-    unsafe fn parse(&mut self, mut p: *const u8, end: *const u8) {
+    unsafe fn parse(&mut self, endpoints: &Names, mut p: *const u8, end: *const u8) {
         while p < end {
             // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
             let d = |i: usize| (*p.add(i) - b'0') as usize;
@@ -244,7 +242,7 @@ impl Parser {
             let name_end = find(nl != 0, at(sp & (sp - 1)), name, b' ');
             let eol = find(nl != 0, at(nl), name_end.add(5), b'\n');
             let name_bytes = from_raw_parts(name, name_end.offset_from(name) as usize);
-            let key = self.local.id(name_bytes) | ERR * (*name_end.add(1) == b'5') as u32;
+            let key = endpoints.id(name_bytes) | ERR * (*name_end.add(1) == b'5') as u32;
             let latency = decode(eol, eol.offset_from(name_end) as usize - 5); // after " SSS "
             p = eol.add(1);
 
@@ -281,8 +279,8 @@ impl Parser {
     }
 
     // Calls f(global rank, 5xx, latency) for every record of hour h.
-    unsafe fn each(&self, h: usize, mut f: impl FnMut(usize, bool, u32)) {
-        let rank = |key: u32| self.rank[(key & ID_MASK) as usize] as usize;
+    unsafe fn each(&self, h: usize, ranks: &[u32], mut f: impl FnMut(usize, bool, u32)) {
+        let rank = |key: u32| ranks[(key & ID_MASK) as usize] as usize;
         let mut g = |latency: u32, key: u32| f(rank(key), key & ERR != 0, latency);
         let mut c = self.last[h];
         while let Some(chunk) = c.as_ref() {
@@ -337,7 +335,9 @@ fn main() {
 
     let parser = |t: usize| Shared::new(Parser::new(cut[t + 1] - cut[t]));
     let parsers: Vec<_> = (0..THREADS).map(parser).collect();
+    let endpoints = Names::new();
     let names = Shared::new(Vec::<Vec<u8>>::new());
+    let ranks = Shared::new(vec![0u32; Names::SLOTS]);
     let finished: Vec<AtomicBool> = (0..HOURS).map(|_| AtomicBool::new(false)).collect();
     let releasing = AtomicBool::new(false);
     let (claim, claim_text) = (AtomicUsize::new(0), AtomicUsize::new(0));
@@ -349,7 +349,7 @@ fn main() {
 
     let work = |t: usize| unsafe {
         let (from, to) = (log.as_ptr().add(cut[t]), log.as_ptr().add(cut[t + 1]));
-        parsers[t].get().parse(from, to);
+        parsers[t].get().parse(&endpoints, from, to);
 
         // Global ids are ranks in unsigned byte order (a proper prefix first),
         // which is the order lines are printed in within an hour.
