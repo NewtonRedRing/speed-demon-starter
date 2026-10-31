@@ -21,17 +21,24 @@ using u64 = std::uint64_t;
 constexpr unsigned hours = 72;
 constexpr unsigned endpoint_capacity = 1842;
 
-u64 endpoint_hash(std::string_view name) {
-    u64 hash = name.size();
-    while (name.size() >= sizeof(u64)) {
+std::pair<const char*, u64> endpoint_scan_hash(const char* p, const char* limit) {
+    const char* start = p;
+    u64 hash = 0x9e3779b97f4a7c15ULL;
+    while (limit - p >= 8) {
         u64 word;
-        std::memcpy(&word, name.data(), sizeof(word));
+        std::memcpy(&word, p, 8);
+        const u64 check = word ^ 0x2020202020202020ULL;
+        const u64 spaces = (check - 0x0101010101010101ULL) & ~check & 0x8080808080808080ULL;
+        if (spaces) break;
         hash = (hash ^ word) * 0x9e3779b97f4a7c15ULL;
         hash ^= hash >> 29;
-        name.remove_prefix(sizeof(word));
+        p += 8;
     }
-    for (unsigned char c : name) hash = (hash ^ c) * 0x100000001b3ULL;
-    return hash ^ (hash >> 32);
+    while (p < limit && *p != ' ')
+        hash = (hash ^ static_cast<unsigned char>(*p++)) * 0x100000001b3ULL;
+    if (p == limit) throw std::runtime_error("missing endpoint delimiter");
+    hash ^= u64(p - start) * 0x9e3779b97f4a7c15ULL;
+    return {p, hash ^ (hash >> 32)};
 }
 
 struct Group {
@@ -76,10 +83,9 @@ void parse(Local& local, const char* data, std::size_t begin, std::size_t end) {
         p += 28;
         while (*p++ != ' ') {}
         const char* endpoint = p;
-        p = static_cast<const char*>(std::memchr(p, ' ', limit - p));
-        if (!p) throw std::runtime_error("missing endpoint delimiter");
+        const auto [stop, hash] = endpoint_scan_hash(p, limit);
+        p = stop;
         const std::string_view name(endpoint, p - endpoint);
-        const u64 hash = endpoint_hash(name);
         auto index = hash & (local.ids.size() - 1);
         while (local.ids[index]) {
             const u32 candidate = static_cast<u32>(local.ids[index]) - 1;
@@ -211,14 +217,27 @@ int solve() {
             const auto count = group.count;
             if (!count) continue;
             std::array<u32, 3> percentiles;
-            if (count <= 32) std::sort(begin, begin + count);
-            auto start = begin;
-            for (unsigned j = 0; j < 3; ++j) {
-                constexpr unsigned ranks[]{50, 95, 99};
-                auto rank = begin + (ranks[j] * count + 99) / 100 - 1;
-                if (count > 32) std::nth_element(start, rank, begin + count);
-                percentiles[j] = *rank;
-                start = rank;
+            if (count <= 32) {
+                std::sort(begin, begin + count);
+                percentiles = {begin[(50 * count + 99) / 100 - 1],
+                               begin[(95 * count + 99) / 100 - 1],
+                               begin[(99 * count + 99) / 100 - 1]};
+            } else {
+                u32* median = begin + (50 * count + 99) / 100 - 1;
+                std::nth_element(begin, median, begin + count);
+                percentiles[0] = *median;
+                u32* p95 = begin + (95 * count + 99) / 100 - 1;
+                std::nth_element(median + 1, p95, begin + count);
+                percentiles[1] = *p95;
+                if (count < 100) percentiles[2] = *std::max_element(p95 + 1, begin + count);
+                else if (count == 100) {
+                    std::nth_element(p95 + 1, begin + 98, begin + count);
+                    percentiles[2] = begin[98];
+                } else {
+                    u32* p99 = begin + (99 * count + 99) / 100 - 1;
+                    std::nth_element(p95 + 1, p99, begin + count);
+                    percentiles[2] = *p99;
+                }
             }
             std::memcpy(cursor, hour, 20);
             cursor += 20;
