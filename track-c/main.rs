@@ -162,6 +162,7 @@ const NAME_WORDS: usize = NAME_SLOTS / 64;
 const NAME_ARENA: usize = 1 << 20;
 const OCCUPIED: u64 = 1 << 63;
 const BUSY: u64 = u64::MAX;
+const LONG: u64 = 1 << 63; // Long-name tag distinguishes a 16-byte prefix.
 
 #[repr(C, align(16))]
 struct NameSlot {
@@ -204,7 +205,7 @@ unsafe fn name_words(p: usize, len: usize) -> (u64, u64) {
         q.add(8).cast::<u64>().read_unaligned() & byte_mask(len - 8)
     } else {
         // Exact bytes 8..16; the arena compares bytes 16..len.
-        q.add(8).cast::<u64>().read_unaligned()
+        q.add(8).cast::<u64>().read_unaligned() | LONG
     };
     (lo, hi)
 }
