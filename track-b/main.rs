@@ -522,6 +522,18 @@ fn main() {
         new[i] = r as u32;
     }
     terms.renumber(&new);
+    // A tiny exact front table for the hottest sampled terms. At 50% load,
+    // collisions simply fall back to the complete dictionary; they never
+    // change identity. This keeps the common Zipf head in L1.
+    let mut hottest: Vec<usize> = (0..nterms).collect();
+    hottest.sort_unstable_by_key(|&i| std::cmp::Reverse(df[i]));
+    terms.hot = vec![NONE; 2048];
+    for old in hottest.into_iter().take(1024) {
+        let id = new[old];
+        let h = hash(terms.keys[id as usize]);
+        let slot = &mut terms.hot[h & 2047];
+        if *slot == NONE { *slot = id; }
+    }
     ids.iter_mut().for_each(|id| *id = new[*id as usize]);
     anchored.iter_mut().for_each(|a| a.0 = new[a.0 as usize]);
     anchored.sort_unstable();
