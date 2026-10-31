@@ -156,3 +156,42 @@ All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
 strict warnings and all four offline sandbox checks pass. The A oracle checks
 every endpoint length from 1 to 125 and shared-prefix/shared-suffix names.
 No new official score is available; formatted-source penalties still apply.
+
+
+## October 31 speed-first experiment: deferred endpoint counts (not submitted)
+
+The isolated branch `experiment/track-a-speed-first-deferred-count` removes per-worker dense hour-by-endpoint
+counter arrays and packs the error flag into bit 11 of each 32-bit local
+record key. An hour worker computes exact counts and 5xx counts by traversing
+its compact hour records, then plans/scatters latencies and selects the same
+nearest-rank percentiles as the baseline. This trades sequential extra reads
+for fewer random counter writes in the hot parser.
+
+Two binaries were compiled from the exact Git blobs of the baseline and new
+candidate using GCC C++20, `-O3 -DNDEBUG -flto -march=native -pthread`.
+The independent generated benchmark contained 3,100,000 well-formed records
+and 244,196,814 bytes; it is **not** the official seed-1 workload or target
+machine. Eight alternating process-run rounds found medians of **135.50 ms**
+(old) and **125.14 ms** (candidate): **1.083x speedup**. A second nine-round
+batch found 121.00 ms and 109.92 ms. Host load and cache conditions varied.
+Both binaries emitted identical SHA-256 for every full-size test run.
+
+An independent Python oracle passed on empty input and three seeded workloads:
+1,842 / 100,000 / 160,000 rows, including all 1,842 endpoint IDs, all
+72 hours, unsorted timestamps, latency extremes and error-rate boundaries.
+The new program also passed GCC `-Wall -Wextra -Wpedantic -Werror` and a
+full-size address/undefined-behavior sanitizer run. Local candidate source was
+verified to match its committed Git blob hash exactly.
+
+An alternate parser that skipped `madvise(MADV_DONTNEED)` improved one local
+nine-round median from 109.92 ms to 98.95 ms, but increased process peak RSS
+from approximately 84 MB to 295 MB. It was not retained because the official
+scorer penalizes peak memory. An SSE4.2 CRC32C endpoint-hash experiment
+matched output, but produced 105.94 ms versus the 105.68 ms baseline in a
+separate twelve-round batch, so the original hashing was retained.
+
+A branch-specific GitHub Actions correctness job was added but failed during
+startup without usable runner logs. Consequently **no official sandbox run,
+live-board run ID, or 90-point result is claimed**. The submission
+`speed-demon` branch remains unchanged pending an official correctness and
+performance comparison.
