@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Build one track the way the Speed Demon board does, run it, and check its output.
+"""Check ONLY the original, full-scale official public seed-1 datasets.
 
-    python3 check.py a --data data/a [--expected <sha256>] [--skip-build]
+    python3 check.py a                 # downloads official Track A if missing
+    python3 check.py all               # downloads and tests all four tracks
+    python3 check.py b --skip-build    # reuse the previous official image
 
-The build is offline (--network=none), like the board's. The run uses the board's
-sandbox settings: no network, a read-only filesystem, an unprivileged user, 8 GB of
-memory, 512 processes and 1 GB of /tmp. The time printed includes container start-up;
-the board times your process alone, on its own machine.
+SHA-256 is enforced for EVERY input and EVERY output using the organizers'
+released manifest; synthetic, sample and generated datasets are rejected.
+The build uses the submission's pinned, offline Dockerfile. The runtime uses
+the official sandbox flags, including 12-core CPU and NUMA pinning by default.
+Local measurements are not official performance scores: the scoring CPU,
+host, cache accounting and final hidden holdout cannot be reproduced locally.
 """
 import argparse
 import hashlib
@@ -18,6 +22,8 @@ import sys
 import time
 import urllib.request
 import uuid
+
+import official_data
 
 OUTPUT = {"a": "summary.txt", "b": "results.txt", "c": "aggregates.txt", "d": "distances.txt"}
 ALLOWLIST_URL = "https://speeddemon.dev/allowlist.json"
@@ -134,7 +140,8 @@ def run_with_named_volumes(track, tag, data, out):
         checked_docker(["rm", "--force", stager], "could not remove the data-transfer container")
         containers.remove(stager)
 
-        cmd = ["docker", "run", "--name", runner, "--network=none", "--read-only",
+        cmd = ["docker", "run", "--name", runner, "--cpuset-cpus=0-11", "--cpuset-mems=0",
+               "--network=none", "--read-only",
                "--tmpfs", "/tmp:rw,size=1g,exec", "--memory=8g", "--memory-swap=8g",
                "--pids-limit=512", "--cap-drop=ALL", "--security-opt=no-new-privileges",
                "--user", "65534:65534", "--ulimit", "nofile=8192:8192",
@@ -165,7 +172,8 @@ def run(track, tag, data):
     if os.name == "nt":
         return run_with_named_volumes(track, tag, data, out)
 
-    cmd = ["docker", "run", "--rm", "--network=none", "--read-only", "--tmpfs", "/tmp:rw,size=1g,exec",
+    cmd = ["docker", "run", "--rm", "--cpuset-cpus=0-11", "--cpuset-mems=0",
+           "--network=none", "--read-only", "--tmpfs", "/tmp:rw,size=1g,exec",
            "--memory=8g", "--memory-swap=8g", "--pids-limit=512", "--cap-drop=ALL",
            "--security-opt=no-new-privileges", "--user", "65534:65534", "--ulimit", "nofile=8192:8192",
            "-e", f"TRACK={track}", "-v", f"{data}:/data:ro", "-v", f"{out}:/out:rw", tag]
@@ -185,49 +193,70 @@ def sha256(path):
     return h.hexdigest()
 
 
+def check_track(track, path, skip_build, allowed):
+    """Build and run against the original verified full seed-1 input only."""
+    print(f"\n== Track {track.upper()} — OFFICIAL full seed-1 ==")
+    # Verify the entire input before the build; checksum reads also warm it
+    # into the OS page cache, approximating the organizer's vmtouch step.
+    data = official_data.ensure(track, path)
+    tag = f"speeddemon-check/track-{track}"
+    if not skip_build:
+        if allowed is not None:
+            with open(os.path.join(ROOT, f"track-{track}", "Dockerfile"), encoding="utf-8") as f:
+                problems = from_problems(f.read(), allowed)
+            if problems:
+                fail("; ".join(problems) + " (the official harness refuses this)")
+            print("ok    every Docker FROM is on the official allowlist")
+        build(track, tag)
+
+    out, took = run(track, tag, str(data))
+    expected_name = official_data.TRACKS[track]["output"]
+    files = sorted(os.listdir(out))
+    if files != [expected_name]:
+        fail(f"/out must contain exactly {expected_name}; got {files}")
+    digest = sha256(os.path.join(out, expected_name))
+    expected = official_data.TRACKS[track]["sha256"]
+    print(f"output {expected_name} SHA-256 {digest}")
+    if digest != expected:
+        fail(
+            f"Track {track.upper()} FAILED: official expected SHA-256 {expected}, "
+            f"but executable produced {digest}"
+        )
+    print(f"PASS  Track {track.upper()} official full-data correctness")
+    print(f"time  {took:.3f} s (includes Docker startup; NOT the official scoring time)")
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Build and run one Speed Demon track the way the board does.")
-    ap.add_argument("track", choices=sorted(OUTPUT))
-    ap.add_argument("--data", required=True, help="the folder holding the track's input files")
-    ap.add_argument("--expected", help="the sha256 the output must match")
-    ap.add_argument("--skip-build", action="store_true", help="run the image from the last build")
+    ap = argparse.ArgumentParser(
+        description="Always use and verify the original full public seed-1 Speed Demon inputs."
+    )
+    ap.add_argument("track", choices=[*sorted(OUTPUT), "all"])
+    ap.add_argument("--data", help="alternative data directory ONLY if every official input SHA matches")
+    ap.add_argument("--expected", help="compatibility flag: must match the PUBLISHED official output SHA")
+    ap.add_argument("--skip-build", action="store_true", help="reuse the last locally built image")
     args = ap.parse_args()
 
+    if args.track == "all" and (args.data or args.expected):
+        ap.error("--data and --expected are track-specific; omit them when using 'all'")
     if shutil.which("docker") is None:
-        fail("docker is not on PATH")
-    dockerfile = os.path.join(ROOT, f"track-{args.track}", "Dockerfile")
-    if not os.path.isfile(dockerfile):
-        fail(f"track-{args.track}/Dockerfile is missing")
-    data = os.path.abspath(args.data)
-    if not os.path.isdir(data):
-        fail(f"{data} is not a folder")
+        fail("docker is not on PATH (start Docker Desktop and enable WSL integration)")
 
-    tag = f"speeddemon-check/track-{args.track}"
-    if not args.skip_build:
-        digests = allowlisted_digests()
-        if digests is not None:
-            with open(dockerfile, encoding="utf-8") as f:
-                problems = from_problems(f.read(), digests)
-            if problems:
-                fail("; ".join(problems) + " (the board refuses this)")
-            print("ok    every FROM is allowlisted")
-        build(args.track, tag)
-
-    out, took = run(args.track, tag, data)
-    name = OUTPUT[args.track]
-    found = sorted(os.listdir(out))
-    if found != [name]:
-        fail(f"/out must hold exactly {name}, found {found}")
-    digest = sha256(os.path.join(out, name))
-    print(f"ok    {name} sha256 {digest}")
-    print(f"time  {took:.2f} s, including container start-up; the board's number will differ")
+    tracks = sorted(OUTPUT) if args.track == "all" else [args.track]
     if args.expected:
-        if digest != args.expected.strip().lower():
-            fail(f"the output does not match the expected sha256 {args.expected}")
-        print("PASS  the output matches the expected sha256")
-    else:
-        print("note  no --expected given. If this folder is unchanged, that sha256 is the right answer; check against it:")
-        print(f"      python3 check.py {args.track} --data {args.data} --expected {digest}")
+        official = official_data.TRACKS[args.track]["sha256"]
+        if args.expected.strip().lower() != official:
+            fail(
+                f"--expected must equal the OFFICIAL {args.track.upper()} output SHA-256 "
+                f"{official}; synthetic/alternate expected hashes are forbidden"
+            )
+
+    allowed = None if args.skip_build else allowlisted_digests()
+    for track in tracks:
+        try:
+            check_track(track, args.data, args.skip_build, allowed)
+        except (official_data.DatasetError, OSError, urllib.error.URLError) as e:
+            fail(str(e))
+    print("\nPASS  all requested tracks match the original published full-scale output hashes")
 
 
 if __name__ == "__main__":
