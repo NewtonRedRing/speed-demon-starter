@@ -113,8 +113,27 @@ unsafe fn decode(end: *const u8, len: usize) -> u32 {
 // endpoint id. New names are copied into one compact arena and published only
 // after the bytes are ready; hashes select candidates but full bytes decide
 // equality.
-struct NameArena(UnsafeCell<Vec<u8>>);
+struct NameArena {
+    bytes: Vec<u8>,
+    ptr: *mut u8,
+}
+unsafe impl Send for NameArena {}
 unsafe impl Sync for NameArena {}
+impl NameArena {
+    fn new(n: usize) -> Self {
+        let mut bytes = vec![0u8; n];
+        let ptr = bytes.as_mut_ptr();
+        Self { bytes, ptr }
+    }
+    #[inline(always)]
+    unsafe fn write(&self, off: usize, src: *const u8, n: usize) {
+        std::ptr::copy_nonoverlapping(src, self.ptr.add(off), n);
+    }
+    #[inline(always)]
+    unsafe fn slice(&self, off: usize, n: usize) -> &[u8] {
+        std::slice::from_raw_parts(self.ptr.add(off), n)
+    }
+}
 
 struct Names {
     slot: Vec<AtomicU64>,
@@ -130,7 +149,7 @@ impl Names {
         Self {
             slot: (0..Self::SLOTS).map(|_| AtomicU64::new(0)).collect(),
             used: AtomicU32::new(0),
-            arena: NameArena(UnsafeCell::new(vec![0u8; Self::ARENA + 32])),
+            arena: NameArena::new(Self::ARENA + 32),
         }
     }
 
@@ -138,7 +157,7 @@ impl Names {
     fn name(&self, v: u64) -> &[u8] {
         let off = (v as u32).wrapping_sub(1) as usize;
         let len = (v >> 32) as usize;
-        unsafe { &(&*self.arena.0.get())[off..off + len] }
+        unsafe { self.arena.slice(off, len) }
     }
 
     #[inline(always)]
@@ -175,13 +194,7 @@ impl Names {
             if v == 0 {
                 let off = self.used.fetch_add(n as u32, Relaxed) as usize;
                 assert!(off + n <= Self::ARENA, "endpoint arena exhausted");
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        s.as_ptr(),
-                        (&mut *self.arena.0.get()).as_mut_ptr().add(off),
-                        n,
-                    );
-                }
+                unsafe { self.arena.write(off, s.as_ptr(), n); }
                 let new = (n as u64) << 32 | (off as u64 + 1);
                 match self.slot[slot].compare_exchange(0, new, Release, Acquire) {
                     Ok(_) => return slot as u32,
