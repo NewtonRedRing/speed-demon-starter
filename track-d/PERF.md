@@ -96,3 +96,27 @@ entire measured query stage is only about a quarter second locally, so its
 preprocessing cost would need a demonstrated whole-process win.
 All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
 strict warnings and all four offline sandbox checks pass. No new score exists.
+
+## October 31 speed-first experiment: mapped graph construction (draft)
+
+The degree-counting and CSR-filling graph passes now read from a shared
+read-only `mmap` of `graph.txt` instead of 12 independent `FILE*` handles,
+repeated 256 KiB `fread` buffers and copies. Workers skip an initial partial
+edge line and finish the final edge line whose start lies in their byte
+partition. All atomics, parallel edges, full uint32 overflow weights, queue
+logic and exact 64-bit search distances remain unchanged. The mapping is
+released immediately after constructing both CSR graphs.
+
+A randomized alignment oracle verified one-to-one coverage for byte-partitioned
+edge streams across multiple graph sizes and worker counts. A standalone
+microbenchmark with 5,000,000 valid synthetic edges and 12 parallel workers
+measured 26.23 ms for buffered scanning and 24.40 ms for mapped scanning,
+with identical parsed checksums. A *sequential* counterpart on 1M edges
+regressed (14.91 ms buffered vs 17.21 ms mapped), so the improvement is
+sensitive to memory layout and parallelism. The graph-only microbenchmark
+does not include degree atomics, CSR construction or queries.
+
+The full mapped input could raise the official cgroup memory high-water mark,
+potentially offsetting the runtime benefit. Test the exact official hash,
+correctness oracles, and complete-process K before promotion. **No verified
+official score or global speedup is claimed.**
