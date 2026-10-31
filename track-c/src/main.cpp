@@ -208,8 +208,9 @@ int solve() {
         regions.resize(1000000);
         while (p < end) {
             const auto region = number(p, end);
-            if (p == end || *p++ != ',' || end - p < 4 || region >= regions.size())
+            if (p == end || *p++ != ',' || end - p < 4 || region > 9999999)
                 throw std::runtime_error("invalid regions.csv row");
+            if (region >= regions.size()) regions.resize(region + 1);
             unsigned code = 0;
             for (unsigned i = 0; i < 3; ++i) {
                 if (p[i] < 'A' || p[i] > 'Z')
