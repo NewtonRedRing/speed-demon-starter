@@ -24,8 +24,9 @@
 //!   run past the mapping.
 
 use std::arch::x86_64::{
-    __m256i, _mm256_and_si256, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8,
-    _mm256_set1_epi8, _mm256_storeu_si256,
+    __m128i, __m256i, _mm_clmulepi64_si128, _mm_cvtsi128_si64, _mm_cvtsi64_si128,
+    _mm_set1_epi8, _mm256_and_si256, _mm256_cmpeq_epi8, _mm256_loadu_si256,
+    _mm256_movemask_epi8, _mm256_set1_epi8, _mm256_storeu_si256,
 };
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::{Acquire, Relaxed, Release}};
 
@@ -356,48 +357,82 @@ fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
 
 // --- Record parsing (spec section 2.1) ----------------------------------
 
-/// Bit mask of the `"` bytes in `data[at..at + 32]`.
-#[inline]
-fn quotes(data: &[u8], at: usize) -> u32 {
-    let block = &data[at..at + 32];
-    // SAFETY: AVX2 is part of the build target (.cargo/config.toml, x86-64-v3)
-    // and `block` is exactly 32 readable bytes.
+/// Bit mask of bytes equal to c in data[at..at+32].
+#[inline(always)]
+fn match32(data: &[u8], at: usize, c: u8) -> u32 {
     unsafe {
-        let v = _mm256_loadu_si256(block.as_ptr().cast::<__m256i>());
-        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'"' as i8))) as u32
+        let v = _mm256_loadu_si256(data.as_ptr().add(at).cast::<__m256i>());
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c as i8))) as u32
     }
 }
 
-/// A `text` field starting at `at`: returns (content start, content end,
-/// number of `""` escapes inside, index just past the field's `,`).
-/// The value is the content with every `""` read as one `"`.
-#[inline]
-fn text_field(data: &[u8], at: usize) -> (usize, usize, usize, usize) {
-    if data[at] != b'"' {
-        let c = at
-            + data[at..]
-                .iter()
-                .position(|&b| b == b',')
-                .unwrap_or(data.len() - at - 1);
-        return (at, c, 0, c + 1);
+#[inline(always)]
+fn match64(data: &[u8], at: usize, c: u8) -> u64 {
+    match32(data, at, c) as u64 | ((match32(data, at + 32, c) as u64) << 32)
+}
+
+#[derive(Clone, Copy)]
+struct Separator {
+    at: usize,
+    quotes: u64,
+}
+
+/// Streams commas/newlines that are outside quoted CSV fields. Quote parity
+/// for all 64 bytes is computed in one carry-less multiply (prefix XOR), so
+/// names and notes are not rescanned byte-by-byte just to locate separators.
+struct Structure<'a> {
+    data: &'a [u8],
+    block: usize,
+    bits: u64,
+    carry: u64,
+    q: u64,
+    before: u64,
+}
+
+impl<'a> Structure<'a> {
+    #[inline]
+    fn new(data: &'a [u8], start: usize) -> Self {
+        Self { data, block: start, bits: 0, carry: 0, q: 0, before: 0 }
     }
-    let start = at + 1;
-    let (mut j, mut pairs) = (start, 0);
-    loop {
-        let m = quotes(data, j);
-        if m == 0 {
-            j += 32;
-            continue;
+
+    #[inline(always)]
+    fn next(&mut self) -> Separator {
+        while self.bits == 0 {
+            if self.block + 64 > self.data.len() {
+                return Separator { at: self.data.len(), quotes: self.before + self.q.count_ones() as u64 };
+            }
+            let at = self.block;
+            self.block += 64;
+            self.before += self.q.count_ones() as u64;
+            self.q = match64(self.data, at, b'"');
+            let structural = match64(self.data, at, b',') | match64(self.data, at, b'\n');
+            if self.q == 0 && self.carry == 0 {
+                self.bits = structural;
+            } else {
+                let prefix = unsafe {
+                    let x: __m128i = _mm_clmulepi64_si128::<0x00>(
+                        _mm_cvtsi64_si128(self.q as i64),
+                        _mm_set1_epi8(-1),
+                    );
+                    _mm_cvtsi128_si64(x) as u64
+                } ^ self.carry;
+                self.carry = ((prefix as i64) >> 63) as u64;
+                self.bits = structural & !prefix;
+            }
         }
-        let q = j + m.trailing_zeros() as usize;
-        if data[q + 1] == b'"' {
-            pairs += 1;
-            j = q + 2;
-        } else {
-            // Closing quote; a name or note is always followed by `,`.
-            return (start, q, pairs, q + 2);
+        let i = self.bits.trailing_zeros() as usize;
+        self.bits &= self.bits - 1;
+        let before_bit = if i == 0 { 0 } else { (1u64 << i) - 1 };
+        Separator {
+            at: self.block - 64 + i,
+            quotes: self.before + (self.q & before_bit).count_ones() as u64,
         }
     }
+}
+
+#[inline(always)]
+fn decoded_text_len(raw_len: usize, quote_bytes: u64) -> usize {
+    raw_len - if quote_bytes == 0 { 0 } else { quote_bytes as usize / 2 + 1 }
 }
 
 /// The run of ASCII digits at `data[at..]` as (value, length).
@@ -429,25 +464,31 @@ fn parse_records(
 ) {
     let unmatched = regions.countries.len();
     let mut i = start;
+    let mut sep = Structure::new(data, start);
     while i < end {
-        // The hardware prefetcher stops at page boundaries; pull the stream in ahead.
         prefetch_read(data.as_ptr().wrapping_add(i + 1536));
         i += 3 * (data[i] == 0xEF) as usize;
-        let (id, n) = digits(data, i);
-        let (ns, ne, npairs, next) = text_field(data, i + n + 1);
-        let (ts, te, tpairs, next) = text_field(data, next);
-        let (region, n) = digits(data, next);
-        let mut j = next + n + 1;
-        let neg = data[j] == b'-';
-        j += neg as usize;
-        let (whole, n) = digits(data, j);
-        j += n + 1;
-        let cents =
-            (whole * 100 + (data[j] - b'0') as u64 * 10 + (data[j + 1] - b'0') as u64) as i64;
+
+        // Five structural separators define the complete record. Structure
+        // skips commas/newlines while quote parity says we are inside a field.
+        let f1 = sep.next(); // after id
+        let f2 = sep.next(); // after name
+        let f3 = sep.next(); // after note
+        let f4 = sep.next(); // after region
+        let eol = sep.next(); // record terminator
+
+        let (id, _) = digits(data, i);
+        let (region, _) = digits(data, f3.at + 1);
+
+        let mut a = f4.at + 1;
+        let neg = data[a] == b'-';
+        a += neg as usize;
+        let (whole, n) = digits(data, a);
+        let frac = a + n + 1;
+        let cents = (whole * 100
+            + (data[frac] - b'0') as u64 * 10
+            + (data[frac + 1] - b'0') as u64) as i64;
         let cents = if neg { -cents } else { cents };
-        j += 2;
-        // CRLF or LF; a missing final terminator ends the loop either way.
-        i = j + 1 + (data[j] == b'\r') as usize;
 
         let g = match regions.group_of.get(region as usize) {
             Some(&g) if g != 0 => g as usize - 1,
@@ -459,9 +500,27 @@ fn parse_records(
         agg.amount_sum += cents;
         agg.amount_min = agg.amount_min.min(cents);
         agg.amount_max = agg.amount_max.max(cents);
-        agg.name_bytes += (ne - ns - npairs) as u64;
-        agg.note_bytes += (te - ts - tpairs) as u64;
-        sightings.push(g, hash_name(data, ns, ne), data.as_ptr().wrapping_add(ns) as usize, ne - ns);
+
+        let nq = f2.quotes - f1.quotes;
+        let tq = f3.quotes - f2.quotes;
+        let name_raw = f2.at - (f1.at + 1);
+        let note_raw = f3.at - (f2.at + 1);
+        agg.name_bytes += decoded_text_len(name_raw, nq) as u64;
+        agg.note_bytes += decoded_text_len(note_raw, tq) as u64;
+
+        // Generator encoding is canonical for non-empty names. Strip only the
+        // outer quotes; doubled quotes remain in the raw key and therefore
+        // preserve exact decoded equality. Both empty forms become length 0.
+        let quoted = nq != 0;
+        let ns = f1.at + 1 + quoted as usize;
+        let ne = f2.at - quoted as usize;
+        sightings.push(
+            g,
+            hash_name(data, ns, ne),
+            data.as_ptr().wrapping_add(ns) as usize,
+            ne - ns,
+        );
+        i = eol.at + 1;
     }
 }
 
