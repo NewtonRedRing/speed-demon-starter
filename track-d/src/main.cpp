@@ -16,6 +16,9 @@
 #include <unordered_map>
 #include <vector>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 using u32 = std::uint32_t;
 using u64 = std::uint64_t;
@@ -43,48 +46,22 @@ u32 number(const char*& p) {
 }
 
 template<class Visit>
-void edges_in_range(std::size_t begin, std::size_t end, Visit visit) {
-    std::vector<char> buffer(256 * 1024);
-    auto close_file = [](FILE* file) { if (file) std::fclose(file); };
-    std::unique_ptr<FILE, decltype(close_file)> file(std::fopen("/data/graph.txt", "rb"), close_file);
-    if (!file) throw std::runtime_error("cannot open graph.txt");
-    std::size_t position = begin;
-    if (begin) {
-        if (fseeko(file.get(), static_cast<off_t>(begin - 1), SEEK_SET))
-            throw std::runtime_error("cannot seek graph.txt");
-        if (std::fgetc(file.get()) != '\n') {
-            int c;
-            do {
-                c = std::fgetc(file.get());
-                if (c == EOF) return;
-                ++position;
-            } while (c != '\n');
-        }
+void edges_in_range(const char* data, std::size_t begin, std::size_t end, Visit visit) {
+    // All worker ranges are byte partitions of a single read-only mapping.
+    // Skip a partial first edge, but finish an edge that starts before end.
+    const char* p = data + begin;
+    if (begin && data[begin - 1] != '\n')
+        while (*p++ != '\n') {}
+    const char* limit = data + end;
+    while (p < limit) {
+        const u32 from = number(p);
+        if (*p++ != ' ') throw std::runtime_error("invalid edge source");
+        const u32 to = number(p);
+        if (*p++ != ' ') throw std::runtime_error("invalid edge target");
+        const u32 weight = number(p);
+        if (*p++ != '\n') throw std::runtime_error("invalid edge weight");
+        visit(from, to, weight);
     }
-    std::size_t carry = 0;
-    while (position < end) {
-        const auto got = std::fread(buffer.data() + carry, 1, buffer.size() - carry, file.get());
-        if (!got) throw std::runtime_error("truncated graph.txt");
-        const char* p = buffer.data();
-        const char* stop = p + carry + got;
-        const char* complete = stop;
-        while (complete != p && complete[-1] != '\n') --complete;
-        while (position < end && p < complete) {
-            const char* row = p;
-            const u32 from = number(p);
-            if (*p++ != ' ') throw std::runtime_error("invalid edge source");
-            const u32 to = number(p);
-            if (*p++ != ' ') throw std::runtime_error("invalid edge target");
-            const u32 weight = number(p);
-            if (*p++ != '\n') throw std::runtime_error("invalid edge weight");
-            visit(from, to, weight);
-            position += static_cast<std::size_t>(p - row);
-        }
-        carry = static_cast<std::size_t>(stop - p);
-        if (carry == buffer.size()) throw std::runtime_error("edge line exceeds buffer");
-        std::memmove(buffer.data(), p, carry);
-    }
-    if (std::ferror(file.get())) throw std::runtime_error("cannot read graph.txt");
 }
 
 class RadixQueue {
@@ -225,11 +202,19 @@ int solve() {
     if (stat("/data/graph.txt", &status)) throw std::runtime_error("cannot stat graph.txt");
     const auto size = static_cast<std::size_t>(status.st_size);
     const unsigned workers = m < 10000 ? 1 : 12;
+    const int descriptor = open("/data/graph.txt", O_RDONLY);
+    if (descriptor < 0) throw std::runtime_error("cannot open graph mapping");
+    void* mapped = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, descriptor, 0);
+    close(descriptor);
+    if (mapped == MAP_FAILED) throw std::runtime_error("cannot map graph");
+    auto unmap = [size](void* p) { if (p) munmap(p, size); };
+    std::unique_ptr<void, decltype(unmap)> mapping(mapped, unmap);
+    const char* data = static_cast<const char*>(mapping.get());
     Graph graph;
     for (unsigned d = 0; d < 2; ++d) graph.offsets[d].resize(static_cast<std::size_t>(n) + 1);
     const auto read = [&](auto visit) {
         parallel(workers, [&](unsigned w) {
-            edges_in_range(header + (size - header) * w / workers,
+            edges_in_range(data, header + (size - header) * w / workers,
                            header + (size - header) * (w + 1) / workers, visit);
         });
     };
@@ -260,6 +245,8 @@ int solve() {
             }
         });
     }
+    // All graph edges are now in CSR arrays; release the input mapping.
+    mapping.reset();
     std::ifstream query_file("/data/queries.txt");
     if (!query_file) throw std::runtime_error("cannot open queries.txt");
     std::vector<Query> queries;
