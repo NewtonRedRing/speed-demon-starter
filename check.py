@@ -201,13 +201,13 @@ def sha256(path):
     return h.hexdigest()
 
 
-def check_track(track, path, skip_build, allowed, runs):
+def check_track(track, path, skip_build, allowed, runs, image=None):
     """Build and run against the original verified full seed-1 input only."""
     print(f"\n== Track {track.upper()} — OFFICIAL full seed-1 ==")
     # Verify the entire input before the build; checksum reads also warm it
     # into the OS page cache, approximating the organizer's vmtouch step.
     data = official_data.ensure(track, path)
-    tag = f"speeddemon-check/track-{track}"
+    tag = image or f"speeddemon-check/track-{track}"
     if not skip_build:
         if allowed is not None:
             with open(os.path.join(ROOT, f"track-{track}", "Dockerfile"), encoding="utf-8") as f:
@@ -256,9 +256,14 @@ def main():
     ap.add_argument("--expected", help="compatibility flag: must match the PUBLISHED official output SHA")
     ap.add_argument("--skip-build", action="store_true", help="reuse the last locally built image")
     ap.add_argument("--runs", type=int, default=5, help="complete correct runs (default: 5, like official scoring)")
+    ap.add_argument("--image", help="optional prebuilt candidate Docker image, requires --skip-build")
     args = ap.parse_args()
     if args.runs < 1:
         ap.error("--runs must be at least 1")
+    if args.image and not args.skip_build:
+        ap.error("--image requires --skip-build, so build never changes the chosen candidate image")
+    if args.image and args.track == "all":
+        ap.error("--image selects one track only; run check.py a --skip-build --image TAG")
 
     if args.track == "all" and (args.data or args.expected):
         ap.error("--data and --expected are track-specific; omit them when using 'all'")
@@ -283,7 +288,7 @@ def main():
     allowed = None if args.skip_build else allowlisted_digests()
     for track in tracks:
         try:
-            check_track(track, args.data, args.skip_build, allowed, args.runs)
+            check_track(track, args.data, args.skip_build, allowed, args.runs, args.image)
         except (official_data.DatasetError, OSError, urllib.error.URLError) as e:
             fail(str(e))
     print("\nPASS  all requested tracks match the original published full-scale output hashes")
