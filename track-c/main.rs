@@ -29,7 +29,7 @@ use std::arch::x86_64::{
     _mm256_movemask_epi8, _mm256_set1_epi8,
 };
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::{Acquire, Relaxed, Release}};
 
 /// Maps `path` read-only for the life of the process. The harness
 /// pre-warms `/data` into the page cache before the run, so those pages
@@ -146,33 +146,36 @@ impl Agg {
 
 // --- Distinct names -----------------------------------------------------
 
-/// Exact shared name table. The table slot itself is the name id, so there
-/// is no separate id allocator or pointer table. A short exact prefix and
-/// length live beside the tag; only bytes beyond 16 go into a compact arena.
-/// Hash/tag equality is only a candidate filter: every hit compares all bytes.
+/// Exact shared name table. The hot slot is exactly 16 bytes. The first
+/// word is also the publication atomic: zero=free, all-ones=being filled,
+/// high bit set=ready. Generated name bytes are printable ASCII, so that high
+/// bit cannot collide with real key data. Names up to 16 raw bytes are stored
+/// exactly in the slot. Longer names store an exact first eight bytes plus a
+/// marked full-name hash as a candidate filter, then compare every remaining
+/// byte from the side arena before equality is accepted.
 const NAME_SLOTS: usize = 1 << 17;
 const NAME_WORDS: usize = NAME_SLOTS / 64;
-const BUSY_TAG: u16 = u16::MAX;
 const NAME_ARENA: usize = 1 << 20;
+const OCCUPIED: u64 = 1 << 63;
+const BUSY: u64 = u64::MAX;
+const LONG: u64 = 1 << 63;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct NameKey {
-    len: u32,
-    tail: u32,
-    head: [u8; 16],
+#[repr(C, align(16))]
+struct NameSlot {
+    lo: AtomicU64,
+    hi: UnsafeCell<u64>,
 }
-impl Default for NameKey {
-    fn default() -> Self { Self { len: 0, tail: 0, head: [0; 16] } }
-}
-struct KeyCell(UnsafeCell<NameKey>);
-unsafe impl Sync for KeyCell {}
+unsafe impl Sync for NameSlot {}
+
+struct MetaCell(UnsafeCell<u64>);
+unsafe impl Sync for MetaCell {}
+
 struct ByteArena(UnsafeCell<Vec<u8>>);
 unsafe impl Sync for ByteArena {}
 
 struct Names {
-    tags: Vec<AtomicU16>,
-    keys: Vec<KeyCell>,
+    slots: Vec<NameSlot>,
+    meta: Vec<MetaCell>, // long only: raw_len << 32 | tail_offset
     arena: ByteArena,
     used: AtomicU32,
     bits: Vec<AtomicU64>,
@@ -183,11 +186,33 @@ fn zeroed(n: usize) -> Vec<AtomicU64> {
     unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast(), v.len(), v.capacity()) }
 }
 
+#[inline(always)]
+fn byte_mask(n: usize) -> u64 {
+    if n >= 8 { !0 } else if n == 0 { 0 } else { (1u64 << (n * 8)) - 1 }
+}
+
+#[inline(always)]
+unsafe fn name_words(p: usize, len: usize, h: u64) -> (u64, u64) {
+    let q = p as *const u8;
+    let lo = q.cast::<u64>().read_unaligned() & byte_mask(len);
+    let hi = if len <= 8 {
+        0
+    } else if len <= 16 {
+        q.add(8).cast::<u64>().read_unaligned() & byte_mask(len - 8)
+    } else {
+        (h & !LONG) | LONG
+    };
+    (lo, hi)
+}
+
 impl Names {
     fn new(groups: usize) -> Self {
         Self {
-            tags: (0..NAME_SLOTS).map(|_| AtomicU16::new(0)).collect(),
-            keys: (0..NAME_SLOTS).map(|_| KeyCell(UnsafeCell::new(NameKey::default()))).collect(),
+            slots: (0..NAME_SLOTS).map(|_| NameSlot {
+                lo: AtomicU64::new(0),
+                hi: UnsafeCell::new(0),
+            }).collect(),
+            meta: (0..NAME_SLOTS).map(|_| MetaCell(UnsafeCell::new(0))).collect(),
             arena: ByteArena(UnsafeCell::new(vec![0u8; NAME_ARENA])),
             used: AtomicU32::new(0),
             bits: zeroed(groups * NAME_WORDS),
@@ -195,64 +220,55 @@ impl Names {
     }
 
     #[inline(always)]
-    fn tag(h: u64) -> u16 {
-        let t = (h >> 48) as u16;
-        if t == 0 || t == BUSY_TAG { 1 } else { t }
-    }
-
-    #[inline(always)]
-    fn same(&self, slot: usize, p: usize, len: usize) -> bool {
-        let k = unsafe { &*self.keys[slot].0.get() };
-        if k.len as usize != len { return false; }
-        let n = len.min(16);
-        let src = unsafe { std::slice::from_raw_parts(p as *const u8, n) };
-        if k.head[..n] != *src { return false; }
-        if len <= 16 { return true; }
+    fn long_same(&self, slot: usize, p: usize, len: usize) -> bool {
+        let m = unsafe { *self.meta[slot].0.get() };
+        if (m >> 32) as usize != len { return false; }
+        let off = m as u32 as usize;
         let tail = len - 16;
         let arena = unsafe { &*self.arena.0.get() };
-        &arena[k.tail as usize..k.tail as usize + tail]
+        &arena[off..off + tail]
             == unsafe { std::slice::from_raw_parts((p as *const u8).add(16), tail) }
     }
 
     #[inline(always)]
     fn number(&self, h: u64, p: usize, len: usize) -> usize {
-        let tag = Self::tag(h);
+        let (raw_lo, key_hi) = unsafe { name_words(p, len, h) };
+        let ready_lo = raw_lo | OCCUPIED;
         let mut i = h as usize & (NAME_SLOTS - 1);
         loop {
-            let mut t = self.tags[i].load(Acquire);
-            while t == BUSY_TAG {
+            let mut lo = self.slots[i].lo.load(Acquire);
+            while lo == BUSY {
                 std::hint::spin_loop();
-                t = self.tags[i].load(Acquire);
+                lo = self.slots[i].lo.load(Acquire);
             }
-            if t == tag && self.same(i, p, len) {
-                return i;
-            }
-            if t == 0 {
-                if self.tags[i].compare_exchange(0, BUSY_TAG, Acquire, Acquire).is_ok() {
-                    let tail_len = len.saturating_sub(16);
-                    let off = if tail_len == 0 {
-                        0
-                    } else {
-                        let off = self.used.fetch_add(tail_len as u32, Relaxed) as usize;
-                        assert!(off + tail_len <= NAME_ARENA, "name arena exhausted");
+            if lo == 0 {
+                if self.slots[i].lo.compare_exchange(0, BUSY, Acquire, Acquire).is_ok() {
+                    if len > 16 {
+                        let tail = len - 16;
+                        let off = self.used.fetch_add(tail as u32, Relaxed) as usize;
+                        assert!(off + tail <= NAME_ARENA, "name arena exhausted");
                         unsafe {
                             std::ptr::copy_nonoverlapping(
                                 (p as *const u8).add(16),
                                 (&mut *self.arena.0.get()).as_mut_ptr().add(off),
-                                tail_len,
+                                tail,
                             );
+                            *self.meta[i].0.get() = (len as u64) << 32 | off as u64;
+                            *self.slots[i].hi.get() = key_hi;
                         }
-                        off as u32
-                    };
-                    let k = unsafe { &mut *self.keys[i].0.get() };
-                    k.len = len as u32;
-                    k.tail = off;
-                    k.head.fill(0);
-                    unsafe { std::ptr::copy_nonoverlapping(p as *const u8, k.head.as_mut_ptr(), len.min(16)); }
-                    self.tags[i].store(tag, Release);
+                    } else {
+                        unsafe { *self.slots[i].hi.get() = key_hi; }
+                    }
+                    self.slots[i].lo.store(ready_lo, Release);
                     return i;
                 }
                 continue;
+            }
+            if (lo & !OCCUPIED) == raw_lo
+                && unsafe { *self.slots[i].hi.get() } == key_hi
+                && (len <= 16 || self.long_same(i, p, len))
+            {
+                return i;
             }
             i = (i + 1) & (NAME_SLOTS - 1);
         }
@@ -288,8 +304,7 @@ impl<'a> Sightings<'a> {
     #[inline]
     fn push(&mut self, group: usize, h: u64, p: usize, len: usize) {
         let home = h as usize & (NAME_SLOTS - 1);
-        prefetch_read(&self.names.tags[home] as *const AtomicU16);
-        prefetch_read(&self.names.keys[home] as *const KeyCell);
+        prefetch_read(&self.names.slots[home] as *const NameSlot);
         self.seen[self.seen_len] = (group, h, p, len);
         self.seen_len += 1;
         if self.seen_len == BATCH {
