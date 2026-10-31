@@ -124,3 +124,36 @@ inputs**; `check.py` always verifies the real full public seed-1 input and
 the organizer's exact expected output SHA-256. Neither the optional Dockerfile
 nor the algorithm test is inside `track-a/`, so they do not inflate the
 submission's source-size count.
+
+### Existing Windows / PowerShell checkout
+
+Some previous checkouts keep the downloaded public files at
+`data\\a\\full-seed1\\requests.log` with sibling
+`tiny-ref` and `tiny-seed1` folders. The downloader recognizes this
+layout automatically and leaves all tiny fixtures intact. **Only the
+full-seed1 input is used after an exact SHA-256 comparison**.
+
+From a Windows PowerShell prompt, build and verify Track A with:
+
+```powershell
+git pull --ff-only origin speed-demon
+python3 check.py a --runs 1
+
+# If your Linux Docker Desktop VM exposes fewer than 12 usable CPUs:
+$env:SPEED_DEMON_CPUSET_CPUS = '0-3'
+python3 check.py a --runs 1
+```
+
+Run the Rust-only algorithm tests **inside Linux**, not with the native
+`stable-x86_64-pc-windows-gnu` compiler. PowerShell uses a backtick
+for line continuation (not Bash's backslash):
+
+```powershell
+docker run --rm `
+  --mount "type=bind,source=$($PWD.Path),target=/work" `
+  -w /work `
+  rust:1-slim-trixie `
+  sh -lc 'rustc --edition=2021 -C target-cpu=native --test tests/track_a_algorithms.rs -o /tmp/track-a-tests && /tmp/track-a-tests'
+```
+
+The local Rust test container is not an official scored submission.
