@@ -4,6 +4,7 @@
     python3 check.py a                 # downloads official Track A if missing
     python3 check.py all               # downloads and tests all four tracks
     python3 check.py b --skip-build    # reuse the previous official image
+    python3 check.py a --runs 1         # fast development check, still full official data
 
 SHA-256 is enforced for EVERY input and EVERY output using the organizers'
 released manifest; synthetic, sample and generated datasets are rejected.
@@ -17,6 +18,7 @@ import hashlib
 import json
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -197,7 +199,7 @@ def sha256(path):
     return h.hexdigest()
 
 
-def check_track(track, path, skip_build, allowed):
+def check_track(track, path, skip_build, allowed, runs):
     """Build and run against the original verified full seed-1 input only."""
     print(f"\n== Track {track.upper()} — OFFICIAL full seed-1 ==")
     # Verify the entire input before the build; checksum reads also warm it
@@ -213,21 +215,34 @@ def check_track(track, path, skip_build, allowed):
             print("ok    every Docker FROM is on the official allowlist")
         build(track, tag)
 
-    out, took = run(track, tag, str(data))
     expected_name = official_data.TRACKS[track]["output"]
-    files = sorted(os.listdir(out))
-    if files != [expected_name]:
-        fail(f"/out must contain exactly {expected_name}; got {files}")
-    digest = sha256(os.path.join(out, expected_name))
     expected = official_data.TRACKS[track]["sha256"]
-    print(f"output {expected_name} SHA-256 {digest}")
-    if digest != expected:
-        fail(
-            f"Track {track.upper()} FAILED: official expected SHA-256 {expected}, "
-            f"but executable produced {digest}"
+    times = []
+    for attempt in range(1, runs + 1):
+        out, took = run(track, tag, str(data))
+        files = sorted(os.listdir(out))
+        if files != [expected_name]:
+            fail(f"/out must contain exactly {expected_name}; got {files}")
+        digest = sha256(os.path.join(out, expected_name))
+        if digest != expected:
+            fail(
+                f"Track {track.upper()} run {attempt}/{runs} FAILED: "
+                f"official expected SHA-256 {expected}, got {digest}"
+            )
+        print(
+            f"PASS  Track {track.upper()} run {attempt}/{runs}: "
+            f"{expected_name} SHA-256 {digest}, local {took:.3f} s"
         )
-    print(f"PASS  Track {track.upper()} official full-data correctness")
-    print(f"time  {took:.3f} s (includes Docker startup; NOT the official scoring time)")
+        times.append(took)
+    if runs >= 3:
+        trimmed = statistics.mean(sorted(times)[1:-1])
+        print(f"local trimmed mean {trimmed:.6f} s (discard fastest and slowest)")
+    else:
+        print(f"local mean {statistics.mean(times):.6f} s")
+    print(
+        f"PASS  Track {track.upper()} all {runs} official-full-dataset correctness gates. "
+        "Local timing includes Docker startup and is NOT an official board score."
+    )
 
 
 def main():
@@ -238,7 +253,10 @@ def main():
     ap.add_argument("--data", help="alternative data directory ONLY if every official input SHA matches")
     ap.add_argument("--expected", help="compatibility flag: must match the PUBLISHED official output SHA")
     ap.add_argument("--skip-build", action="store_true", help="reuse the last locally built image")
+    ap.add_argument("--runs", type=int, default=5, help="complete correct runs (default: 5, like official scoring)")
     args = ap.parse_args()
+    if args.runs < 1:
+        ap.error("--runs must be at least 1")
 
     if args.track == "all" and (args.data or args.expected):
         ap.error("--data and --expected are track-specific; omit them when using 'all'")
@@ -263,7 +281,7 @@ def main():
     allowed = None if args.skip_build else allowlisted_digests()
     for track in tracks:
         try:
-            check_track(track, args.data, args.skip_build, allowed)
+            check_track(track, args.data, args.skip_build, allowed, args.runs)
         except (official_data.DatasetError, OSError, urllib.error.URLError) as e:
             fail(str(e))
     print("\nPASS  all requested tracks match the original published full-scale output hashes")
