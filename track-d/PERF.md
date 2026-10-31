@@ -96,3 +96,31 @@ entire measured query stage is only about a quarter second locally, so its
 preprocessing cost would need a demonstrated whole-process win.
 All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
 strict warnings and all four offline sandbox checks pass. No new score exists.
+
+
+## October 31 mapped graph parser on current radix-frontier baseline (draft)
+
+The default branch already incorporates the exact cached-radix-frontier change.
+This experiment changes **only** the two input edge-reading passes for the
+degree-count/fill CSR builders: one shared read-only mmap of `graph.txt`,
+no 12 independent FILE streams, no 256 KiB fread buffers/copies per worker.
+The mapping is discarded after both CSR arrays are built; query execution
+still uses the current exact directed 64-bit bidirectional Dijkstra.
+Shard boundaries preserve all rows: workers skip a partial starting line
+and finish the last line whose start precedes the shard end.
+
+A synthetic 5-million-edge parallel-parser primitive benchmark with 12
+workers verified identical parsed checksum for buffered and mapped readers.
+Two independent local batches:
+- 26.23 ms old buffered / 24.40 ms mapped;
+- 28.464 ms buffered / 24.667 ms mapped.
+This excludes CSR atomic degree/fill work, allocation, searches and output.
+Another **sequential** parse microbenchmark regressed for mmap: the result
+is sensitive to parallelism and memory layout.
+
+**Official risk:** mapping the graph can increase kernel page-cache charges
+and thus the official cgroup `memory.peak` even after unmapping; a faster
+parse may still lower scored K. Do not merge until pinned Docker GCC15
+compiles, exact official seed-1 output hash and independent random-graph
+oracles pass, with alternating whole-run time/cgroup memory comparison.
+Target D 72.925 remains unverified.
