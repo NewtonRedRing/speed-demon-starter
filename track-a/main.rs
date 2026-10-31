@@ -36,8 +36,6 @@ extern "C" {
     fn madvise(addr: *mut c_void, len: usize, advice: i32) -> i32;
     fn ftruncate(fd: i32, len: i64) -> i32;
     fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
-    fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut c_void) -> i32;
-    fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const c_void) -> i32;
 }
 const READ_WRITE: i32 = 3; // PROT_READ | PROT_WRITE
 const ANONYMOUS: i32 = 0x22; // MAP_PRIVATE | MAP_ANONYMOUS
@@ -112,43 +110,20 @@ unsafe fn decode(end: *const u8, len: usize) -> u32 {
     (high * 100_000_000 + _mm_extract_epi32::<1>(v) as u64) as u32
 }
 
-// For up to eight decimal digits, the preceding bytes are masked before
-// subtracting ASCII '0' to avoid a borrow propagating into the number.
-// SWAR folds byte pairs into 16-bit, then 32-bit, then full 8-digit values.
-#[inline(always)]
-unsafe fn decode_swar(end: *const u8, len: usize) -> u32 {
-    let raw = end.sub(8).cast::<u64>().read_unaligned();
-    let mask = !0u64 << ((8 - len) * 8);
-    let bytes = (raw & mask).wrapping_sub(0x3030_3030_3030_3030 & mask);
-    let pairs = (bytes & 0x00ff_00ff_00ff_00ff) * 10
-        + ((bytes >> 8) & 0x00ff_00ff_00ff_00ff);
-    let groups = (pairs & 0x0000_ffff_0000_ffff) * 100
-        + ((pairs >> 16) & 0x0000_ffff_0000_ffff);
-    ((groups & 0xffff_ffff) * 10000 + (groups >> 32)) as u32
-}
-
 // Endpoint names to dense ids in first-seen order. Open addressing on a CRC of
 // the name's first and last eight bytes (masked when the name is shorter; the
 // rest of the line keeps both loads in bounds). Names point into the log.
 struct Interner {
     names: Vec<&'static [u8]>,
-    // 16 high CRC bits + low 16 bits for 1-based local endpoint ID.
-    // The fingerprint rejects hash-probe misses before touching endpoint bytes.
-    slot: Vec<u32>,
-    hot_id: [u16; 64],
-    hot_hash: [u32; 64],
+    // Compact 16 KiB probe table stays inside the scoring CPU's L1 data cache.
+    slot: Vec<u16>,
 }
 
 impl Interner {
-    const SLOTS: usize = 1 << 13;
+    const SLOTS: usize = 1 << 12;
 
     fn new() -> Self {
-        Interner {
-            names: vec![],
-            slot: vec![0; Self::SLOTS],
-            hot_id: [0; 64],
-            hot_hash: [0; 64],
-        }
+        Interner { names: vec![], slot: vec![0; Self::SLOTS] }
     }
 
     fn id(&mut self, s: &'static [u8]) -> u32 {
@@ -156,34 +131,17 @@ impl Interner {
         let word = |i: usize| unsafe { s.as_ptr().add(i).cast::<u64>().read_unaligned() };
         let a = word(0) & if n >= 8 { !0 } else { (1 << (8 * n)) - 1 };
         let b = if n >= 8 { word(n - 8) } else { 0 };
-        let hash = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as u32;
-        let home = hash as usize & (Self::SLOTS - 1);
-        // Direct-mapped hot endpoint cache: never trust the fingerprint alone.
-        let hot = hash as usize & 63;
-        let seen = self.hot_id[hot];
-        if seen != 0 && self.hot_hash[hot] == hash && same(self.names[seen as usize - 1], s) {
-            return seen as u32 - 1;
-        }
-        let tag = hash & 0xffff_0000;
-        let mut i = home;
+        let mut i = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as usize
+            & (Self::SLOTS - 1);
         loop {
-            let entry = self.slot[i];
-            if entry == 0 {
+            let id = &mut self.slot[i];
+            if *id == 0 {
                 assert!(self.names.len() < ERR as usize, "too many endpoints");
                 self.names.push(s);
-                let id = self.names.len() as u16;
-                self.slot[i] = tag | id as u32;
-                self.hot_id[hot] = id;
-                self.hot_hash[hot] = hash;
-                return id as u32 - 1;
+                *id = self.names.len() as u16;
             }
-            if entry & 0xffff_0000 == tag {
-                let id = (entry & 0xffff) as u16;
-                if same(self.names[id as usize - 1], s) {
-                    self.hot_id[hot] = id;
-                    self.hot_hash[hot] = hash;
-                    return id as u32 - 1;
-                }
+            if same(self.names[*id as usize - 1], s) {
+                return *id as u32 - 1;
             }
             i = (i + 1) & (Self::SLOTS - 1);
         }
@@ -204,11 +162,11 @@ fn same(x: &[u8], s: &[u8]) -> bool {
     }
 }
 
-// One hour's records from one thread, in a chain of 8 KB chunks carved in
+// One hour's records from one thread, in a chain of 16 KB chunks carved in
 // order from a region the thread maps up front. The output file's pages count
 // toward peak memory as it is written, so chunks are handed back while it
 // grows: see Parser::release.
-const CAP: usize = (8192 - 16) / 4;
+const CAP: usize = (16384 - 16) / 4;
 #[repr(C)]
 struct Chunk {
     prev: *mut Chunk,
@@ -238,8 +196,6 @@ impl Parser {
 
     unsafe fn parse(&mut self, mut p: *const u8, end: *const u8) {
         while p < end {
-            // The scan is sequential: bring the next cache lines into L1/L2.
-            _mm_prefetch::<_MM_HINT_T0>(p.add(192).cast());
             // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
             let d = |i: usize| (*p.add(i) - b'0') as usize;
             let day = d(8) * 10 + d(9) + d(6) * 31;
@@ -260,7 +216,7 @@ impl Parser {
             let name_bytes = from_raw_parts(name, name_end.offset_from(name) as usize);
             let key = self.local.id(name_bytes) | ERR * (*name_end.add(1) == b'5') as u32;
             let digits = eol.offset_from(name_end) as usize - 5; // after " SSS "
-            let latency = if digits <= 8 { decode_swar(eol, digits) } else { decode(eol, digits) };
+            let latency = decode(eol, digits);
             p = eol.add(1);
 
             if latency >= PACKED_MAX {
@@ -281,8 +237,8 @@ impl Parser {
 
     // The log is in arrival order, so chunks are carved roughly hour by hour
     // and hours finish in the same order: the run of chunks at the front whose
-    // hours are all finished grows steadily. Hand it back in 128 KB batches,
-    // rather than a madvise/TLB shootdown for every 8 KB chunk.
+    // hours are all finished grows steadily. Hand it back in 256 KB batches,
+    // rather than a madvise/TLB shootdown per chunk.
     unsafe fn release(&mut self, finished: &[AtomicBool]) {
         let mut c = self.kept;
         while c < self.next && finished[(*c).hour as usize].load(Acquire) {
@@ -324,32 +280,6 @@ unsafe fn put(o: *mut u8, mut x: u32) -> *mut u8 {
     }
 }
 
-// Pin only to a CPU actually permitted by the runner's affinity mask.
-// If the sandbox disallows changing affinity, continue with OS scheduling.
-fn pin_worker(t: usize) {
-    let mut allowed = [0u8; 128];
-    unsafe {
-        if sched_getaffinity(0, allowed.len(), allowed.as_mut_ptr().cast()) != 0 {
-            return;
-        }
-        let mut remaining = t;
-        for (byte, &mask) in allowed.iter().enumerate() {
-            let mut bits = mask;
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                if remaining == 0 {
-                    let mut assigned = [0u8; 128];
-                    assigned[byte] = 1u8 << bit;
-                    let _ = sched_setaffinity(0, assigned.len(), assigned.as_ptr().cast());
-                    return;
-                }
-                remaining -= 1;
-                bits &= bits - 1;
-            }
-        }
-    }
-}
-
 fn main() {
     // With transparent huge pages, a chunk region written only in part could
     // be backed by whole 2 MB pages and count against peak memory.
@@ -364,9 +294,6 @@ fn main() {
         let p = map(size + 4096, 1, ANONYMOUS, -1);
         if size > 0 {
             assert_eq!(mmap(p.cast(), size, 1, 0x12, input, 0), p, "file mmap failed");
-            // Advise sequential access on the file-backed mapping, not the
-            // anonymous chunks used for temporary records.
-            madvise(p.cast(), size, 2); // MADV_SEQUENTIAL
         }
         from_raw_parts(p, size)
     };
@@ -393,7 +320,6 @@ fn main() {
     let barrier = Barrier::new(nthreads);
 
     let work = |t: usize| unsafe {
-        pin_worker(t);
         let (from, to) = (log.as_ptr().add(cut[t]), log.as_ptr().add(cut[t + 1]));
         parsers[t].get().parse(from, to);
 
@@ -420,23 +346,34 @@ fn main() {
 
         let names = &*names.get();
         let ne = names.len();
-        let (mut start, mut errors, mut latency, mut cursor) = (vec![0u32; ne + 1], vec![0u32; ne], vec![], vec![0u32; ne]);
+        let (mut start, mut errors, mut latency, mut cursor, mut flat) =
+            (vec![0u32; ne + 1], vec![0u32; ne], vec![], vec![0u32; ne], Vec::<u64>::new());
         while let h @ 0..HOURS = claim.fetch_add(1, Relaxed) {
-            // Counting sort of the hour's latencies by endpoint rank: count into
-            // start[e + 1], prefix, then place each latency at its group's cursor.
+            // Traverse the mmap chunk chains exactly once. Keep (global rank,
+            // 5xx flag, latency) in a contiguous worker-local buffer; a second
+            // pass over this *flat* buffer scatters latencies by endpoint.
+            // All 32-bit latencies remain exact, including the wide side list.
             start.fill(0);
             errors.fill(0);
+            flat.clear();
             for ps in &parsers {
-                ps.get().each(h, |e, err, _| (start[e + 1], errors[e]) = (start[e + 1] + 1, errors[e] + err as u32));
+                ps.get().each(h, |e, err, l| {
+                    start[e + 1] += 1;
+                    errors[e] += err as u32;
+                    flat.push(((e as u64) << 33) | ((err as u64) << 32) | l as u64);
+                });
             }
             for e in 0..ne {
                 start[e + 1] += start[e];
             }
-            latency.resize(start[ne] as usize, 0);
+            latency.resize(flat.len(), 0);
             cursor.copy_from_slice(&start[..ne]);
-            for ps in &parsers {
-                ps.get().each(h, |e, _, l| (latency[cursor[e] as usize], cursor[e]) = (l, cursor[e] + 1));
+            for &row in &flat {
+                let e = (row >> 33) as usize;
+                latency[cursor[e] as usize] = row as u32;
+                cursor[e] += 1;
             }
+            flat.clear();
             // An hour is finished once its records are copied out; one thread
             // at a time then releases whatever chunks that frees.
             finished[h].store(true, Release);
