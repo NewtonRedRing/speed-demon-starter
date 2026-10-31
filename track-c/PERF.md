@@ -149,3 +149,23 @@ quote-parity scan and its extra prepass worker.
 All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
 strict warnings and all four offline sandbox checks pass. No new official
 score or 80-point result is claimed.
+
+## October 31 speed-first experiment: zero-copy quote-parity scan (draft)
+
+The quote-boundary prepass scans the already-mapped CSV read-only bytes
+directly instead of allocating a 128 KiB buffer and reading each worker shard
+again with `pread`. The parity calculation remains identical; the algorithm
+still counts every quote byte and aligns shard boundaries after unquoted LF.
+The subsequent CSV parsing, exact escaped-field decoding, shared-name
+membership and aggregate computation are unchanged.
+
+An independent primitive test compared parity across 10,000 random byte
+sequences and subranges. A synthetic 96 MiB single-process benchmark with
+11 sequential shard scans measured 13.46 ms for buffered `pread` versus
+5.87 ms for mapped parity, with exact agreement. This measures the prepass
+only, not the full CSV solution or official scoring machine. Actual parallel
+prepass and page-cache behavior may differ.
+
+Before promotion: compile, test all hostile CSV fixtures (including multiline
+quoted notes), verify the official full output hash and compare five/eight
+alternating complete-process runs. **No official score is claimed.**
