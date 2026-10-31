@@ -636,4 +636,5 @@ fn main() {
     });
     let out: String = chunks.into_iter().map(|c| c.into_inner().unwrap()).collect();
     std::fs::write("/out/results.txt", out).expect("/out/results.txt");
+    std::process::exit(0);
 }

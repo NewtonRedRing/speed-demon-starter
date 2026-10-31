@@ -424,4 +424,5 @@ fn main() {
         }
     };
     std::thread::scope(|s| (0..THREADS).for_each(|t| _ = s.spawn(move || work(t))));
+    std::process::exit(0);
 }
