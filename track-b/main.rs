@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::thread;
 use std::arch::x86_64::{_mm_crc32_u64,_mm_crc32_u8,_mm_loadu_si128,_mm_cmpeq_epi8,_mm_movemask_epi8,_mm_set1_epi8,__m128i,_mm_loadl_epi64,_mm_storel_epi64,_mm_cmpgt_epi8,_mm_and_si128,_mm_or_si128};
 use std::os::fd::AsRawFd;use std::ops::Deref;use std::ptr;
-unsafe extern "C"{fn mmap(a:*mut u8,n:usize,p:i32,f:i32,fd:i32,o:isize)->*mut u8;fn munmap(a:*mut u8,n:usize)->i32;}
+unsafe extern "C"{fn mmap(a:*mut u8,n:usize,p:i32,f:i32,fd:i32,o:isize)->*mut u8;fn munmap(a:*mut u8,n:usize)->i32;fn prctl(option:i32,arg2:usize,arg3:usize,arg4:usize,arg5:usize)->i32;}
 struct Mapping{address:usize,len:usize}impl Mapping{fn open(path:&str)->io::Result<Self>{let f=fs::File::open(path)?;let len=f.metadata()?.len()as usize;if len==0{return Ok(Self{address:1,len:0})}let p=unsafe{mmap(ptr::null_mut(),len,1,2,f.as_raw_fd(),0)};if p as isize == -1{return Err(io::Error::last_os_error())}Ok(Self{address:p as usize,len})}}impl Deref for Mapping{type Target=[u8];fn deref(&self)->&[u8]{unsafe{std::slice::from_raw_parts(self.address as*const u8,self.len)}}}impl Drop for Mapping{fn drop(&mut self){if self.len!=0{unsafe{munmap(self.address as*mut u8,self.len);}}}}
 
 const NONE:u32=u32::MAX;
@@ -40,6 +40,7 @@ fn scan(data:&[u8],mut begin:usize,mut end:usize,words:&Words,queries:&[Query],b
  if block!=NONE{flush(&mut out,&member,queries,bools,slow,term_bool,block)}out
 }
 fn main()->io::Result<()>{
+ unsafe{prctl(41,1,0,0,0);}
  let qdata=fs::read_to_string("/data/queries.txt")?;let mut ids:HashMap<Vec<u8>,u32>=HashMap::new();let mut terms=Vec::new();let mut queries=Vec::new();let mut term_bool=Vec::new();let mut next_bool=0u32;
  for line in qdata.lines(){let phrase=line.starts_with("PHRASE \"");let text=if phrase{&line[8..line.len()-1]}else{&line[5..]};let parts:Vec<_>=text.split(' ').collect();let mut q=Query{phrase,words:Vec::new(),ops:Vec::new()};for(i,part)in parts.iter().enumerate(){if!phrase&&i%2==1{q.ops.push(part.as_bytes()[0]);continue}let key=part.as_bytes().to_vec();let id=if let Some(&id)=ids.get(&key){id}else{let id=terms.len()as u32;ids.insert(key.clone(),id);terms.push(key);term_bool.push(NONE);id};q.words.push(id);if!phrase&&term_bool[id as usize]==NONE{term_bool[id as usize]=next_bool;next_bool+=1}}
   queries.push(q)}
