@@ -109,24 +109,39 @@ fn hash(k: Key) -> usize {
     (h ^ h >> 29) as usize
 }
 
-/// Query terms to dense ids: open addressing, each slot the top 32 hash bits
-/// above id + 1 (0 if free), so a mismatch rarely loads a key. A token that
-/// is no term gets the id one past the last term, so callers need no branch.
+/// Query terms to dense ids. The hot negative-lookup path probes one-byte
+/// fingerprints in a compact control table; the parallel id/key arrays are
+/// touched only on a fingerprint match. With ~76k terms this keeps the miss
+/// filter around L2 size instead of reading an 8-byte multi-megabyte slot on
+/// every one of the corpus's ~36M tokens. Equality is still the complete Key.
+const EMPTY: u8 = 0x80;
 struct Terms {
-    slot: Vec<u64>,
+    ctrl: Vec<u8>,
+    ids: Vec<u32>, // id + 1, meaningful only when ctrl != EMPTY
     keys: Vec<Key>,
 }
 
 impl Terms {
+    #[inline(always)]
+    fn tag(h: usize) -> u8 { (h >> (usize::BITS - 7)) as u8 }
+
+    #[inline(always)]
     fn find(&self, k: Key, h: usize) -> u32 {
-        let mask = self.slot.len() - 1;
+        let mask = self.ctrl.len() - 1;
+        let tag = Self::tag(h);
         let mut i = h & mask;
         loop {
-            match self.slot[i] {
-                0 => return self.keys.len() as u32,
-                s if s >> 32 == h as u64 >> 32 && self.keys[s as u32 as usize - 1] == k => return s as u32 - 1,
-                _ => i = (i + 1) & mask,
+            let c = unsafe { *self.ctrl.get_unchecked(i) };
+            if c == EMPTY {
+                return self.keys.len() as u32;
             }
+            if c == tag {
+                let id = unsafe { *self.ids.get_unchecked(i) } - 1;
+                if unsafe { *self.keys.get_unchecked(id as usize) } == k {
+                    return id;
+                }
+            }
+            i = (i + 1) & mask;
         }
     }
 
@@ -137,25 +152,35 @@ impl Terms {
             keys[n as usize] = k;
         }
         self.keys = keys;
-        for s in self.slot.iter_mut().filter(|s| **s != 0) {
-            *s = *s >> 32 << 32 | (new[*s as u32 as usize - 1] + 1) as u64;
+        for (c, id) in self.ctrl.iter().zip(&mut self.ids) {
+            if *c != EMPTY {
+                *id = new[*id as usize - 1] + 1;
+            }
         }
     }
 
     fn insert(&mut self, term: &[u8]) -> u32 {
         let k = query_key(term);
-        let (h, mask) = (hash(k), self.slot.len() - 1);
+        let h = hash(k);
+        let tag = Self::tag(h);
+        let mask = self.ctrl.len() - 1;
         let mut i = h & mask;
-        while self.slot[i] != 0 {
-            let s = self.slot[i];
-            if s >> 32 == h as u64 >> 32 && self.keys[s as u32 as usize - 1] == k {
-                return s as u32 - 1;
+        loop {
+            let c = self.ctrl[i];
+            if c == EMPTY {
+                self.keys.push(k);
+                self.ctrl[i] = tag;
+                self.ids[i] = self.keys.len() as u32;
+                return self.keys.len() as u32 - 1;
+            }
+            if c == tag {
+                let id = self.ids[i] - 1;
+                if self.keys[id as usize] == k {
+                    return id;
+                }
             }
             i = (i + 1) & mask;
         }
-        self.keys.push(k);
-        self.slot[i] = (h as u64 >> 32) << 32 | self.keys.len() as u64;
-        self.keys.len() as u32 - 1
     }
 }
 
@@ -205,7 +230,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
             if len <= 17 {
                 let k = token_key(p.add(s as usize), len as usize);
                 let h = hash(k);
-                _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h & (t.slot.len() - 1)).cast());
+                _mm_prefetch::<_MM_HINT_T0>(t.ctrl.as_ptr().add(h & (t.ctrl.len() - 1)).cast());
                 if n >= LAG { look(&ring[n % LAG]); }
                 (ring[n % LAG], n) = ((k, h, p.add(s as usize), len as usize), n + 1);
             }
@@ -433,8 +458,12 @@ fn main() {
     // PR_SET_THP_DISABLE: the box backs part-written regions with whole 2 MB pages.
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) };
     let qtext = map("/data/queries.txt");
-    let slots = vec![0; (qtext.len() / 8).next_power_of_two()];
-    let mut terms = Terms { slot: slots, keys: Vec::with_capacity(qtext.len() / 16) };
+    let table = (qtext.len() / 8).next_power_of_two();
+    let mut terms = Terms {
+        ctrl: vec![EMPTY; table],
+        ids: vec![0; table],
+        keys: Vec::with_capacity(qtext.len() / 16),
+    };
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
