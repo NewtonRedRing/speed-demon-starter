@@ -288,3 +288,10 @@ This is a code review and engineering change, **not** a claimed performance
 improvement. No new local benchmark or seed-1 hash was run in this environment;
 the live board must independently validate the pushed commit. No run ID or
 score is fabricated.
+
+## 2026-10-31: Paired-decimal formatting
+
+Replaced per-digit decimal emission with a compile-time 100-pair lookup to
+reduce division work in the output stage. A local Python equivalent passed
+200,014 integer cases, including 0 and u32::MAX. Rust build, production hash,
+local speed and official scoring are not verified in this session.

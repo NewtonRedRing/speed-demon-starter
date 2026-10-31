@@ -20,8 +20,8 @@
 //!   workers claim from a counter (cores differ in speed). A chunk cut is
 //!   the first LF that is followed by a digit or a BOM, which spec 2.2
 //!   makes a record boundary: names are letters and notes lowercase words.
-//! - The last few KB are copied behind zero padding so the SIMD loads never
-//!   run past the mapping.
+//! - The mapped file has a spare zero page: even the final record is parsed
+//!   in place rather than being copied into a temporary tail buffer.
 
 use std::arch::x86_64::{
     __m128i, __m256i, _mm_clmulepi64_si128, _mm_crc32_u64, _mm_cvtsi128_si64,
@@ -47,9 +47,13 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
     if len == 0 {
         return Ok(&[]);
     }
-    // PROT_READ = 1, MAP_PRIVATE = 2.
-    let p = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, file.as_raw_fd(), 0) };
+    // Reserve enough anonymous space for the file and a zero-filled guard.
+    // The MAP_FIXED file overlay replaces only its own page-rounded prefix.
+    let p = unsafe { mmap(std::ptr::null_mut(), len + 8192, 1, 0x22, -1, 0) };
     if p as isize == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { mmap(p, len, 1, 0x12, file.as_raw_fd(), 0) } != p {
         return Err(std::io::Error::last_os_error());
     }
     Ok(unsafe { std::slice::from_raw_parts(p, len) })
@@ -158,7 +162,6 @@ const NAME_WORDS: usize = NAME_SLOTS / 64;
 const NAME_ARENA: usize = 1 << 20;
 const OCCUPIED: u64 = 1 << 63;
 const BUSY: u64 = u64::MAX;
-const LONG: u64 = 1 << 63;
 
 #[repr(C, align(16))]
 struct NameSlot {
@@ -192,7 +195,7 @@ fn byte_mask(n: usize) -> u64 {
 }
 
 #[inline(always)]
-unsafe fn name_words(p: usize, len: usize, h: u64) -> (u64, u64) {
+unsafe fn name_words(p: usize, len: usize) -> (u64, u64) {
     let q = p as *const u8;
     let lo = q.cast::<u64>().read_unaligned() & byte_mask(len);
     let hi = if len <= 8 {
@@ -200,7 +203,8 @@ unsafe fn name_words(p: usize, len: usize, h: u64) -> (u64, u64) {
     } else if len <= 16 {
         q.add(8).cast::<u64>().read_unaligned() & byte_mask(len - 8)
     } else {
-        (h & !LONG) | LONG
+        // Exact bytes 8..16; the arena compares bytes 16..len.
+        q.add(8).cast::<u64>().read_unaligned()
     };
     (lo, hi)
 }
@@ -232,7 +236,7 @@ impl Names {
 
     #[inline(always)]
     fn number(&self, h: u64, p: usize, len: usize) -> usize {
-        let (raw_lo, key_hi) = unsafe { name_words(p, len, h) };
+        let (raw_lo, key_hi) = unsafe { name_words(p, len) };
         let ready_lo = raw_lo | OCCUPIED;
         let mut i = h as usize & (NAME_SLOTS - 1);
         loop {
@@ -587,8 +591,8 @@ fn cut(data: &[u8], from: usize) -> usize {
     (i + 1).min(data.len())
 }
 
-/// Bytes at the end of the file that are copied behind padding and parsed
-/// last, so no chunk's SIMD loads can run past the mapping.
+/// The final bytes are parsed in place, backed by a spare mapped zero page
+/// for vector lookahead past the real EOF.
 const TAIL: usize = 8192;
 const CHUNKS_PER_THREAD: usize = 32;
 
@@ -636,14 +640,14 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
             .collect()
     });
 
-    let mut tail = data[tail_at..].to_vec();
-    tail.resize(tail.len() + 64, 0);
+    // Every caller maps the input with at least 64 accessible padding bytes.
+    let padded = unsafe { std::slice::from_raw_parts(data.as_ptr(), data.len() + 64) };
     let mut groups = vec![Agg::new(); n_groups];
     let mut sightings = Sightings::new(names);
     parse_records(
-        &tail,
-        0,
-        data.len() - tail_at,
+        padded,
+        tail_at,
+        data.len(),
         regions,
         &mut sightings,
         &mut groups,

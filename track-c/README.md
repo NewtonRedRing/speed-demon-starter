@@ -19,3 +19,7 @@ Dependencies: none.
 
 With another 24 hours: profile structural CSV scanning and exact-name cache
 misses on the scoring CPU, then tune only exact full-process improvements.
+
+Long names are compared byte-for-byte even on hash collisions. The input
+mapping provides a spare zero page so the final records are parsed without a
+temporary copy. Standard Rust source and the offline PGO image are retained.

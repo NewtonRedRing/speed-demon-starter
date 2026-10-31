@@ -260,18 +260,38 @@ impl Parser {
     }
 }
 
-// Writes x in decimal at o, returns the end.
+// Pair lookup halves the number of decimal divisions in the output loop.
+const PAIRS: [u8; 200] = {
+    let mut table = [0u8; 200];
+    let mut n = 0;
+    while n < 100 {
+        table[2 * n] = b'0' + (n / 10) as u8;
+        table[2 * n + 1] = b'0' + (n % 10) as u8;
+        n += 1;
+    }
+    table
+};
 unsafe fn put(o: *mut u8, mut x: u32) -> *mut u8 {
     let end = o.add(width(x));
     let mut q = end;
-    loop {
-        q = q.sub(1);
-        *q = b'0' + (x % 10) as u8;
-        x /= 10;
-        if x == 0 {
-            return end;
-        }
+    while x >= 100 {
+        let i = 2 * (x % 100) as usize;
+        q = q.sub(2);
+        *q = PAIRS[i];
+        *q.add(1) = PAIRS[i + 1];
+        x /= 100;
     }
+    if x >= 10 {
+        let i = 2 * x as usize;
+        q = q.sub(2);
+        *q = PAIRS[i];
+        *q.add(1) = PAIRS[i + 1];
+    } else {
+        q = q.sub(1);
+        *q = b'0' + x as u8;
+    }
+    debug_assert_eq!(q, o);
+    end
 }
 
 fn main() {

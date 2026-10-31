@@ -149,3 +149,14 @@ quote-parity scan and its extra prepass worker.
 All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
 strict warnings and all four offline sandbox checks pass. No new official
 score or 80-point result is claimed.
+
+## 2026-10-31: Exact long-name equality and mapped EOF
+
+Names over 16 bytes now store their actual bytes 8..16 in the second table
+word. Combined with their first eight bytes and the existing arena comparison
+of bytes 16..end, the equality decision is exact even when CRC hashes collide.
+The file mapping includes a spare zero-filled page. The final segment is
+parsed in place without a copied tail buffer; 64-byte SIMD loads remain
+within the reserved mapping. The PGO image and its pinned digests are retained.
+This change is not yet supported by a new Rust build, official hash or measured
+speed improvement; these remain to validate on the board.
