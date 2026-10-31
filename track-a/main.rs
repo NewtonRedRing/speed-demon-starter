@@ -77,6 +77,18 @@ unsafe fn eq32(p: *const u8, c: u8) -> u32 {
     _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c as i8))) as u32
 }
 
+#[inline(always)]
+unsafe fn markers64(p: *const u8) -> (u64, u64) {
+    let half = |q: *const u8| {
+        let v = _mm256_loadu_si256(q.cast());
+        let sp = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b' ' as i8))) as u32 as u64;
+        let nl = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'\n' as i8))) as u32 as u64;
+        (sp, nl)
+    };
+    let ((s0, n0), (s1, n1)) = (half(p), half(p.add(32)));
+    (s0 | s1 << 32, n0 | n1 << 32)
+}
+
 // The byte the window found, or the first c from s on when the line runs past
 // the window (one is known to follow).
 unsafe fn find(in_window: bool, at: *const u8, mut s: *const u8, c: u8) -> *const u8 {
@@ -248,8 +260,7 @@ impl Parser {
             // Spaces and newlines in the 64 bytes after the timestamp. Only an
             // endpoint near its 125-byte maximum pushes past the window.
             let m = p.add(28);
-            let sp = eq32(m, b' ') as u64 | (eq32(m.add(32), b' ') as u64) << 32;
-            let nl = eq32(m, b'\n') as u64 | (eq32(m.add(32), b'\n') as u64) << 32;
+            let (sp, nl) = markers64(m);
             let at = |bits: u64| m.add(bits.trailing_zeros() as usize);
             let name = at(sp).add(1);
             let name_end = find(nl != 0, at(sp & (sp - 1)), name, b' ');
