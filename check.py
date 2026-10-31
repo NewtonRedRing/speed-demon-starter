@@ -29,6 +29,10 @@ OUTPUT = {"a": "summary.txt", "b": "results.txt", "c": "aggregates.txt", "d": "d
 ALLOWLIST_URL = "https://speeddemon.dev/allowlist.json"
 IMAGE_MAX_BYTES = 2 * 1024 ** 3
 STAGING_IMAGE = "python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962"
+# Defaults match the official scoring harness. On a local 4-core CI/WSL
+# machine you can override only CPU pinning, never the dataset or output hash.
+CPUSET_CPUS = os.environ.get("SPEED_DEMON_CPUSET_CPUS", "0-11")
+CPUSET_MEMS = os.environ.get("SPEED_DEMON_CPUSET_MEMS", "0")
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -140,7 +144,7 @@ def run_with_named_volumes(track, tag, data, out):
         checked_docker(["rm", "--force", stager], "could not remove the data-transfer container")
         containers.remove(stager)
 
-        cmd = ["docker", "run", "--name", runner, "--cpuset-cpus=0-11", "--cpuset-mems=0",
+        cmd = ["docker", "run", "--name", runner, f"--cpuset-cpus={CPUSET_CPUS}", f"--cpuset-mems={CPUSET_MEMS}",
                "--network=none", "--read-only",
                "--tmpfs", "/tmp:rw,size=1g,exec", "--memory=8g", "--memory-swap=8g",
                "--pids-limit=512", "--cap-drop=ALL", "--security-opt=no-new-privileges",
@@ -172,7 +176,7 @@ def run(track, tag, data):
     if os.name == "nt":
         return run_with_named_volumes(track, tag, data, out)
 
-    cmd = ["docker", "run", "--rm", "--cpuset-cpus=0-11", "--cpuset-mems=0",
+    cmd = ["docker", "run", "--rm", f"--cpuset-cpus={CPUSET_CPUS}", f"--cpuset-mems={CPUSET_MEMS}",
            "--network=none", "--read-only", "--tmpfs", "/tmp:rw,size=1g,exec",
            "--memory=8g", "--memory-swap=8g", "--pids-limit=512", "--cap-drop=ALL",
            "--security-opt=no-new-privileges", "--user", "65534:65534", "--ulimit", "nofile=8192:8192",
@@ -242,6 +246,12 @@ def main():
         fail("docker is not on PATH (start Docker Desktop and enable WSL integration)")
 
     tracks = sorted(OUTPUT) if args.track == "all" else [args.track]
+    if (CPUSET_CPUS, CPUSET_MEMS) != ("0-11", "0"):
+        print(
+            f"NOTE  local CPU pinning differs from the official runner: "
+            f"cpus={CPUSET_CPUS} mems={CPUSET_MEMS}. "
+            "Dataset/output verification is still exact; runtime is not comparable."
+        )
     if args.expected:
         official = official_data.TRACKS[args.track]["sha256"]
         if args.expected.strip().lower() != official:
