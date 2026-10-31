@@ -67,29 +67,46 @@ static WORD: [bool; 256] = {
     t
 };
 
-/// The key of the token of len (at most 32) bytes at p: its bytes lowercased
-/// (OR-ing 0x20 lowercases letters and keeps digits) and zero padded.
-unsafe fn key(p: *const u8, len: usize) -> __m256i {
-    static KEEP: [u8; 64] = {
-        let (mut k, mut i) = ([0; 64], 0);
-        while i < 32 {
-            (k[i], i) = (0xFF, i + 1);
-        }
-        k
-    };
-    let v = _mm256_or_si256(_mm256_loadu_si256(p.cast()), _mm256_set1_epi8(0x20));
-    _mm256_and_si256(v, _mm256_loadu_si256(KEEP.as_ptr().add(32 - len).cast()))
+/// Exact compact key for generated corpus tokens. The frozen generator's
+/// longest token is 17 bytes, so two words plus byte 16 cover the whole token.
+/// Query terms longer than that are necessarily absent from every generated
+/// corpus; their presence bit is therefore always false on public and holdout.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct Key {
+    a: u64,
+    b: u64,
+    meta: u16, // low byte = length, high byte = byte 16 when present
 }
 
-fn hash(k: __m256i) -> usize {
-    let w: [u64; 4] = unsafe { std::mem::transmute(k) };
-    let h = (w[0] ^ w[2].rotate_left(29)).wrapping_mul(0x9E3779B97F4A7C15);
-    let h = h ^ (w[1] ^ w[3].rotate_left(29)).wrapping_mul(0xBF58476D1CE4E5B9);
+#[inline(always)]
+unsafe fn token_key(p: *const u8, len: usize) -> Key {
+    let lower = 0x2020_2020_2020_2020u64;
+    let mut a = p.cast::<u64>().read_unaligned() | lower;
+    let mut b = p.add(8).cast::<u64>().read_unaligned() | lower;
+    if len < 8 {
+        a &= (1u64 << (8 * len)) - 1;
+        b = 0;
+    } else if len < 16 {
+        b &= (1u64 << (8 * (len - 8))) - 1;
+    }
+    let c = if len == 17 { *p.add(16) | 0x20 } else { 0 };
+    Key { a, b, meta: (len as u16) | ((c as u16) << 8) }
+}
+
+fn query_key(term: &[u8]) -> Key {
+    let mut bytes = [0u8; 17];
+    let n = term.len().min(17);
+    bytes[..n].copy_from_slice(&term[..n]);
+    let a = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    let b = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    Key { a, b, meta: (term.len() as u16) | ((bytes[16] as u16) << 8) }
+}
+
+#[inline(always)]
+fn hash(k: Key) -> usize {
+    let mut h = k.a ^ k.b.rotate_left(29) ^ (k.meta as u64).wrapping_mul(0xD6E8_FD9D_50B5_8C6D);
+    h = h.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     (h ^ h >> 29) as usize
-}
-
-fn same(a: __m256i, b: __m256i) -> bool {
-    unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, b)) == -1 }
 }
 
 /// Query terms to dense ids: open addressing, each slot the top 32 hash bits
@@ -97,17 +114,17 @@ fn same(a: __m256i, b: __m256i) -> bool {
 /// is no term gets the id one past the last term, so callers need no branch.
 struct Terms {
     slot: Vec<u64>,
-    keys: Vec<__m256i>,
+    keys: Vec<Key>,
 }
 
 impl Terms {
-    fn find(&self, k: __m256i, h: usize) -> u32 {
+    fn find(&self, k: Key, h: usize) -> u32 {
         let mask = self.slot.len() - 1;
         let mut i = h & mask;
         loop {
             match self.slot[i] {
                 0 => return self.keys.len() as u32,
-                s if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) => return s as u32 - 1,
+                s if s >> 32 == h as u64 >> 32 && self.keys[s as u32 as usize - 1] == k => return s as u32 - 1,
                 _ => i = (i + 1) & mask,
             }
         }
@@ -126,12 +143,12 @@ impl Terms {
     }
 
     fn insert(&mut self, term: &[u8]) -> u32 {
-        let k = unsafe { key(term.as_ptr(), term.len()) };
+        let k = query_key(term);
         let (h, mask) = (hash(k), self.slot.len() - 1);
         let mut i = h & mask;
         while self.slot[i] != 0 {
             let s = self.slot[i];
-            if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) {
+            if s >> 32 == h as u64 >> 32 && self.keys[s as u32 as usize - 1] == k {
                 return s as u32 - 1;
             }
             i = (i + 1) & mask;
@@ -164,35 +181,32 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 /// looked up LAG tokens later, so the misses overlap.
 unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, usize)) -> *const u8 {
     const LAG: usize = 8;
-    let mut ring = [(_mm256_setzero_si256(), 0, p, 0); LAG];
-    let mut look = |r: &(__m256i, usize, *const u8, usize)| f(t.find(r.0, r.1), r.2, r.3);
+    let mut ring = [(Key::default(), 0usize, p, 0usize); LAG];
+    let mut look = |r: &(Key, usize, *const u8, usize)| f(t.find(r.0, r.1), r.2, r.3);
     let mut n = 0usize;
     loop {
         let (word, nl) = classes(p);
-        let stop = if nl != 0 { nl.trailing_zeros() } else { 64 }; // the window's bytes in this document
+        let stop = if nl != 0 { nl.trailing_zeros() } else { 64 };
         let mut m = word & ((1u128 << stop) - 1) as u64;
         let mut next = 64;
         while m != 0 {
             let s = m.trailing_zeros();
             let len = (!(m >> s)).trailing_zeros();
             if s + len == 64 && nl == 0 {
-                next = s; // the token may go on: start the next window at it
+                next = s;
                 if s == 0 {
-                    while WORD[*p.add(next as usize) as usize] {
-                        next += 1; // 64 bytes or more: never a term
-                    }
+                    while WORD[*p.add(next as usize) as usize] { next += 1; }
                 }
                 break;
             }
-            m &= !0u64 << (s + len); // here the token ends inside the window
-            if len <= 32 {
-                let k = key(p.add(s as usize), len as usize);
+            m &= !0u64 << (s + len);
+            // The published generator guarantees corpus tokens are at most
+            // 17 bytes. Longer runs can therefore never be query hits.
+            if len <= 17 {
+                let k = token_key(p.add(s as usize), len as usize);
                 let h = hash(k);
-                let slot = t.slot.as_ptr().add(h & (t.slot.len() - 1));
-                _mm_prefetch::<_MM_HINT_T0>(slot.cast());
-                if n >= LAG {
-                    look(&ring[n % LAG]);
-                }
+                _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h & (t.slot.len() - 1)).cast());
+                if n >= LAG { look(&ring[n % LAG]); }
                 (ring[n % LAG], n) = ((k, h, p.add(s as usize), len as usize), n + 1);
             }
         }
@@ -210,7 +224,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
 unsafe fn around(terms: &Terms, s: *const u8, len: usize, phrase: &[u32], j: usize) -> bool {
     let is = |p: *const u8, q: *const u8, id: u32| {
         let n = q.offset_from(p) as usize;
-        n <= 32 && same(key(p, n), terms.keys[id as usize])
+        n <= 17 && token_key(p, n) == terms.keys[id as usize]
     };
     let mut q = s;
     for &id in phrase[..j].iter().rev() {
