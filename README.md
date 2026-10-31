@@ -32,22 +32,25 @@ python3 official_data.py download
 # Independently verify every downloaded byte against the organizer's hashes.
 python3 official_data.py verify
 
-# Build four submission Dockerfiles OFFLINE; run all official inputs and
-# require an exact match with the four official expected output SHA-256s.
+# Build four submission Dockerfiles OFFLINE; run all official inputs.
+# Each track runs 5 times and MUST match its official output SHA-256 every time.
 python3 check.py all
 ```
 
 For rapid iteration on just Track A, still using its complete original input:
 
 ```bash
-python3 check.py a
-python3 check.py a --skip-build      # run the already-built image again
+python3 check.py a                    # 5 complete official full-data runs
+python3 check.py a --runs 1           # quick iteration, still official data
+python3 check.py a --skip-build       # repeat without rebuilding
 ```
 
 Similarly, `python3 check.py b`, `c`, or `d`. The checker downloads a
 missing official input automatically, verifies input SHA-256, runs the official
 submission Dockerfile in a no-network, read-only-root sandbox, requires
-exactly one output file, and verifies the **published official output SHA-256**.
+exactly one output file, and verifies the **published official output SHA-256**
+on every run (five runs by default, discarding fastest and slowest local times
+for a non-authoritative trimmed mean).
 A `--data` directory is accepted **only when every file is byte-identical
 to the original full public dataset**. Passing a synthetic or alternative
 `--expected` digest fails rather than silently accepting the wrong result.
