@@ -285,21 +285,25 @@ def campaign(track, args, report):
         finalists.sort(key=lambda r: r["log_proxy"], reverse=True)
         final_base = result_record(base_key,
             measure(original, runner, expected, args.final_reps))
-        baseline_score = min(first_base["log_proxy"], final_base["log_proxy"])
+        # Compare against the BETTER baseline reading: drift must not manufacture gains.
+        baseline_score = max(first_base["log_proxy"], final_base["log_proxy"])
         best = finalists[0] if finalists else None
         report[track].update({
             "baseline_before": first_base,
             "baseline_after": final_base,
             "finalists": finalists,
             "winner": best,
-            "note": "Local runtime/RSS proxy only; NOT official score.",
+            "note": ("Local runtime/RSS proxy only; NOT official score. "
+                     "Source lines and dependency axes are constant. "
+                     "Run official cgroup benchmark before promotion."),
             "status": "completed",
         })
         if best:
             # The tool must not promote a noise-sized or incorrect result.
             gain = 100 * (math.exp(best["log_proxy"] - baseline_score) - 1)
             report[track]["relative_K_gain_pct_proxy"] = gain
-            if args.apply and gain > 1 and best["runs"] >= args.final_reps:
+            if (args.apply and gain > 1 and best["runs"] >= args.final_reps
+                    and (best["workers"], best["param"], best["style"]) != base_key):
                 apply_winner(track, best)
                 report[track]["applied_to_dockerfile"] = True
             else:
