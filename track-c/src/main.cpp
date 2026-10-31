@@ -64,15 +64,9 @@ public:
         released = stop;
     }
     unsigned parity(std::size_t begin, std::size_t end) const {
-        std::vector<char> buffer(128 * 1024);
-        unsigned parity = 0;
-        while (begin < end) {
-            const auto got = pread(fd_, buffer.data(), std::min(buffer.size(), end - begin), static_cast<off_t>(begin));
-            if (got <= 0) throw std::runtime_error("cannot read CSV quote parity");
-            parity ^= quote_parity(buffer.data(), buffer.data() + got);
-            begin += static_cast<std::size_t>(got);
-        }
-        return parity;
+        // The file is already mapped and its pages are prewarmed by the harness.
+        // Scan read-only mapped bytes directly instead of pread/copying each shard.
+        return quote_parity(data_ + begin, data_ + end);
     }
 };
 
