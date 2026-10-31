@@ -49,12 +49,13 @@ unsafe fn map(len: usize, prot: i32, flags: i32, fd: i32) -> *mut u8 {
 
 const THREADS: usize = 12;
 const HOURS: usize = 72; // 2026-10-30T18:00Z to 2026-11-02T17:59:59Z
-// A record packs the latency above a 13-bit key: a 12-bit shared endpoint
-// slot and the 5xx flag. The shared slot removes the per-thread id merge.
-const KEY_BITS: u32 = 13;
-const ERR: u32 = 1 << 12;
+// A record packs the latency above a 12-bit key: an 11-bit local endpoint id
+// and the 5xx flag. Latencies of 2^20 us or more (about 1% of lines) do not
+// fit and are kept on a side list with their key instead.
+const KEY_BITS: u32 = 12;
+const ERR: u32 = 1 << 11;
 const ID_MASK: u32 = ERR - 1;
-const PACKED_MAX: u32 = 1 << 19;
+const PACKED_MAX: u32 = 1 << 20;
 
 // State the threads share, each touching its own part or waiting at a barrier
 // while one thread writes.
@@ -75,18 +76,6 @@ impl<T> Shared<T> {
 unsafe fn eq32(p: *const u8, c: u8) -> u32 {
     let v = _mm256_loadu_si256(p.cast());
     _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c as i8))) as u32
-}
-
-#[inline(always)]
-unsafe fn markers64(p: *const u8) -> (u64, u64) {
-    let half = |q: *const u8| {
-        let v = _mm256_loadu_si256(q.cast());
-        let sp = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b' ' as i8))) as u32 as u64;
-        let nl = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'\n' as i8))) as u32 as u64;
-        (sp, nl)
-    };
-    let ((s0, n0), (s1, n1)) = (half(p), half(p.add(32)));
-    (s0 | s1 << 32, n0 | n1 << 32)
 }
 
 // The byte the window found, or the first c from s on when the line runs past
@@ -121,105 +110,53 @@ unsafe fn decode(end: *const u8, len: usize) -> u32 {
     (high * 100_000_000 + _mm_extract_epi32::<1>(v) as u64) as u32
 }
 
-// One exact lock-free endpoint table shared by all workers. A slot is the
-// endpoint id. New names are copied into one compact arena and published only
-// after the bytes are ready; hashes select candidates but full bytes decide
-// equality.
-struct NameArena {
-    bytes: Vec<u8>,
-    ptr: *mut u8,
-}
-unsafe impl Send for NameArena {}
-unsafe impl Sync for NameArena {}
-impl NameArena {
-    fn new(n: usize) -> Self {
-        let mut bytes = vec![0u8; n];
-        let ptr = bytes.as_mut_ptr();
-        Self { bytes, ptr }
-    }
-    #[inline(always)]
-    unsafe fn write(&self, off: usize, src: *const u8, n: usize) {
-        std::ptr::copy_nonoverlapping(src, self.ptr.add(off), n);
-    }
-    #[inline(always)]
-    unsafe fn slice(&self, off: usize, n: usize) -> &[u8] {
-        std::slice::from_raw_parts(self.ptr.add(off), n)
-    }
+// Endpoint names to dense ids in first-seen order. Open addressing on a CRC of
+// the name's first and last eight bytes (masked when the name is shorter; the
+// rest of the line keeps both loads in bounds). Names point into the log.
+struct Interner {
+    names: Vec<&'static [u8]>,
+    slot: Vec<u16>, // id + 1 per slot, 0 if free
 }
 
-struct Names {
-    slot: Vec<AtomicU64>,
-    arena: NameArena,
-}
-
-impl Names {
-    const SLOTS: usize = 1 << 12;
-    const CELL: usize = 128;
-    const BUSY: u64 = u64::MAX;
+impl Interner {
+    const SLOTS: usize = 1 << 12; // ids fit 11 bits; a seed has 1,842
 
     fn new() -> Self {
-        Self {
-            slot: (0..Self::SLOTS).map(|_| AtomicU64::new(0)).collect(),
-            arena: NameArena::new(Self::SLOTS * Self::CELL + 32),
-        }
+        Interner { names: vec![], slot: vec![0; Self::SLOTS] }
     }
 
-    #[inline(always)]
-    fn name(&self, v: u64) -> &[u8] {
-        let off = (v as u32).wrapping_sub(1) as usize;
-        let len = (v >> 32) as usize;
-        unsafe { self.arena.slice(off, len) }
-    }
-
-    #[inline(always)]
-    fn same(a: &[u8], b: &[u8]) -> bool {
-        if a.len() != b.len() { return false; }
-        if a.len() <= 32 {
-            unsafe {
-                let va = _mm256_loadu_si256(a.as_ptr().cast());
-                let vb = _mm256_loadu_si256(b.as_ptr().cast());
-                let eq = _mm256_movemask_epi8(_mm256_cmpeq_epi8(va, vb)) as u32;
-                return (!eq & (!0u32 >> (32 - a.len()))) == 0;
-            }
-        }
-        a == b
-    }
-
-    #[inline(always)]
-    fn id(&self, s: &[u8]) -> u32 {
+    fn id(&mut self, s: &'static [u8]) -> u32 {
         let n = s.len();
-        let a = if n >= 8 {
-            unsafe { s.as_ptr().cast::<u64>().read_unaligned() }
-        } else {
-            let mut x = 0u64;
-            unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), (&mut x as *mut u64).cast(), n) };
-            x
-        };
-        let b = if n >= 8 {
-            unsafe { s.as_ptr().add(n - 8).cast::<u64>().read_unaligned() }
-        } else { 0 };
+        let word = |i: usize| unsafe { s.as_ptr().add(i).cast::<u64>().read_unaligned() };
+        let a = word(0) & if n >= 8 { !0 } else { (1 << (8 * n)) - 1 };
+        let b = if n >= 8 { word(n - 8) } else { 0 };
         let mut i = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as usize;
-        for _ in 0..Self::SLOTS {
-            let slot = i & (Self::SLOTS - 1);
-            let mut v = self.slot[slot].load(Acquire);
-            while v == Self::BUSY {
-                std::hint::spin_loop();
-                v = self.slot[slot].load(Acquire);
+        loop {
+            let id = &mut self.slot[i % Self::SLOTS];
+            if *id == 0 {
+                assert!(self.names.len() < Self::SLOTS / 2, "too many endpoints"); // 11 bits
+                self.names.push(s);
+                *id = self.names.len() as u16;
             }
-            if v == 0 {
-                if self.slot[slot].compare_exchange(0, Self::BUSY, Acquire, Acquire).is_ok() {
-                    let off = slot * Self::CELL;
-                    unsafe { self.arena.write(off, s.as_ptr(), n); }
-                    let new = (n as u64) << 32 | (off as u64 + 1);
-                    self.slot[slot].store(new, Release);
-                    return slot as u32;
-                }
-                continue;
+            if same(self.names[*id as usize - 1], s) {
+                return *id as u32 - 1;
             }
-            if Self::same(self.name(v), s) { return slot as u32; }
             i += 1;
         }
-        panic!("endpoint table full");
+    }
+}
+
+// Both names point into the log, where 32 bytes can always be read (the rest
+// of the line and the spare page follow), so a name of up to 32 bytes is
+// compared in one step.
+fn same(x: &[u8], s: &[u8]) -> bool {
+    if x.len() != s.len() || s.len() > 32 {
+        return x == s;
+    }
+    unsafe {
+        let v = |p: &[u8]| _mm256_loadu_si256(p.as_ptr().cast());
+        let eq = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v(x), v(s))) as u32;
+        !eq & (!0u32 >> (32 - s.len())) == 0
     }
 }
 
@@ -237,10 +174,12 @@ struct Chunk {
 }
 
 struct Parser {
+    local: Interner,
     last: [*mut Chunk; HOURS],
-    wide: Vec<Vec<(u32, u32)>>,
-    next: *mut Chunk,
-    kept: *mut Chunk,
+    wide: Vec<Vec<(u32, u32)>>, // (latency, key) of the long ones
+    rank: Vec<u32>,             // local id -> global rank
+    next: *mut Chunk,           // where the next chunk is carved
+    kept: *mut Chunk,           // the first chunk not yet released
 }
 
 impl Parser {
@@ -250,10 +189,10 @@ impl Parser {
         let bytes = (len / 40 / CAP + 1 + HOURS) * size_of::<Chunk>();
         let next = unsafe { map(bytes, READ_WRITE, ANONYMOUS, -1).cast() };
         let wide = vec![vec![]; HOURS];
-        Parser { last: [null_mut(); HOURS], wide, next, kept: next }
+        Parser { local: Interner::new(), last: [null_mut(); HOURS], wide, rank: vec![], next, kept: next }
     }
 
-    unsafe fn parse(&mut self, endpoints: &Names, mut p: *const u8, end: *const u8) {
+    unsafe fn parse(&mut self, mut p: *const u8, end: *const u8) {
         while p < end {
             // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
             let d = |i: usize| (*p.add(i) - b'0') as usize;
@@ -263,13 +202,14 @@ impl Parser {
             // Spaces and newlines in the 64 bytes after the timestamp. Only an
             // endpoint near its 125-byte maximum pushes past the window.
             let m = p.add(28);
-            let (sp, nl) = markers64(m);
+            let sp = eq32(m, b' ') as u64 | (eq32(m.add(32), b' ') as u64) << 32;
+            let nl = eq32(m, b'\n') as u64 | (eq32(m.add(32), b'\n') as u64) << 32;
             let at = |bits: u64| m.add(bits.trailing_zeros() as usize);
             let name = at(sp).add(1);
             let name_end = find(nl != 0, at(sp & (sp - 1)), name, b' ');
             let eol = find(nl != 0, at(nl), name_end.add(5), b'\n');
             let name_bytes = from_raw_parts(name, name_end.offset_from(name) as usize);
-            let key = endpoints.id(name_bytes) | ERR * (*name_end.add(1) == b'5') as u32;
+            let key = self.local.id(name_bytes) | ERR * (*name_end.add(1) == b'5') as u32;
             let latency = decode(eol, eol.offset_from(name_end) as usize - 5); // after " SSS "
             p = eol.add(1);
 
@@ -306,8 +246,8 @@ impl Parser {
     }
 
     // Calls f(global rank, 5xx, latency) for every record of hour h.
-    unsafe fn each(&self, h: usize, ranks: &[u32], mut f: impl FnMut(usize, bool, u32)) {
-        let rank = |key: u32| ranks[(key & ID_MASK) as usize] as usize;
+    unsafe fn each(&self, h: usize, mut f: impl FnMut(usize, bool, u32)) {
+        let rank = |key: u32| self.rank[(key & ID_MASK) as usize] as usize;
         let mut g = |latency: u32, key: u32| f(rank(key), key & ERR != 0, latency);
         let mut c = self.last[h];
         while let Some(chunk) = c.as_ref() {
@@ -362,9 +302,7 @@ fn main() {
 
     let parser = |t: usize| Shared::new(Parser::new(cut[t + 1] - cut[t]));
     let parsers: Vec<_> = (0..THREADS).map(parser).collect();
-    let endpoints = Names::new();
-    let names = Shared::new(Vec::<Vec<u8>>::new());
-    let ranks = Shared::new(vec![0u32; Names::SLOTS]);
+    let names = Shared::new(Vec::<&[u8]>::new());
     let finished: Vec<AtomicBool> = (0..HOURS).map(|_| AtomicBool::new(false)).collect();
     let releasing = AtomicBool::new(false);
     let (claim, claim_text) = (AtomicUsize::new(0), AtomicUsize::new(0));
@@ -376,28 +314,30 @@ fn main() {
 
     let work = |t: usize| unsafe {
         let (from, to) = (log.as_ptr().add(cut[t]), log.as_ptr().add(cut[t + 1]));
-        parsers[t].get().parse(&endpoints, from, to);
+        parsers[t].get().parse(from, to);
 
-        // Slot ids are already global. Only rank the ~1,842 occupied slots.
+        // Global ids are ranks in unsigned byte order (a proper prefix first),
+        // which is the order lines are printed in within an hour.
         if barrier.wait().is_leader() {
-            let mut by_name: Vec<(Vec<u8>, u32)> = endpoints.slot.iter().enumerate()
-                .filter_map(|(id, s)| {
-                    let v = s.load(Acquire);
-                    (v != 0).then(|| (endpoints.name(v).to_vec(), id as u32))
-                }).collect();
-            by_name.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-            let rank = ranks.get();
-            let out = names.get();
-            out.clear();
-            for (r, (name, id)) in by_name.into_iter().enumerate() {
-                rank[id as usize] = r as u32;
-                out.push(name);
+            let mut all = Interner::new();
+            for ps in &parsers {
+                let ps = ps.get();
+                ps.rank = ps.local.names.iter().map(|&n| all.id(n)).collect();
             }
+            let mut sorted = all.names.clone();
+            sorted.sort_unstable();
+            let mut rank_of = vec![0; sorted.len()];
+            for (r, &n) in sorted.iter().enumerate() {
+                rank_of[all.id(n) as usize] = r as u32;
+            }
+            for id in parsers.iter().flat_map(|ps| ps.get().rank.iter_mut()) {
+                *id = rank_of[*id as usize];
+            }
+            *names.get() = sorted;
         }
         barrier.wait();
 
         let names = &*names.get();
-        let rank = &*ranks.get();
         let ne = names.len();
         let (mut start, mut errors, mut latency) = (vec![0u32; ne + 1], vec![0u32; ne], vec![]);
         while let h @ 0..HOURS = claim.fetch_add(1, Relaxed) {
@@ -406,7 +346,7 @@ fn main() {
             start.fill(0);
             errors.fill(0);
             for ps in &parsers {
-                ps.get().each(h, rank, |e, err, _| (start[e + 1], errors[e]) = (start[e + 1] + 1, errors[e] + err as u32));
+                ps.get().each(h, |e, err, _| (start[e + 1], errors[e]) = (start[e + 1] + 1, errors[e] + err as u32));
             }
             for e in 0..ne {
                 start[e + 1] += start[e];
@@ -414,7 +354,7 @@ fn main() {
             latency.resize(start[ne] as usize, 0);
             let mut cursor = start[..ne].to_vec();
             for ps in &parsers {
-                ps.get().each(h, rank, |e, _, l| (latency[cursor[e] as usize], cursor[e]) = (l, cursor[e] + 1));
+                ps.get().each(h, |e, _, l| (latency[cursor[e] as usize], cursor[e]) = (l, cursor[e] + 1));
             }
             // An hour is finished once its records are copied out; one thread
             // at a time then releases whatever chunks that frees.
@@ -470,8 +410,7 @@ fn main() {
             let label = format!("2026-{date}T{:02}:00:00Z ", (h + 18) % 24);
             let mut o = (*text.get()).add(at[h].load(Relaxed) as usize);
             for line in std::mem::take(lines[h].get()) {
-                let name = names[line[0] as usize].as_slice();
-                for part in [label.as_bytes(), name] {
+                for part in [label.as_bytes(), names[line[0] as usize]] {
                     o.copy_from_nonoverlapping(part.as_ptr(), part.len());
                     o = o.add(part.len());
                 }

@@ -170,27 +170,8 @@ unsafe impl Sync for NameSlot {}
 struct MetaCell(UnsafeCell<u64>);
 unsafe impl Sync for MetaCell {}
 
-struct ByteArena {
-    _bytes: Vec<u8>,
-    ptr: *mut u8,
-}
-unsafe impl Send for ByteArena {}
+struct ByteArena(UnsafeCell<Vec<u8>>);
 unsafe impl Sync for ByteArena {}
-impl ByteArena {
-    fn new(n: usize) -> Self {
-        let mut bytes = vec![0u8; n];
-        let ptr = bytes.as_mut_ptr();
-        Self { _bytes: bytes, ptr }
-    }
-    #[inline(always)]
-    unsafe fn write(&self, off: usize, src: *const u8, n: usize) {
-        std::ptr::copy_nonoverlapping(src, self.ptr.add(off), n);
-    }
-    #[inline(always)]
-    unsafe fn slice(&self, off: usize, n: usize) -> &[u8] {
-        std::slice::from_raw_parts(self.ptr.add(off), n)
-    }
-}
 
 struct Names {
     slots: Vec<NameSlot>,
@@ -232,7 +213,7 @@ impl Names {
                 hi: UnsafeCell::new(0),
             }).collect(),
             meta: (0..NAME_SLOTS).map(|_| MetaCell(UnsafeCell::new(0))).collect(),
-            arena: ByteArena::new(NAME_ARENA),
+            arena: ByteArena(UnsafeCell::new(vec![0u8; NAME_ARENA])),
             used: AtomicU32::new(0),
             bits: zeroed(groups * NAME_WORDS),
         }
@@ -244,10 +225,9 @@ impl Names {
         if (m >> 32) as usize != len { return false; }
         let off = m as u32 as usize;
         let tail = len - 16;
-        unsafe {
-            self.arena.slice(off, tail)
-                == std::slice::from_raw_parts((p as *const u8).add(16), tail)
-        }
+        let arena = unsafe { &*self.arena.0.get() };
+        &arena[off..off + tail]
+            == unsafe { std::slice::from_raw_parts((p as *const u8).add(16), tail) }
     }
 
     #[inline(always)]
@@ -264,11 +244,15 @@ impl Names {
             if lo == 0 {
                 if self.slots[i].lo.compare_exchange(0, BUSY, Acquire, Acquire).is_ok() {
                     if len > 16 {
-                        let tail = len - 8;
+                        let tail = len - 16;
                         let off = self.used.fetch_add(tail as u32, Relaxed) as usize;
                         assert!(off + tail <= NAME_ARENA, "name arena exhausted");
                         unsafe {
-                            self.arena.write(off, (p as *const u8).add(8), tail);
+                            std::ptr::copy_nonoverlapping(
+                                (p as *const u8).add(16),
+                                (&mut *self.arena.0.get()).as_mut_ptr().add(off),
+                                tail,
+                            );
                             *self.meta[i].0.get() = (len as u64) << 32 | off as u64;
                             *self.slots[i].hi.get() = key_hi;
                         }
