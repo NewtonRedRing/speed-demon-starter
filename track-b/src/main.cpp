@@ -175,31 +175,12 @@ public:
 class Words {
     const std::vector<Term>& terms_;
     std::vector<u64> slots_;
-    // Collision-free 1..3-byte query words, length-tagged base-36 index.
-    // Non-alphanumeric words fall through to the exact hash table.
-    std::array<u32, 47988> short_ids_{};
-    static u32 short_index(std::string_view text) {
-        u32 value = 0;
-        for (unsigned char c : text) {
-            unsigned digit;
-            if (c >= '0' && c <= '9') digit = c - '0';
-            else if (c >= 'a' && c <= 'z') digit = c - 'a' + 10;
-            else return missing;
-            value = value * 36 + digit;
-        }
-        return (text.size() == 1 ? 0u : text.size() == 2 ? 36u : 1332u) + value;
-    }
 public:
     explicit Words(const std::vector<Term>& terms) : terms_(terms) {
-        short_ids_.fill(missing);
         std::size_t capacity = 1;
         while (capacity < terms.size() * 2 + 1) capacity *= 2;
         slots_.resize(capacity);
         for (u32 i = 0; i < terms.size(); ++i) {
-            if (terms[i].text.size() >= 1 && terms[i].text.size() <= 3) {
-                const u32 key = short_index(terms[i].text);
-                if (key != missing) { short_ids_[key] = i; continue; }
-            }
             const u64 hash = std::hash<std::string_view>{}(terms[i].text);
             auto slot = hash & (capacity - 1);
             while (slots_[slot]) slot = (slot + 1) & (capacity - 1);
@@ -207,10 +188,6 @@ public:
         }
     }
     u32 find(std::string_view text) const {
-        if (text.size() >= 1 && text.size() <= 3) {
-            const u32 key = short_index(text);
-            if (key != missing) return short_ids_[key];
-        }
         const u64 hash = std::hash<std::string_view>{}(text);
         auto slot = hash & (slots_.size() - 1);
         while (slots_[slot]) {

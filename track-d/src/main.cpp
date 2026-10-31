@@ -192,27 +192,14 @@ public:
         }
         u64 best = infinity;
         for (;;) {
-            // Resolve stale queue entries only once per frontier. Reading top()
-            // may redistribute radix buckets; cache the valid pair for bounds.
-            std::array<u64, 2> frontier_distance{};
-            std::array<u32, 2> frontier_node{};
-            for (unsigned d = 0; d < 2; ++d) {
-                while (!queues_[d].empty()) {
-                    const auto item = queues_[d].top();
-                    if (item.first == distances_[d].get(item.second)) {
-                        frontier_distance[d] = item.first;
-                        frontier_node[d] = item.second;
-                        break;
-                    }
+            for (unsigned d = 0; d < 2; ++d)
+                while (!queues_[d].empty() && queues_[d].top().first != distances_[d].get(queues_[d].top().second))
                     queues_[d].pop();
-                }
-            }
             if (queues_[0].empty() || queues_[1].empty()) break;
-            if (best != infinity && frontier_distance[0] + frontier_distance[1] >= best) break;
+            if (best != infinity && queues_[0].top().first + queues_[1].top().first >= best) break;
             // Balance search work, not distances: injected edges may weigh almost 2^32.
             const unsigned d = queues_[0].size() <= queues_[1].size() ? 0 : 1;
-            const u64 distance = frontier_distance[d];
-            const u32 node = frontier_node[d];
+            const auto [distance, node] = queues_[d].top();
             queues_[d].pop();
             for (u32 i = graph_.offsets[d][node]; i < graph_.offsets[d][node + 1]; ++i) {
                 const Edge& edge = graph_.edges[d][i];
