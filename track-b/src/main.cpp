@@ -21,6 +21,13 @@
 #include <sys/stat.h>
 
 using u32 = std::uint32_t;
+#ifndef SD_TUNE_WORKERS
+#define SD_TUNE_WORKERS 12
+#endif
+#ifndef SD_TUNE_PARAM
+#define SD_TUNE_PARAM 32
+#endif
+
 using u64 = std::uint64_t;
 constexpr u32 missing = UINT32_MAX;
 
@@ -399,7 +406,7 @@ int solve() {
         mapping.reset(p);
     }
     const char* data = size ? static_cast<const char*>(mapping.get()) : "";
-    const unsigned workers = size < 2 * 1024 * 1024 ? 1 : 12;
+    const unsigned workers = size < 2 * 1024 * 1024 ? 1 : SD_TUNE_WORKERS;
     std::vector<Local> locals(workers);
     parallel(workers, [&](unsigned w) {
         scan(locals[w], data, size * w / workers, size * (w + 1) / workers, words, terms, automaton, phrases, booleans);
@@ -423,9 +430,9 @@ int solve() {
     std::atomic<u32> next_term{0};
     parallel(workers, [&](unsigned) {
       for (;;) {
-        const u32 begin = next_term.fetch_add(32, std::memory_order_relaxed);
+        const u32 begin = next_term.fetch_add(SD_TUNE_PARAM, std::memory_order_relaxed);
         if (begin >= booleans) break;
-        for (u32 b = begin; b < std::min<u32>(begin + 32, booleans); ++b) {
+        for (u32 b = begin; b < std::min<u32>(begin + SD_TUNE_PARAM, booleans); ++b) {
             std::size_t count = 0;
             u32 first = missing, last = 0;
             for (const Local& local : locals) {
