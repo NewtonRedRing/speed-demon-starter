@@ -264,3 +264,39 @@ need evidence, not assumed wins.
   not performance or official-score evidence.
 - The pinned offline production image passes the sandbox and the manifest's
   full seed-1 SHA-256. There are no added runtime dependencies or build tools.
+
+
+## October 31 targeted p99 exact-max experiment (not an official board run)
+
+For groups containing 33 to 99 records, nearest-rank p99 is exactly the
+maximum value: `ceil(0.99 * n) == n` for every integer `33 <= n <= 99`.
+The existing code performs a third `nth_element` even in this range.
+The candidate replaces that selection with `std::max_element` over the
+already partitioned upper subrange. Group sizes 100 and greater retain the
+existing exact `nth_element`; groups 1 to 32 are unchanged.
+
+An independent C++ nearest-rank oracle compared the proposed algorithm
+against a full unsigned sort for **32,048 cases** spanning group sizes
+1-500, 1,000, 4,097 and 9,223, with zero values, full uint32 extremes,
+duplicate-heavy, sorted, reverse-sorted and random arrays. All passed.
+
+An earlier A parser-based full-size *synthetic* input of 3.1M rows was used
+to compare an identical percentile specialization with a three-selection
+baseline: 12 alternating invocations per executable, baseline median
+**108.354 ms**, specialized median **103.219 ms** (~4.7% lower), and
+every produced output SHA-256 matched. These binaries were compiled from
+an **earlier parser version**, not the current 6-byte/SWAR/AVX2 submission.
+Thus these results do NOT establish a 4.7% improvement over today's main
+branch or on the scoring CPU.
+
+Other two new selection schemes were locally rejected:
+- Median-of-three shared 3-way quickselect: 98.404 ms vs 76.063 ms for
+  repeated independent group-selection benchmarks, same output.
+- Separate hierarchical radix byte-histogram selects: 32.654 ms vs
+  19.610 ms for repeated group-selection benchmarks, same output.
+Their overhead outweighed work sharing on tested distributions.
+
+**Promotion gate:** compile this exact candidate with pinned GCC 15, run
+existing full public seed-1 output-hash verification, check independent
+multi-seed oracles, and compare full process K including cgroup memory.
+No new official score or achievement of the 85.274 target is claimed.
