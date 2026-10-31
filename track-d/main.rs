@@ -1,134 +1,527 @@
-use std::cmp::min;
-use std::fs;
-use std::io;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::sync::atomic::AtomicI64;
-use std::thread;
-use std::os::fd::AsRawFd;use std::ops::Deref;use std::ptr;
-unsafe extern "C"{fn mmap(a:*mut u8,n:usize,p:i32,f:i32,fd:i32,o:isize)->*mut u8;fn munmap(a:*mut u8,n:usize)->i32;}
-struct Mapping{address:usize,len:usize}impl Mapping{fn open(path:&str)->io::Result<Self>{let f=fs::File::open(path)?;let len=f.metadata()?.len()as usize;let p=unsafe{mmap(ptr::null_mut(),len,1,2,f.as_raw_fd(),0)};if p as isize == -1{return Err(io::Error::last_os_error())}Ok(Self{address:p as usize,len})}}impl Deref for Mapping{type Target=[u8];fn deref(&self)->&[u8]{unsafe{std::slice::from_raw_parts(self.address as*const u8,self.len)}}}impl Drop for Mapping{fn drop(&mut self){unsafe{munmap(self.address as*mut u8,self.len);}}}
+//! Speed Demon 2026, Track D (Traverse), in Rust with no dependencies.
+//!
+//! 1. Parse once. graph.txt is memory-mapped and cut into one line-aligned
+//!    range per thread. Each thread files every edge, as sequential appends,
+//!    under the part of the node range its tail falls in (about 27 parts of
+//!    65,536 nodes). An edge is one 32-bit word: the head in the low bits, the
+//!    weight above it; a weight too large for its field is stored as all ones
+//!    with its value on a side list.
+//! 2. Build each part on its own. A thread takes a part, counts its nodes'
+//!    out-degrees and places its edges, all inside a 256 KB counter array, so
+//!    the adjacency list is built with no atomics and no cache misses beyond
+//!    the writes themselves.
+//! 3. Renumber for locality. Node ids are a random relabelling, so each thread
+//!    cuts the road network into compact blobs of 512 nodes grown by BFS, and
+//!    the graph is copied into that numbering, then reversed.
+//! 4. Bidirectional Dijkstra per query, with radix heaps and distances kept in
+//!    pages handed out on first touch. A target with no in-edge is -1 at once.
+use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+use std::ffi::c_void;
+use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
+use std::sync::Mutex;
+
+extern "C" {
+    fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut c_void;
+    fn prctl(op: i32, a: u64, b: u64, c: u64, d: u64) -> i32;
+    fn mallopt(param: i32, value: i32) -> i32;
+}
 
 const INF: u64 = u64::MAX;
+const BLOB: usize = 512; // nodes per locality blob
+const PART_BITS: u32 = 16; // nodes per part: 2^16, so a part's counters fit in L2
+const PAGE: usize = 512; // distances per page
 
-#[inline(always)]
-fn number(data: &[u8], p: &mut usize) -> u32 {
-    let mut value = 0u32;
-    while *p < data.len() {
-        let c = data[*p];
-        if !c.is_ascii_digit() { break; }
-        value = value * 10 + (c - b'0') as u32;
-        *p += 1;
-    }
-    value
-}
-
+/// A pointer the threads share; every use writes indices no other thread writes.
 #[derive(Clone, Copy)]
-struct Item { key: u64, node: u32 }
-
-struct RadixHeap {
-    buckets: [Vec<Item>; 65],
-    last: u64,
-    len: usize,
-}
-impl RadixHeap {
-    fn new() -> Self { Self { buckets: std::array::from_fn(|_| Vec::new()), last: 0, len: 0 } }
-    fn clear(&mut self) { for b in &mut self.buckets { b.clear(); } self.last = 0; self.len = 0; }
-    #[inline(always)] fn push(&mut self, key: u64, node: u32) {
-        let bucket = (64 - (key ^ self.last).leading_zeros()) as usize;
-        self.buckets[bucket].push(Item { key, node }); self.len += 1;
+struct Raw<T>(*mut T);
+unsafe impl<T> Send for Raw<T> {}
+unsafe impl<T> Sync for Raw<T> {}
+impl<T> Raw<T> {
+    fn of(v: &mut [T]) -> Self {
+        Raw(v.as_mut_ptr())
     }
-    #[inline(always)] fn top(&mut self) -> Option<Item> {
-        if self.len == 0 { return None; }
-        if self.buckets[0].is_empty() {
-            let b = (1..65).find(|&i| !self.buckets[i].is_empty()).unwrap();
-            self.last = self.buckets[b].iter().map(|x| x.key).min().unwrap();
-            let moved = std::mem::take(&mut self.buckets[b]);
-            for item in moved {
-                let to = (64 - (item.key ^ self.last).leading_zeros()) as usize;
-                self.buckets[to].push(item);
+    unsafe fn at(self, i: usize) -> *mut T {
+        self.0.add(i)
+    }
+}
+
+fn prefetch<T>(p: *const T) {
+    unsafe { _mm_prefetch::<_MM_HINT_T0>(p as *const i8) }
+}
+
+fn map(path: &str) -> &'static [u8] {
+    let file = std::fs::File::open(path).expect(path);
+    let len = file.metadata().unwrap().len() as usize;
+    // An anonymous page of zeros, then the file over its start (PROT_READ;
+    // MAP_PRIVATE | MAP_ANONYMOUS, then MAP_PRIVATE | MAP_FIXED), so an
+    // 8-byte read at any byte of the file stays inside the mapping.
+    unsafe {
+        let p = mmap(std::ptr::null_mut(), len + 4096, 1, 0x22, -1, 0);
+        let ok = len == 0 || mmap(p, len, 1, 0x12, file.as_raw_fd(), 0) == p;
+        assert!(p as isize != -1 && ok, "mmap {path}");
+        std::slice::from_raw_parts(p as *const u8, len)
+    }
+}
+
+/// The number at text[*i..], leaving *i past the one byte that ends it.
+/// Digits have bit 0x10 set and the space and newline that end a number do
+/// not, so one 8-byte load finds the end of any number up to 7 digits, and
+/// its digits are combined in pairs, quads and halves; longer numbers (only
+/// heavy weights) take the byte loop.
+#[inline(always)]
+fn number(text: &[u8], i: &mut usize) -> u32 {
+    let w = u64::from_le_bytes(unsafe { *(text.as_ptr().add(*i) as *const [u8; 8]) });
+    let stop = !w & 0x1010_1010_1010_1010;
+    if stop == 0 {
+        let mut v = 0u32;
+        while let d @ b'0'..=b'9' = unsafe { *text.get_unchecked(*i) } {
+            v = v * 10 + (d - b'0') as u32;
+            *i += 1;
+        }
+        *i += 1;
+        return v;
+    }
+    let len = stop.trailing_zeros() / 8; // digits before the separator
+    *i += len as usize + 1;
+    let mut v = (w << (64 - 8 * len)) & 0x0F0F_0F0F_0F0F_0F0F;
+    v = (v * 10 + (v >> 8)) & 0x00FF_00FF_00FF_00FF;
+    v = (v * 100 + (v >> 16)) & 0x0000_FFFF_0000_FFFF;
+    ((v * 10000 + (v >> 32)) & 0xFFFF_FFFF) as u32
+}
+
+/// k line-aligned cuts of text[from..].
+fn cuts(text: &[u8], from: usize, k: usize) -> Vec<usize> {
+    let mut c = vec![text.len(); k + 1];
+    c[0] = from;
+    for t in 1..k {
+        let mut x = (from + (text.len() - from) * t / k).max(c[t - 1]);
+        while x < text.len() && text[x - 1] != b'\n' {
+            x += 1;
+        }
+        c[t] = x;
+    }
+    c
+}
+
+/// Runs f(t) on nt threads and collects what each returns.
+fn on_threads<R: Send>(nt: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    let f = &f;
+    std::thread::scope(|s| {
+        let hs: Vec<_> = (0..nt).map(|t| s.spawn(move || f(t))).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
+/// Thread t's share of 0..n.
+fn share(n: usize, t: usize, nt: usize) -> std::ops::Range<usize> {
+    n * t / nt..n * (t + 1) / nt
+}
+
+/// A monotone priority queue: keys never drop below the last one popped, so
+/// a key only moves to a lower bucket, and only the lowest is ever split.
+struct RadixHeap {
+    b: Vec<Vec<(u64, u32)>>,
+    len: usize,
+    last: u64,
+}
+
+impl RadixHeap {
+    fn new() -> Self {
+        RadixHeap { b: (0..65).map(|_| Vec::new()).collect(), len: 0, last: 0 }
+    }
+    fn slot(&self, k: u64) -> usize {
+        (64 - (k ^ self.last).leading_zeros()) as usize
+    }
+    fn push(&mut self, k: u64, u: u32) {
+        let s = self.slot(k);
+        unsafe { self.b.get_unchecked_mut(s) }.push((k, u));
+        self.len += 1;
+    }
+    /// The smallest key (the heap must not be empty).
+    fn top(&mut self) -> u64 {
+        if self.b[0].is_empty() {
+            let i = (1..65).find(|&i| !self.b[i].is_empty()).unwrap();
+            let mut v = std::mem::take(&mut self.b[i]);
+            self.last = v.iter().map(|e| e.0).min().unwrap();
+            for &(k, u) in &v {
+                let s = self.slot(k);
+                self.b[s].push((k, u));
+            }
+            v.clear();
+            self.b[i] = v;
+        }
+        self.last
+    }
+    fn pop(&mut self) -> (u64, u32) {
+        self.top();
+        self.len -= 1;
+        self.b[0].pop().unwrap()
+    }
+    fn clear(&mut self) {
+        self.b.iter_mut().for_each(Vec::clear);
+        (self.len, self.last) = (0, 0);
+    }
+}
+
+/// Tentative distances in pages of 512, handed out on first touch and taken
+/// back after each query, so a thread's memory follows its largest search.
+struct Dist {
+    tab: Vec<u16>,
+    used: Vec<u32>,
+    pool: Vec<u64>,
+}
+
+impl Dist {
+    fn new(n: usize) -> Self {
+        Dist { tab: vec![0; n / PAGE + 1], used: Vec::new(), pool: Vec::new() }
+    }
+    /// INF for a node this search never reached; hands out no page.
+    fn get(&self, v: u32) -> u64 {
+        match unsafe { *self.tab.get_unchecked(v as usize / PAGE) } as usize {
+            0 => INF,
+            pg => unsafe { *self.pool.get_unchecked((pg - 1) * PAGE + v as usize % PAGE) },
+        }
+    }
+    fn at(&mut self, v: u32) -> &mut u64 {
+        let i = v as usize / PAGE;
+        if unsafe { *self.tab.get_unchecked(i) } == 0 {
+            self.used.push(i as u32);
+            self.tab[i] = self.used.len() as u16;
+            let s = (self.used.len() - 1) * PAGE;
+            self.pool.resize(self.pool.len().max(s + PAGE), INF);
+            self.pool[s..s + PAGE].fill(INF);
+        }
+        let k = (self.tab[i] as usize - 1) * PAGE + v as usize % PAGE;
+        unsafe { self.pool.get_unchecked_mut(k) }
+    }
+    fn reset(&mut self) {
+        self.used.iter().for_each(|&i| self.tab[i as usize] = 0);
+        self.used.clear();
+    }
+}
+
+/// The weight of edge e stored as all ones: its entry in the sorted list.
+fn heavy_weight(heavy: &[(u32, u32)], e: u32) -> u32 {
+    heavy[heavy.partition_point(|h| h.0 < e)].1
+}
+
+fn main() {
+    // Plain pages (a part-touched array with huge pages would count whole
+    // 2 MB pages), and freed arrays really go back to the kernel.
+    unsafe {
+        prctl(41, 1, 0, 0, 0); // PR_SET_THP_DISABLE
+        mallopt(-3, 1 << 16); // M_MMAP_THRESHOLD
+    }
+    let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
+    let qtext = map("/data/queries.txt");
+    let mut queries = Vec::new();
+    let mut i = 0;
+    while i < qtext.len() {
+        let s = number(qtext, &mut i);
+        queries.push((s, number(qtext, &mut i)));
+    }
+    let text = map("/data/graph.txt");
+    let mut i = 0;
+    let n = number(text, &mut i) as usize;
+    number(text, &mut i);
+    let hb = 32 - (n as u32 | 1).leading_zeros(); // bits for a node id
+    let (hmask, big) = ((1u32 << hb) - 1, u32::MAX >> hb);
+    let sh = PART_BITS.min(hb);
+    let parts = (n >> sh) + 1;
+
+    // 1. Parse once, filing each edge under its tail's part.
+    type Bucket = (Vec<u64>, Vec<u32>); // (offset in part << 32 | word), heavy weights in order
+    let cut = cuts(text, i, nt);
+    let filed: Vec<Vec<Bucket>> = on_threads(nt, |t| {
+        let mut out: Vec<Bucket> = (0..parts).map(|_| Default::default()).collect();
+        let guess = (cut[t + 1] - cut[t]) / 17 / parts + 64;
+        out.iter_mut().for_each(|b| b.0.reserve(guess));
+        let mut i = cut[t];
+        while i < cut[t + 1] {
+            let u = number(text, &mut i);
+            let v = number(text, &mut i);
+            let mut w = number(text, &mut i);
+            if u == v {
+                continue; // a self-loop never shortens a path
+            }
+            let b = &mut out[(u >> sh) as usize];
+            if w >= big {
+                b.1.push(w);
+                w = big;
+            }
+            b.0.push(((u & ((1 << sh) - 1)) as u64) << 32 | (v | w << hb) as u64);
+        }
+        out
+    });
+    // Part p's edges start where part p - 1's end.
+    let mut base = vec![0u32; parts + 1];
+    for p in 0..parts {
+        base[p + 1] = base[p] + filed.iter().map(|f| f[p].0.len() as u32).sum::<u32>();
+    }
+    let buckets: Vec<Mutex<Bucket>> = (0..parts * nt).map(|_| Mutex::default()).collect();
+    for (t, f) in filed.into_iter().enumerate() {
+        for (p, b) in f.into_iter().enumerate() {
+            *buckets[p * nt + t].lock().unwrap() = b;
+        }
+    }
+
+    // 2. Build each part's adjacency on its own.
+    let m = base[parts] as usize;
+    let (mut first, mut link) = (vec![0u32; n + 1], vec![0u32; m]);
+    first[n] = m as u32;
+    let (fr, lr) = (Raw::of(&mut first), Raw::of(&mut link));
+    let claim_part = AtomicUsize::new(0);
+    let mut heavy: Vec<(u32, u32)> = on_threads(nt, |_| {
+        let mut heavy = Vec::new();
+        loop {
+            let p = claim_part.fetch_add(1, Relaxed);
+            if p >= parts {
+                return heavy;
+            }
+            let lo = p << sh;
+            let len = (n - lo).min(1 << sh);
+            let mine: Vec<Bucket> = (0..nt).map(|t| std::mem::take(&mut *buckets[p * nt + t].lock().unwrap())).collect();
+            let mut cursor = vec![0u32; len];
+            mine.iter().for_each(|b| b.0.iter().for_each(|&r| cursor[(r >> 32) as usize] += 1));
+            let mut at = base[p];
+            for (k, c) in cursor.iter_mut().enumerate() {
+                unsafe { *fr.at(lo + k) = at };
+                (at, *c) = (at + *c, at);
+            }
+            for (records, weights) in &mine {
+                let mut h = weights.iter();
+                for &r in records {
+                    let c = &mut cursor[(r >> 32) as usize];
+                    let x = r as u32;
+                    if x >> hb == big {
+                        heavy.push((*c, *h.next().unwrap()));
+                    }
+                    unsafe { *lr.at(*c as usize) = x };
+                    *c += 1;
+                }
             }
         }
-        self.buckets[0].last().copied()
-    }
-    #[inline(always)] fn pop(&mut self) { self.buckets[0].pop(); self.len -= 1; }
-}
+    })
+    .concat();
+    heavy.sort_unstable();
+    drop(buckets);
 
-#[derive(Clone, Copy, Default)]
-struct Slot { key: u32, stamp: u32, value: u64 }
-struct Distances { slots: Vec<Slot>, stamp: u32, count: usize }
-impl Distances {
-    fn new() -> Self { Self { slots: vec![Slot::default(); 2048], stamp: 1, count: 0 } }
-    fn clear(&mut self) { self.count = 0; self.stamp += 1; if self.stamp == 0 { self.slots.fill(Slot::default()); self.stamp = 1; } }
-    #[inline(always)] fn hash(key: u32) -> usize {
-        let x = key as u64 * 0x9e3779b97f4a7c15; (x ^ (x >> 32)) as usize
-    }
-    #[inline(always)] fn get(&self, key: u32) -> u64 {
-        let mut i = Self::hash(key) & (self.slots.len() - 1);
-        loop { let s = self.slots[i]; if s.stamp != self.stamp { return INF; } if s.key == key { return s.value; } i = (i + 1) & (self.slots.len() - 1); }
-    }
-    fn relax(&mut self, key: u32, value: u64) -> bool {
-        let mut i = Self::hash(key) & (self.slots.len() - 1);
+    // 3. Locality order: compact BFS blobs. A thread grows a blob over
+    // unclaimed nodes (claimed by compare-exchange), then starts the next one
+    // from the last one's unclaimed frontier, so consecutive ids are close on
+    // the map.
+    let claimed: Vec<AtomicU8> = (0..n).map(|_| AtomicU8::new(0)).collect();
+    let claim = |v: u32| {
+        let c = &claimed[v as usize];
+        c.load(Relaxed) == 0 && c.compare_exchange(0, 1, Relaxed, Relaxed).is_ok()
+    };
+    let (first_v, link_v) = (first, link);
+    let (first, link) = (&first_v[..], &link_v[..]);
+    let chains: Vec<Vec<u32>> = on_threads(nt, |t| {
+        let (mut ord, mut seeds) = (Vec::with_capacity(n / nt + BLOB), Vec::new());
+        let mut scan = share(n, t, nt).start;
+        // Fetch the offsets 8 queue entries ahead and the edges 4 ahead.
+        let ahead = |ord: &Vec<u32>, i: usize| {
+            ord.get(i + 8).map(|&u| prefetch(&first[u as usize]));
+            ord.get(i + 4).map(|&u| prefetch(&link[first[u as usize] as usize]));
+        };
         loop {
-            let s = self.slots[i];
-            if s.stamp != self.stamp { self.slots[i] = Slot { key, stamp: self.stamp, value }; self.count += 1; if self.count * 2 > self.slots.len() { self.grow(); } return true; }
-            if s.key == key { if value >= s.value { return false; } self.slots[i].value = value; return true; }
-            i = (i + 1) & (self.slots.len() - 1);
+            let mut seed = None;
+            while let Some(v) = seeds.pop() {
+                if claim(v) {
+                    seed = Some(v);
+                    break;
+                }
+            }
+            while seed.is_none() && scan < n {
+                if first[scan + 1] > first[scan] && claim(scan as u32) {
+                    seed = Some(scan as u32);
+                }
+                scan += 1;
+            }
+            let Some(seed) = seed else { return ord };
+            let (blob, mut i) = (ord.len(), ord.len());
+            ord.push(seed);
+            while i < ord.len() && ord.len() - blob < BLOB {
+                ahead(&ord, i);
+                let u = ord[i] as usize;
+                for e in first[u]..first[u + 1] {
+                    let v = link[e as usize] & hmask;
+                    if ord.len() - blob < BLOB && claim(v) {
+                        ord.push(v);
+                    }
+                }
+                i += 1;
+            }
+            for i in i..ord.len() {
+                ahead(&ord, i);
+                let u = ord[i] as usize;
+                for e in first[u]..first[u + 1] {
+                    let v = link[e as usize] & hmask;
+                    if claimed[v as usize].load(Relaxed) == 0 {
+                        seeds.push(v);
+                    }
+                }
+            }
+        }
+    });
+
+    // New ids: each thread's chain in turn, then the nodes no blob reached.
+    let mut id_v = vec![0u32; n];
+    let mut start = vec![0u32; nt + 1];
+    for t in 0..nt {
+        start[t + 1] = start[t] + chains[t].len() as u32;
+    }
+    let ir = Raw::of(&mut id_v);
+    on_threads(nt, |t| chains[t].iter().zip(start[t]..).for_each(|(&u, k)| unsafe { *ir.at(u as usize) = k }));
+    let mut k = start[nt];
+    for u in 0..n {
+        if claimed[u].load(Relaxed) == 0 {
+            (id_v[u], k) = (k, k + 1);
         }
     }
-    fn grow(&mut self) {
-        let capacity = self.slots.len() * 2;
-        let old = std::mem::replace(&mut self.slots, vec![Slot::default(); capacity]);
-        self.count = 0;
-        for s in old { if s.stamp == self.stamp { self.relax(s.key, s.value); } }
-    }
-}
+    drop((claimed, chains));
 
-struct Graph {
-    bits: u32, mask: u32, sentinel: u32,
-    offsets: [Vec<u32>; 2], edges: [Vec<u32>; 2], wide: [Vec<(u32,u32)>; 2],
-}
-impl Graph {
-    #[inline(always)] fn edge(&self, d: usize, i: u32) -> (u32,u32) {
-        let e = self.edges[d][i as usize]; let to = e & self.mask; let packed = e >> self.bits;
-        if packed != self.sentinel { (to, packed) } else {
-            let pos = self.wide[d].binary_search_by_key(&i, |x| x.0).unwrap(); (to, self.wide[d][pos].1)
+    // The graph in the new numbering: degrees scattered, summed, then each
+    // edge's head mapped (weight bits kept), with the random reads of later
+    // nodes started 8 and 4 nodes early.
+    let id = &id_v[..];
+    let mut off = vec![0u32; n + 1];
+    let or = Raw::of(&mut off);
+    on_threads(nt, |t| share(n, t, nt).for_each(|u| unsafe { *or.at(id[u] as usize + 1) = first[u + 1] - first[u] }));
+    for v in 0..n {
+        off[v + 1] += off[v];
+    }
+    let mut adj = vec![0u32; m];
+    let ar = Raw::of(&mut adj);
+    let off = &off;
+    let mut heavy2: Vec<(u32, u32)> = on_threads(nt, |t| {
+        let (mut out, r) = (Vec::new(), share(n, t, nt));
+        for u in r.clone() {
+            if u + 8 < r.end {
+                prefetch(&off[id[u + 8] as usize]);
+                (first[u + 8]..first[u + 9]).for_each(|e| prefetch(&id[(link[e as usize] & hmask) as usize]));
+            }
+            if u + 4 < r.end {
+                prefetch(unsafe { ar.at(off[id[u + 4] as usize] as usize) });
+            }
+            let mut j = off[id[u] as usize];
+            for e in first[u]..first[u + 1] {
+                let x = link[e as usize];
+                if x >> hb == big {
+                    out.push((j, heavy_weight(&heavy, e)));
+                }
+                unsafe { *ar.at(j as usize) = id[(x & hmask) as usize] | (x & !hmask) };
+                j += 1;
+            }
         }
-    }
-}
+        out
+    })
+    .concat();
+    heavy2.sort_unstable();
+    // Queries in the new numbering (sorted later), then the old graph and the
+    // id map can go.
+    let ends: Vec<(u32, u32)> = queries.iter().map(|&(s, t)| (id[s as usize], id[t as usize])).collect();
+    drop((heavy, first_v, link_v, id_v));
 
-struct Search { dist: [Distances;2], heap: [RadixHeap;2] }
-impl Search {
-    fn new() -> Self { Self { dist: [Distances::new(),Distances::new()], heap: [RadixHeap::new(),RadixHeap::new()] } }
-    fn run(&mut self, graph: &Graph, source: u32, target: u32) -> i64 {
-        if source == target { return 0; }
-        if graph.offsets[0][source as usize] == graph.offsets[0][source as usize+1] || graph.offsets[1][target as usize] == graph.offsets[1][target as usize+1] { return -1; }
-        for d in 0..2 { self.dist[d].clear(); self.heap[d].clear(); let n=if d==0 {source}else{target}; self.dist[d].relax(n,0); self.heap[d].push(0,n); }
-        let mut best=INF;
+    // The reverse graph in the same format: in-degrees counted into
+    // roff[v + 1], summed, then roff[v] used as v's cursor, which leaves it at
+    // v's end, so shifting it up by one restores the offsets.
+    let adj = &adj;
+    let mut roff = vec![0u32; n + 1];
+    let rr = Raw::of(&mut roff);
+    let bump = |i: usize| unsafe { AtomicU32::from_ptr(rr.at(i)).fetch_add(1, Relaxed) };
+    on_threads(nt, |t| share(n, t, nt).for_each(|u| (off[u]..off[u + 1]).for_each(|e| { bump((adj[e as usize] & hmask) as usize + 1); })));
+    for v in 0..n {
+        roff[v + 1] += roff[v];
+    }
+    let mut radj = vec![0u32; m];
+    let rar = Raw::of(&mut radj);
+    let mut rheavy: Vec<(u32, u32)> = on_threads(nt, |t| {
+        let mut out = Vec::new();
+        for u in share(n, t, nt) {
+            for e in off[u]..off[u + 1] {
+                let x = adj[e as usize];
+                let j = bump((x & hmask) as usize);
+                if x >> hb == big {
+                    out.push((j, heavy_weight(&heavy2, e)));
+                }
+                unsafe { *rar.at(j as usize) = u as u32 | (x & !hmask) };
+            }
+        }
+        out
+    })
+    .concat();
+    rheavy.sort_unstable();
+    roff.copy_within(0..n, 1);
+    roff[0] = 0;
+
+    // 4. Queries sorted so neighbouring searches share cached pages.
+    let mut order: Vec<usize> = (0..ends.len()).collect();
+    order.sort_unstable_by_key(|&q| ends[q]);
+    // Each direction: offsets, packed edge words, heavy weights.
+    let sides = [(&off[..], &adj[..], &heavy2[..]), (&roff[..], &radj[..], &rheavy[..])];
+    let mut ans = vec![INF; ends.len()];
+    let ansr = Raw::of(&mut ans);
+    let next = AtomicUsize::new(0);
+    // Bidirectional Dijkstra: grow the side with the smaller queue, record the
+    // best length where the sides meet, and stop once the two smallest queued
+    // keys add up to at least that. A side that runs dry has reached every node
+    // it can, so the best meeting seen is the answer.
+    on_threads(nt, |_| {
+        let mut dist = [Dist::new(n), Dist::new(n)];
+        let mut queue = [RadixHeap::new(), RadixHeap::new()];
         loop {
-            for d in 0..2 { loop { let Some(x)=self.heap[d].top() else {break}; if self.dist[d].get(x.node)==x.key {break} self.heap[d].pop(); } }
-            let (Some(a),Some(b))=(self.heap[0].top(),self.heap[1].top()) else {break};
-            if best!=INF && a.key+b.key>=best {break}
-            let d=if self.heap[0].len<=self.heap[1].len {0}else{1}; let item=self.heap[d].top().unwrap(); self.heap[d].pop();
-            let start=graph.offsets[d][item.node as usize]; let stop=graph.offsets[d][item.node as usize+1];
-            for i in start..stop { let (to,w)=graph.edge(d,i); let next=item.key+w as u64; if next>=best || !self.dist[d].relax(to,next){continue} let other=self.dist[1-d].get(to); if other!=INF {best=min(best,next+other)} if next<best {self.heap[d].push(next,to)} }
+            let q = next.fetch_add(1, Relaxed);
+            let Some(&i) = order.get(q) else { return };
+            let ((s0, t0), (s, t)) = (queries[i], ends[i]);
+            if s0 == t0 {
+                unsafe { *ansr.at(i) = 0 };
+                continue;
+            }
+            if roff[t as usize + 1] == roff[t as usize] {
+                continue; // no in-edge: unreachable
+            }
+            let mut best = INF;
+            *dist[0].at(s) = 0;
+            queue[0].push(0, s);
+            *dist[1].at(t) = 0;
+            queue[1].push(0, t);
+            while queue[0].len > 0 && queue[1].len > 0 && queue[0].top() + queue[1].top() < best {
+                let k = (queue[1].len < queue[0].len) as usize;
+                let (go, ga, gh) = sides[k];
+                let (a, b) = dist.split_at_mut(1);
+                let (mine, other) = if k == 0 { (a, b) } else { (b, a) };
+                let (d, u) = queue[k].pop();
+                if d > mine[0].get(u) {
+                    continue;
+                }
+                let lo = unsafe { *go.get_unchecked(u as usize) };
+                let hi = unsafe { *go.get_unchecked(u as usize + 1) };
+                for e in lo..hi {
+                    let x = unsafe { *ga.get_unchecked(e as usize) };
+                    let (v, w) = (x & hmask, x >> hb);
+                    let w = if w == big { heavy_weight(gh, e) } else { w };
+                    let nd = d + w as u64;
+                    if nd < best {
+                        let slot = mine[0].at(v);
+                        if nd < *slot {
+                            *slot = nd;
+                            queue[k].push(nd, v);
+                            prefetch(go.as_ptr().wrapping_add(v as usize));
+                            best = best.min(nd.saturating_add(other[0].get(v)));
+                        }
+                    }
+                }
+            }
+            unsafe { *ansr.at(i) = best };
+            queue.iter_mut().for_each(RadixHeap::clear);
+            dist.iter_mut().for_each(Dist::reset);
         }
-        if best==INF {-1}else{best as i64}
-    }
-}
+    });
 
-fn main() -> io::Result<()> {
-    let data=Mapping::open("/data/graph.txt")?; let mut p=0; let n=number(&data,&mut p) as usize; p+=1; let m=number(&data,&mut p) as usize; p+=1;
-    let header=p; let mut degree=[vec![0u32;n+1],vec![0u32;n+1]];
-    for _ in 0..m { let u=number(&data,&mut p) as usize;p+=1;let v=number(&data,&mut p) as usize;p+=1;let _=number(&data,&mut p);p+=1;degree[0][u+1]+=1;degree[1][v+1]+=1; }
-    for d in 0..2 { for i in 1..=n {degree[d][i]+=degree[d][i-1]} }
-    let mut offsets=degree; let mut edges=[vec![0u32;m],vec![0u32;m]]; let bits=(usize::BITS-(n-1).leading_zeros()) as u32; let mask=((1u64<<bits)-1) as u32; let sentinel=u32::MAX>>bits; let mut wide=[Vec::new(),Vec::new()]; p=header;
-    for _ in 0..m { let u=number(&data,&mut p);p+=1;let v=number(&data,&mut p);p+=1;let w=number(&data,&mut p);p+=1; let packed=w.min(sentinel)<<bits; let a=offsets[0][u as usize];offsets[0][u as usize]+=1;edges[0][a as usize]=v|packed;let b=offsets[1][v as usize];offsets[1][v as usize]+=1;edges[1][b as usize]=u|packed;if w>=sentinel {wide[0].push((a,w));wide[1].push((b,w));} }
-    for d in 0..2{for i in(1..=n).rev(){offsets[d][i]=offsets[d][i-1]}offsets[d][0]=0}
-    drop(data); for x in &mut wide {x.sort_unstable_by_key(|v|v.0)}
-    let graph=Arc::new(Graph{bits,mask,sentinel,offsets,edges,wide});
-    let qdata=fs::read("/data/queries.txt")?;p=0;let mut queries=Vec::with_capacity(2000);while p<qdata.len(){let a=number(&qdata,&mut p);p+=1;let b=number(&qdata,&mut p);p+=1;queries.push((a,b));} let queries=Arc::new(queries);
-    let answers=Arc::new((0..queries.len()).map(|_|AtomicI64::new(0)).collect::<Vec<_>>());let next=Arc::new(AtomicUsize::new(0));let mut joins=Vec::new();
-    for _ in 0..12 {let g=graph.clone();let q=queries.clone();let a=answers.clone();let nx=next.clone();joins.push(thread::spawn(move||{let mut search=Search::new();loop{let i=nx.fetch_add(1,Ordering::Relaxed);if i>=q.len(){break}a[i].store(search.run(&g,q[i].0,q[i].1),Ordering::Relaxed);}}));}
-    for j in joins {j.join().unwrap()} let mut out=Vec::with_capacity(answers.len()*12);for value in answers.iter(){use std::io::Write;writeln!(out,"{}",value.load(Ordering::Relaxed))?;}fs::write("/out/distances.txt",out)
+    // INF prints as -1 (u64::MAX as i64); every real distance is below 2^63.
+    let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
+    std::fs::write("/out/distances.txt", out).unwrap();
 }
