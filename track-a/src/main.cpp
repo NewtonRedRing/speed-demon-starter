@@ -284,8 +284,16 @@ int solve() {
                 for (unsigned j = 0; j < 3; ++j) {
                     constexpr unsigned ranks[]{50, 95, 99};
                     auto rank = begin + (ranks[j] * count + 99) / 100 - 1;
-                    if (count > 32) std::nth_element(start, rank, begin + count);
-                    percentiles[j] = *rank;
+                    if (count > 32) {
+                        // For 33..99 values the nearest-rank p99 is the
+                        // maximum, so avoid a third full partition pass.
+                        if (j == 2 && count < 100)
+                            percentiles[j] = *std::max_element(start, begin + count);
+                        else {
+                            std::nth_element(start, rank, begin + count);
+                            percentiles[j] = *rank;
+                        }
+                    } else percentiles[j] = *rank;
                     start = rank;
                 }
             }
