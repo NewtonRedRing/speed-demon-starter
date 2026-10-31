@@ -215,3 +215,31 @@ Output hashes were identical. These are uncontrolled local host measurements,
 not official scores. The PGO Dockerfile is unverified in the competition's
 exact container image; do not promote it to the submission branch before a
 successful sandbox build and official scoring comparison.
+
+
+## Second-round speed-first study (October 31)
+
+Fuses the endpoint space scan and 64-bit fingerprint computation into one
+bounded read. All fingerprint candidates still require full string equality,
+so collisions remain exact. Adds a large-group nearest-rank specialization:
+for 33-99 values, p99 is the maximum and does not require a third
+`nth_element`. At exactly 100 values, p99 is the 99th ranked value;
+all other groups use exact nearest-rank selection.
+
+Local GCC 15-compatible C++20 builds passed strict warnings and independent
+Python-oracle output checks on empty, 1,842, 100,000 and 160,000 record inputs,
+including the 1,842 endpoint catalogue and full-width uint32 latencies.
+A separate 3.1M-record synthetic workload compared eight alternating runs:
+percentile-specialized median 111.047 ms versus combined fused-hash median
+108.126 ms (about 2.6% locally). Both output hashes agreed exactly.
+A separate earlier eight-run batch measured 120.613 ms old versus 118.203
+ms with percentile specialization (2.0%, noisy). Neither is an official score.
+
+Increasing `MADV_DONTNEED` release intervals to 4 or 16 MiB gave local
+nine-run medians 105.869 / 105.159 ms versus 109.929 ms with 1 MiB, but
+increased peak RSS by roughly 20 / 53 MiB. The experiment retains 1 MiB
+because memory is scored, and these measured tradeoffs do not justify
+a blind promotion.
+
+**Do not merge until official data SHA-256, official cgroup-peak memory,
+and the complete board K coefficient confirm an improvement.**
