@@ -181,32 +181,50 @@ int solve() {
     std::vector<std::string> countries{"_UNMATCHED"};
     std::vector<std::uint8_t> regions;
     const auto load_regions = [&] {
-        std::ifstream lookup("/data/regions.csv");
-        std::string line;
-        if (!std::getline(lookup, line) || line != "region_id,country")
+        const int fd = open("/data/regions.csv", O_RDONLY);
+        if (fd < 0) throw std::runtime_error("cannot open regions.csv");
+        struct stat st{};
+        if (fstat(fd, &st) || st.st_size <= 0) {
+            close(fd);
+            throw std::runtime_error("cannot stat regions.csv");
+        }
+        const std::size_t length = static_cast<std::size_t>(st.st_size);
+        void* mapped = mmap(nullptr, length, PROT_READ, MAP_PRIVATE, fd, 0);
+        close(fd);
+        if (mapped == MAP_FAILED) throw std::runtime_error("cannot map regions.csv");
+        auto cleanup = [length](void* p) { if (p) munmap(p, length); };
+        std::unique_ptr<void, decltype(cleanup)> mapping(mapped, cleanup);
+        const char* p = static_cast<const char*>(mapped);
+        const char* end = p + length;
+        constexpr std::string_view header = "region_id,country\n";
+        if (end - p < static_cast<std::ptrdiff_t>(header.size()) ||
+            std::memcmp(p, header.data(), header.size()))
             throw std::runtime_error("invalid regions.csv header");
+        p += header.size();
         std::array<std::uint8_t, 26 * 26 * 26> ids{};
-        while (std::getline(lookup, line)) {
-            const char* p = line.data();
-            const char* end = p + line.size();
+        regions.resize(1000000);
+        while (p < end) {
             const auto region = number(p, end);
-            if (p == end || *p++ != ',' || end - p != 3 || region > 9999999)
+            if (p == end || *p++ != ',' || end - p < 3 || region > 9999999)
                 throw std::runtime_error("invalid regions.csv row");
             unsigned code = 0;
-            for (const char* c = p; c < end; ++c) {
-                if (*c < 'A' || *c > 'Z') throw std::runtime_error("invalid country code");
-                code = code * 26 + static_cast<unsigned>(*c - 'A');
+            for (unsigned i = 0; i < 3; ++i) {
+                if (p[i] < 'A' || p[i] > 'Z') throw std::runtime_error("invalid country code");
+                code = code * 26 + static_cast<unsigned>(p[i] - 'A');
             }
+            const char* country_start = p;
+            p += 3;
+            if (p < end && *p++ != '\n')
+                throw std::runtime_error("invalid region line terminator");
             auto& country = ids[code];
             if (!country) {
                 if (countries.size() == 256) throw std::runtime_error("more than 255 countries");
                 country = static_cast<std::uint8_t>(countries.size());
-                countries.emplace_back(p, end);
+                countries.emplace_back(country_start, 3);
             }
             if (region >= regions.size()) regions.resize(region + 1);
             regions[region] = country;
         }
-        if (lookup.bad()) throw std::runtime_error("cannot read regions.csv");
     };
     Input input("/data/records.csv");
     const char* p = input.begin();
