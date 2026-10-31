@@ -448,6 +448,46 @@ fn digits(data: &[u8], at: usize) -> (u64, usize) {
 
 /// Parses every record in `data[start..end]` (both record boundaries; the
 /// 64 bytes after `end` must be readable) into `groups`.
+#[derive(Clone, Copy, Default)]
+struct Pending {
+    id: u64,
+    region: usize,
+    cents: i64,
+    name_bytes: u64,
+    note_bytes: u64,
+    hash: u64,
+    ptr: usize,
+    len: usize,
+}
+
+#[inline(always)]
+fn retire_pending(
+    p: Pending,
+    regions: &Regions,
+    unmatched: usize,
+    sightings: &mut Sightings,
+    groups: &mut [Agg],
+) {
+    let g = if p.region < regions.group_of.len() {
+        let x = unsafe { *regions.group_of.get_unchecked(p.region) };
+        if x != 0 { x as usize - 1 } else { unmatched }
+    } else {
+        unmatched
+    };
+    let agg = unsafe { groups.get_unchecked_mut(g) };
+    agg.count += 1;
+    agg.id_sum += p.id;
+    agg.amount_sum += p.cents;
+    agg.amount_min = agg.amount_min.min(p.cents);
+    agg.amount_max = agg.amount_max.max(p.cents);
+    agg.name_bytes += p.name_bytes;
+    agg.note_bytes += p.note_bytes;
+    sightings.push(g, p.hash, p.ptr, p.len);
+}
+
+/// Parses every record in data[start..end]. Region lookup and aggregation are
+/// deliberately retired 16 records after parse so the random region-table
+/// read overlaps with CSV scanning and name hashing.
 fn parse_records(
     data: &[u8],
     start: usize,
@@ -457,19 +497,19 @@ fn parse_records(
     groups: &mut [Agg],
 ) {
     let unmatched = regions.countries.len();
+    let mut pending = [Pending::default(); BATCH];
+    let mut pending_len = 0usize;
     let mut i = start;
     let mut sep = Structure::new(data, start);
     while i < end {
         prefetch_read(data.as_ptr().wrapping_add(i + 1536));
         i += 3 * (data[i] == 0xEF) as usize;
 
-        // Five structural separators define the complete record. Structure
-        // skips commas/newlines while quote parity says we are inside a field.
-        let f1 = sep.next(); // after id
-        let f2 = sep.next(); // after name
-        let f3 = sep.next(); // after note
-        let f4 = sep.next(); // after region
-        let eol = sep.next(); // record terminator
+        let f1 = sep.next();
+        let f2 = sep.next();
+        let f3 = sep.next();
+        let f4 = sep.next();
+        let eol = sep.next();
 
         let (id, _) = digits(data, i);
         let (region, _) = digits(data, f3.at + 1);
@@ -484,37 +524,37 @@ fn parse_records(
             + (data[frac + 1] - b'0') as u64) as i64;
         let cents = if neg { -cents } else { cents };
 
-        let g = match regions.group_of.get(region as usize) {
-            Some(&g) if g != 0 => g as usize - 1,
-            _ => unmatched,
-        };
-        let agg = &mut groups[g];
-        agg.count += 1;
-        agg.id_sum += id;
-        agg.amount_sum += cents;
-        agg.amount_min = agg.amount_min.min(cents);
-        agg.amount_max = agg.amount_max.max(cents);
-
         let nq = f2.quotes - f1.quotes;
         let tq = f3.quotes - f2.quotes;
-        let name_raw = f2.at - (f1.at + 1);
-        let note_raw = f3.at - (f2.at + 1);
-        agg.name_bytes += decoded_text_len(name_raw, nq) as u64;
-        agg.note_bytes += decoded_text_len(note_raw, tq) as u64;
-
-        // Generator encoding is canonical for non-empty names. Strip only the
-        // outer quotes; doubled quotes remain in the raw key and therefore
-        // preserve exact decoded equality. Both empty forms become length 0.
         let quoted = nq != 0;
         let ns = f1.at + 1 + quoted as usize;
         let ne = f2.at - quoted as usize;
-        sightings.push(
-            g,
-            hash_name(data, ns, ne),
-            data.as_ptr().wrapping_add(ns) as usize,
-            ne - ns,
-        );
+        let region = region as usize;
+        if region < regions.group_of.len() {
+            prefetch_read(unsafe { regions.group_of.as_ptr().add(region) });
+        }
+
+        pending[pending_len] = Pending {
+            id,
+            region,
+            cents,
+            name_bytes: decoded_text_len(f2.at - (f1.at + 1), nq) as u64,
+            note_bytes: decoded_text_len(f3.at - (f2.at + 1), tq) as u64,
+            hash: hash_name(data, ns, ne),
+            ptr: data.as_ptr().wrapping_add(ns) as usize,
+            len: ne - ns,
+        };
+        pending_len += 1;
+        if pending_len == BATCH {
+            for &x in &pending {
+                retire_pending(x, regions, unmatched, sightings, groups);
+            }
+            pending_len = 0;
+        }
         i = eol.at + 1;
+    }
+    for &x in &pending[..pending_len] {
+        retire_pending(x, regions, unmatched, sightings, groups);
     }
 }
 
