@@ -19,6 +19,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifndef SD_TUNE_WORKERS
+#define SD_TUNE_WORKERS 12
+#endif
+#ifndef SD_TUNE_PARAM
+#define SD_TUNE_PARAM 4096
+#endif
+
 using u64 = std::uint64_t;
 using i64 = std::int64_t;
 
@@ -101,7 +108,7 @@ class Stripe {
         std::array<std::atomic<u64>, 4> countries{};
         Entry(u64 hash, std::string_view name, Entry* next) : hash(hash), name(name), next(next) {}
     };
-    std::array<std::atomic<Entry*>, 4096> buckets_{};
+    std::array<std::atomic<Entry*>, SD_TUNE_PARAM> buckets_{};
     std::deque<Entry> entries_;
     std::mutex mutex_;
     static Entry* find(Entry* entry, u64 hash, std::string_view name) {
@@ -225,7 +232,7 @@ int solve() {
     if (p < end && *p == '\r') ++p;
     if (p == end || *p++ != '\n') throw std::runtime_error("invalid CSV header terminator");
     const auto size = static_cast<std::size_t>(end - input.begin());
-    const unsigned workers = size < 1024 * 1024 ? 1 : 12;
+    const unsigned workers = size < 1024 * 1024 ? 1 : SD_TUNE_WORKERS;
     std::vector<unsigned> parity(workers - 1);
     parallel(workers, [&](unsigned w) {
         if (w == workers - 1) load_regions();
