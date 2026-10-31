@@ -190,3 +190,33 @@ oracle methods under ASan/UBSan, strict GCC warnings and the allowlisted offline
 production-style sandbox pass. Added coverage exercises global density choices
 with sparse worker slices, 255/256 memberships, a nonzero bitmap base, duplicate
 tokens, partial final words and mixed sparse/dense Boolean operations.
+
+## 2026-10-31: Query-time posting materialisation experiment
+
+Converted per-shard u16 posting offsets into one global contiguous u32
+posting array immediately after the scan. List terms now borrow immutable
+slices via `Cow<[u32]>`; only Boolean operators that mutate a list copy it.
+This avoids reconstructing every leaf list for every Boolean query, but it
+trades a larger materialised posting array and a transient conversion peak
+for potential query-time savings. It is **experimental** until the Rust build,
+multiple output hashes and cgroup time/memory measurements are verified.
+The existing offline PGO build and 12-worker shard encoding are retained;
+naively reducing B to 4 workers would violate its 15-bit shard-offset limit.
+
+## 2026-10-31: Dynamic workers and bitmap reduction comparison
+
+Keep twelve logical shards to preserve the 15-bit local-document-offset
+encoding. Schedule them over up to twelve CPU-set worker threads; with twelve
+CPUs the original direct scoped-thread path stays in use.
+
+A C microbenchmark on AMD EPYC 9V74 compared the proposed 256-entry byte
+population/position-sum lookup with the existing six-POPCNT bitmap reduction.
+On ten million random words the POPCNT version used 2.19 ns/word versus
+4.18 ns/word for tables, and on sparse words 2.20 versus 4.95 ns/word.
+Therefore the lookup-table replacement is rejected; those figures are not
+an official benchmark or measurements on the scoring Intel CPU. The default
+bitmap density remains 1/32; a 1/16 threshold requires separate verification.
+
+The shared u32 postings and copy-on-write Boolean lists avoid repeated list
+construction but can cost additional transient memory. This commit requires
+correctness hash and cgroup time/memory validation on the official runner.

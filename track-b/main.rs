@@ -27,7 +27,8 @@ const THREADS: usize = 12;
 const NONE: u32 = u32::MAX;
 const BUCKETS: usize = 32; // scan output streams per thread; term i goes to bucket i % BUCKETS
 const GAP: u32 = 15; // a unit's 4-bit doc gap; GAP means the whole gap follows in the next unit
-const DOC_BITS: u32 = 15; // a thread's share holds under 2^15 documents
+const DOC_BITS: u32 = 15; // a logical shard holds under 2^15 documents
+const BITMAP_DENSITY_DIVISOR: usize = 32; // 16 is an unbenchmarked alternative
 
 /// The file, mapped over a spare zero page so loads of 32 bytes past any of
 /// its bytes stay inside the mapping.
@@ -42,13 +43,34 @@ fn map(path: &str) -> &'static [u8] {
     }
 }
 
-/// Runs f(t) on every thread and collects what each returns.
+/// Process all twelve logical input shards, but use no more workers than
+/// the available CPU set. Logical shard count must remain twelve because the
+/// posting representation stores each shard's document offsets in 15 bits.
 fn on_threads<R: Send>(f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    let workers = std::thread::available_parallelism().map_or(THREADS, |n| n.get().min(THREADS));
     let f = &f;
+    if workers == THREADS {
+        return std::thread::scope(|s| {
+            let hs: Vec<_> = (0..THREADS).map(|t| s.spawn(move || f(t))).collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+    }
+    // Only the non-scoring/small-cpuset path needs ordered result slots.
+    let next = AtomicUsize::new(0);
+    let results: Vec<Mutex<Option<R>>> = (0..THREADS).map(|_| Mutex::new(None)).collect();
     std::thread::scope(|s| {
-        let hs: Vec<_> = (0..THREADS).map(|t| s.spawn(move || f(t))).collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    })
+        let hs: Vec<_> = (0..workers).map(|_| s.spawn(|| loop {
+            let t = next.fetch_add(1, Relaxed);
+            if t >= THREADS {
+                break;
+            }
+            *results[t].lock().unwrap() = Some(f(t));
+        })).collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+    });
+    results.into_iter().map(|r| r.into_inner().unwrap().unwrap()).collect()
 }
 
 /// The decimal number at text[i..].
@@ -247,10 +269,10 @@ unsafe fn around(terms: &Terms, s: *const u8, len: usize, phrase: &[u32], j: usi
     true
 }
 
-/// A set of documents: a sorted list, or a bitmap. A term's bitmap is
-/// borrowed, and copied only when an operator first writes to it.
+/// A set of documents: a sorted list, or a bitmap. Both leaf kinds are
+/// borrowed and copied only when an operator must mutate them.
 enum Docs<'a> {
-    List(Vec<u32>),
+    List(Cow<'a, [u32]>),
     Bits(Cow<'a, [u64]>),
 }
 
@@ -273,11 +295,17 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
             }
             Bits(a)
         }
-        (Bits(a), b'A', List(mut b)) | (List(mut b), b'A', Bits(a)) => (b.retain(|&d| has(&a, d)), List(b)).1,
-        (List(mut a), _, Bits(b)) if op == b'N' => (a.retain(|&d| !has(&b, d)), List(a)).1,
+        (Bits(a), b'A', List(mut b)) | (List(mut b), b'A', Bits(a)) => {
+            b.to_mut().retain(|&d| has(&a, d));
+            List(b)
+        },
+        (List(mut a), _, Bits(b)) if op == b'N' => {
+            a.to_mut().retain(|&d| !has(&b, d));
+            List(a)
+        },
         (Bits(mut a), _, List(b)) | (List(b), _, Bits(mut a)) => {
             let x = a.to_mut();
-            for (w, m) in b.into_iter().map(bit) {
+            for (w, m) in b.iter().copied().map(bit) {
                 x[w] = if op == b'O' { x[w] | m } else { x[w] & !m };
             }
             Bits(a)
@@ -291,12 +319,12 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
             }
             v.extend_from_slice(&a[i..]);
             v.extend_from_slice(&b[j..]);
-            List(v)
+            List(Cow::Owned(v))
         }
         // AND or NOT: a binary search per document when b is far longer.
         (List(mut a), _, List(b)) if a.len() * 16 < b.len() => {
             let mut j = 0;
-            a.retain(|&d| {
+            a.to_mut().retain(|&d| {
                 j += b[j..].partition_point(|&x| x < d);
                 (j < b.len() && b[j] == d) == (op == b'A')
             });
@@ -305,16 +333,17 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
         // Otherwise a merge without branches: x stays when it is in b (AND)
         // or below b's next document (NOT), and a's rest stays for NOT.
         (List(mut a), _, List(b)) => {
+            let v = a.to_mut();
             let (mut i, mut j, mut k) = (0, 0, 0);
-            while i < a.len() && j < b.len() {
-                let (x, y) = (a[i], b[j]);
-                a[k] = x;
+            while i < v.len() && j < b.len() {
+                let (x, y) = (v[i], b[j]);
+                v[k] = x;
                 k += if op == b'A' { x == y } else { x < y } as usize;
                 (i, j) = (i + (x <= y) as usize, j + (y <= x) as usize);
             }
-            let rest = if op == b'A' { 0 } else { a.len() - i };
-            a.copy_within(i..i + rest, k);
-            a.truncate(k + rest);
+            let rest = if op == b'A' { 0 } else { v.len() - i };
+            v.copy_within(i..i + rest, k);
+            v.truncate(k + rest);
             List(a)
         }
     }
@@ -485,7 +514,7 @@ fn main() {
     // phrases read (their tokens need no state). Within a class the most
     // frequent come first, so the state of common terms shares cache lines.
     let class = |i: usize| match (in_bool[i], anchor[i]) {
-        (true, false) => (df[i] as usize * 32 <= sampled) as usize,
+        (true, false) => (df[i] as usize * BITMAP_DENSITY_DIVISOR <= sampled) as usize,
         (true, true) => 2,
         (false, true) => 3,
         (false, false) => 4,
@@ -591,6 +620,21 @@ fn main() {
     });
     drop(scans);
     let post: Vec<u16> = unsafe { std::mem::transmute(post) };
+    // Resolve each posting's shard-local u16 offset to its global u32 doc id
+    // exactly once, instead of re-allocating/reconstructing it per query.
+    let mut posting_docs: Vec<u32> = post.into_iter().map(u32::from).collect();
+    let mut posting_end = vec![0usize; lists];
+    for i in nbits..lists {
+        let mut at = start[i] as usize;
+        for (t, &first) in firsts.iter().enumerate() {
+            let len = seg[i * THREADS + t] as usize;
+            for d in &mut posting_docs[at..at + len] {
+                *d += first;
+            }
+            at += len;
+        }
+        posting_end[i] = at;
+    }
     let bits: Vec<u64> = unsafe { std::mem::transmute(bits) };
     let mut found = found.into_inner().unwrap();
     found.sort_unstable();
@@ -601,16 +645,7 @@ fn main() {
     unsafe { mallopt(-3, 64 << 20) };
     let docs = |id: u32| match id as usize {
         i if i < nbits => Docs::Bits(Cow::Borrowed(&bits[i * words..(i + 1) * words])),
-        i => {
-            let mut at = start[i] as usize;
-            let segs = &seg[i * THREADS..][..THREADS];
-            let mut v = Vec::with_capacity(segs.iter().map(|&n| n as usize).sum());
-            for (&n, &first) in segs.iter().zip(&firsts) {
-                v.extend(post[at..at + n as usize].iter().map(|&d| first + d as u32));
-                at += n as usize;
-            }
-            Docs::List(v)
-        }
+        i => Docs::List(Cow::Borrowed(&posting_docs[start[i] as usize..posting_end[i]])),
     };
     let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
@@ -622,7 +657,7 @@ fn main() {
             let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
             let set = if phrase {
                 let at = found.partition_point(|m| m.0 < q as u32);
-                Docs::List(found[at..].iter().take_while(|m| m.0 == q as u32).map(|m| m.1).collect())
+                Docs::List(Cow::Owned(found[at..].iter().take_while(|m| m.0 == q as u32).map(|m| m.1).collect()))
             } else {
                 let cur = docs(tids[0]);
                 ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| match &cur {

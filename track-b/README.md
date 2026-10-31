@@ -19,3 +19,7 @@ Dependencies: none.
 With another 24 hours: reduce per-token dictionary/state traffic and replace
 repeated Boolean block work only when an exact full-dataset benchmark improves
 the official K axes.
+
+The experimental shared-postings branch amortises doc ID reconstruction across
+all Boolean queries and borrows list terms copy-on-write. The 12-worker
+scan remains necessary for the compact 15-bit local doc-offset format.
