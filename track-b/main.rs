@@ -653,7 +653,7 @@ fn main() {
                     })
                 };
                 line(&mut out, &set);
-        }
+            }
             *chunk.lock().unwrap() = out;
         }
     });
