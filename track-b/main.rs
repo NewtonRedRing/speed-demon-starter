@@ -628,9 +628,18 @@ fn main() {
     let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
     on_threads(|_| loop {
-        let k = next.fetch_add(1, Relaxed);
-        let Some(chunk) = chunks.get(k) else { return };
-        let mut out = String::new();
+        // OpenMP-style guided scheduling: take up to four 64-query chunks
+        // early, then taper to one chunk near the tail. The atomic CAS
+        // reserves a disjoint range, so each output slot has one writer.
+        let Ok(first) = next.fetch_update(Relaxed, Relaxed, |i| {
+            (i < chunks.len()).then(|| {
+                i + (chunks.len() - i).div_ceil(THREADS * 4).clamp(1, 4)
+            })
+        }) else { return };
+        let count = (chunks.len() - first).div_ceil(THREADS * 4).clamp(1, 4);
+        for k in first..first + count {
+            let chunk = &chunks[k];
+            let mut out = String::new();
         for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
             let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
             let set = if phrase {
@@ -645,7 +654,8 @@ fn main() {
             };
             line(&mut out, &set);
         }
-        *chunk.lock().unwrap() = out;
+            *chunk.lock().unwrap() = out;
+        }
     });
     let out: String = chunks.into_iter().map(|c| c.into_inner().unwrap()).collect();
     std::fs::write("/out/results.txt", out).expect("/out/results.txt");
