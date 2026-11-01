@@ -478,18 +478,19 @@ fn main() {
     let ansr = Raw::of(&mut ans);
     let next = AtomicUsize::new(0);
     const QUERY_BATCH: usize = 4; // nearby target IDs stay on one worker's cache
+    let search_finished = std::sync::Barrier::new(nt);
     // Bidirectional Dijkstra: grow the side with the smaller queue, record the
     // best length where the sides meet, and stop once the two smallest queued
     // keys add up to at least that. A side that runs dry has reached every node
     // it can, so the best meeting seen is the answer.
-    on_threads(nt, |_| {
+    on_threads(nt, |t| {
         let mut dist = [Dist::new(n), Dist::new(n)];
         let mut queue = [RadixHeap::new(), RadixHeap::new()];
         loop {
             // OpenMP-like schedule(dynamic,4): adjacent target-sorted queries
             // run on the same worker, but slow workers cannot pin long ranges.
             let first = next.fetch_add(QUERY_BATCH, Relaxed);
-            if first >= order.len() { return; }
+            if first >= order.len() { break; }
             for &i in &order[first..(first + QUERY_BATCH).min(order.len())] {
                 let ((s0, t0), (s, t)) = (queries[i], ends[i]);
                 if s0 == t0 {
@@ -536,11 +537,16 @@ fn main() {
                 dist.iter_mut().for_each(Dist::reset);
             }
         }
+        // Reuse the search team: no worker discards adjacency pages until
+        // every query worker has stopped traversing the graph.
+        search_finished.wait();
+        for b in [&off[..], &adj[..], &roff[..], &radj[..]] {
+            release(b, t, nt);
+        }
     });
 
     // INF prints as -1 (u64::MAX as i64); every real distance is below 2^63.
     let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
     std::fs::write("/out/distances.txt", out).unwrap();
-    on_threads(nt, |t| [&off[..], &adj[..], &roff[..], &radj[..]].iter().for_each(|b| release(b, t, nt)));
     std::process::exit(0);
 }
