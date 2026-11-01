@@ -326,6 +326,7 @@ fn main() {
     let at: Vec<AtomicU64> = (0..HOURS).map(|_| AtomicU64::new(0)).collect(); // size, then offset
     let text = Shared::new(null_mut::<u8>());
     let barrier = Barrier::new(THREADS);
+    let exited = AtomicUsize::new(0);
 
     let work = |t: usize| unsafe {
         while let k @ 0..PARTS = claim_parse.fetch_add(1, Relaxed) {
@@ -434,7 +435,10 @@ fn main() {
                 o = o.add(1);
             }
         }
+        // The last thread to finish ends the process, without the joins and destructors.
+        if exited.fetch_add(1, AcqRel) == THREADS - 1 {
+            std::process::exit(0);
+        }
     };
     std::thread::scope(|s| (0..THREADS).for_each(|t| _ = s.spawn(move || work(t))));
-    std::process::exit(0); // skip the destructors
 }
