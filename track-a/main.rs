@@ -3,18 +3,17 @@
 // One pool of threads does everything in three phases, with a barrier between
 // them; at each barrier one thread does a short serial step.
 //
-// Parse. The log is memory-mapped and cut into line-aligned ranges, one per
-// thread. The timestamp is always 27 bytes and the 72-hour span is fixed, so a
-// line's hour index comes from its day and hour digits alone. One 64-byte scan
-// after the timestamp finds the method's end, the endpoint's end and the
-// line's end. Each thread interns endpoints in its own small table and files a
-// 4-byte record (latency, local endpoint id, 5xx flag) under the hour.
-// Serial step: merge the endpoint tables and sort the names, so an endpoint's
-// global id is its rank in output order.
+// Parse. The log is memory-mapped and cut into line-aligned pieces that the
+// threads claim in turn. The timestamp is always 27 bytes and the 72-hour span
+// is fixed, so a line's hour index comes from its day and hour digits alone.
+// One 64-byte scan after the timestamp finds the method's end, the endpoint's
+// end and the line's end. All threads intern endpoints in one shared table
+// and file a 4-byte record (latency, endpoint id, 5xx flag) under the hour.
+// Serial step: sort the names, so lines can be printed in output order.
 //
 // Hours. Threads claim hours in order. An hour's ~43k latencies are
-// counting-sorted by endpoint rank into per-thread scratch and three
-// selections per group give the percentiles. Each group's numbers are kept
+// counting-sorted by endpoint into per-thread scratch and three selections
+// per group give the percentiles. Each group's numbers are kept
 // along with the exact size the hour's text will take, since a number's width
 // is known without formatting it. Serial step: turn the sizes into offsets,
 // size the output file and map it.
@@ -27,7 +26,7 @@ use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use std::slice::from_raw_parts;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::Barrier;
 
 extern "C" {
@@ -48,6 +47,7 @@ unsafe fn map(len: usize, prot: i32, flags: i32, fd: i32) -> *mut u8 {
 }
 
 const THREADS: usize = 12;
+const PARTS: usize = THREADS * 8; // log pieces the threads claim in turn, as cores differ in speed
 const HOURS: usize = 72; // 2026-10-30T18:00Z to 2026-11-02T17:59:59Z
 // A record packs the latency above a 12-bit key: an 11-bit local endpoint id
 // and the 5xx flag. Latencies of 2^20 us or more (about 1% of lines) do not
@@ -110,42 +110,58 @@ unsafe fn decode(end: *const u8, len: usize) -> u32 {
     (high * 100_000_000 + _mm_extract_epi32::<1>(v) as u64) as u32
 }
 
-// Endpoint names to dense ids in first-seen order. Open addressing on a CRC of
-// the name's first and last eight bytes (masked when the name is shorter; the
-// rest of the line keeps both loads in bounds). Names point into the log.
+// Endpoint names to dense ids in first-seen order, shared by every thread.
+// Open addressing on a CRC of the name's first and last eight bytes (masked
+// when the name is shorter; the rest of the line keeps both loads in bounds).
+// Names point into the log. A free slot is claimed with BUSY, filled in, then
+// published with its id + 1; a thread that finds a name only reads.
 struct Interner {
-    names: Vec<&'static [u8]>,
-    slot: Vec<u16>, // id + 1 per slot, 0 if free
+    slot: Vec<AtomicU16>,
+    name: Vec<AtomicU64>, // by id: the name's address with its length above bit 48
+    count: AtomicUsize,
 }
 
 impl Interner {
     const SLOTS: usize = 1 << 12; // ids fit 11 bits; a seed has 1,842
+    const BUSY: u16 = u16::MAX;
 
     fn new() -> Self {
-        Interner { names: vec![], slot: vec![0; Self::SLOTS] }
+        let slot = (0..Self::SLOTS).map(|_| AtomicU16::new(0)).collect();
+        Interner { slot, name: (0..Self::SLOTS / 2).map(|_| AtomicU64::new(0)).collect(), count: AtomicUsize::new(0) }
     }
 
-    fn id(&mut self, s: &'static [u8]) -> u32 {
+    fn name(&self, id: usize) -> &'static [u8] {
+        let x = self.name[id].load(Relaxed);
+        unsafe { from_raw_parts((x & (1 << 48) - 1) as *const u8, (x >> 48) as usize) }
+    }
+
+    fn id(&self, s: &'static [u8]) -> u32 {
         let n = s.len();
         let word = |i: usize| unsafe { s.as_ptr().add(i).cast::<u64>().read_unaligned() };
         let a = word(0) & if n >= 8 { !0 } else { (1 << (8 * n)) - 1 };
         let b = if n >= 8 { word(n - 8) } else { 0 };
         let mut i = unsafe { _mm_crc32_u64(_mm_crc32_u64(n as u64, a), b) } as usize;
         loop {
-            let id = &mut self.slot[i % Self::SLOTS];
-            if *id == 0 {
-                assert!(self.names.len() < Self::SLOTS / 2, "too many endpoints"); // 11 bits
-                self.names.push(s);
-                *id = self.names.len() as u16;
+            let at = &self.slot[i % Self::SLOTS];
+            let mut id = at.load(Acquire);
+            if id == 0 && at.compare_exchange(0, Self::BUSY, Acquire, Acquire).is_ok() {
+                let new = self.count.fetch_add(1, Relaxed);
+                assert!(new < Self::SLOTS / 2, "too many endpoints"); // 11 bits
+                self.name[new].store(s.as_ptr() as u64 | (n as u64) << 48, Relaxed);
+                at.store(new as u16 + 1, Release);
+                id = new as u16 + 1;
             }
-            if same(self.names[*id as usize - 1], s) {
-                return *id as u32 - 1;
+            while id == Self::BUSY || id == 0 {
+                std::hint::spin_loop();
+                id = at.load(Acquire);
+            }
+            if same(self.name(id as usize - 1), s) {
+                return id as u32 - 1;
             }
             i += 1;
         }
     }
 }
-
 // Both names point into the log, where 32 bytes can always be read (the rest
 // of the line and the spare page follow), so a name of up to 32 bytes is
 // compared in one step.
@@ -174,10 +190,8 @@ struct Chunk {
 }
 
 struct Parser {
-    local: Interner,
     last: [*mut Chunk; HOURS],
     wide: Vec<Vec<(u32, u32)>>, // (latency, key) of the long ones
-    rank: Vec<u32>,             // local id -> global rank
     next: *mut Chunk,           // where the next chunk is carved
     kept: *mut Chunk,           // the first chunk not yet released
 }
@@ -189,10 +203,10 @@ impl Parser {
         let bytes = (len / 40 / CAP + 1 + HOURS) * size_of::<Chunk>();
         let next = unsafe { map(bytes, READ_WRITE, ANONYMOUS, -1).cast() };
         let wide = vec![vec![]; HOURS];
-        Parser { local: Interner::new(), last: [null_mut(); HOURS], wide, rank: vec![], next, kept: next }
+        Parser { last: [null_mut(); HOURS], wide, next, kept: next }
     }
 
-    unsafe fn parse(&mut self, mut p: *const u8, end: *const u8) {
+    unsafe fn parse(&mut self, ids: &Interner, mut p: *const u8, end: *const u8) {
         while p < end {
             // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
             let d = |i: usize| (*p.add(i) - b'0') as usize;
@@ -209,7 +223,7 @@ impl Parser {
             let name_end = find(nl != 0, at(sp & (sp - 1)), name, b' ');
             let eol = find(nl != 0, at(nl), name_end.add(5), b'\n');
             let name_bytes = from_raw_parts(name, name_end.offset_from(name) as usize);
-            let key = self.local.id(name_bytes) | ERR * (*name_end.add(1) == b'5') as u32;
+            let key = ids.id(name_bytes) | ERR * (*name_end.add(1) == b'5') as u32;
             let latency = decode(eol, eol.offset_from(name_end) as usize - 5); // after " SSS "
             p = eol.add(1);
 
@@ -245,10 +259,9 @@ impl Parser {
         }
     }
 
-    // Calls f(global rank, 5xx, latency) for every record of hour h.
+    // Calls f(id, 5xx, latency) for every record of hour h.
     unsafe fn each(&self, h: usize, mut f: impl FnMut(usize, bool, u32)) {
-        let rank = |key: u32| self.rank[(key & ID_MASK) as usize] as usize;
-        let mut g = |latency: u32, key: u32| f(rank(key), key & ERR != 0, latency);
+        let mut g = |latency: u32, key: u32| f((key & ID_MASK) as usize, key & ERR != 0, latency);
         let mut c = self.last[h];
         while let Some(chunk) = c.as_ref() {
             chunk.rec[..chunk.n as usize].iter().for_each(|&r| g(r >> KEY_BITS, r));
@@ -291,18 +304,19 @@ fn main() {
         }
         from_raw_parts(p, size)
     };
-    let mut cut = vec![size; THREADS + 1];
+    let mut cut = vec![size; PARTS + 1];
     cut[0] = 0;
-    for t in 1..THREADS {
-        cut[t] = cut[t - 1].max(size * t / THREADS);
+    for t in 1..PARTS {
+        cut[t] = cut[t - 1].max(size * t / PARTS);
         while cut[t] > 0 && cut[t] < size && log[cut[t] - 1] != b'\n' {
             cut[t] += 1;
         }
     }
 
-    let parser = |t: usize| Shared::new(Parser::new(cut[t + 1] - cut[t]));
-    let parsers: Vec<_> = (0..THREADS).map(parser).collect();
-    let names = Shared::new(Vec::<&[u8]>::new());
+    let parsers: Vec<_> = (0..THREADS).map(|_| Shared::new(Parser::new(size))).collect();
+    let claim_parse = AtomicUsize::new(0);
+    let ids = Interner::new();
+    let names = Shared::new((Vec::<&[u8]>::new(), Vec::<u32>::new())); // by id, and the ids by name
     let finished: Vec<AtomicBool> = (0..HOURS).map(|_| AtomicBool::new(false)).collect();
     let releasing = AtomicBool::new(false);
     let (claim, claim_text) = (AtomicUsize::new(0), AtomicUsize::new(0));
@@ -313,31 +327,21 @@ fn main() {
     let barrier = Barrier::new(THREADS);
 
     let work = |t: usize| unsafe {
-        let (from, to) = (log.as_ptr().add(cut[t]), log.as_ptr().add(cut[t + 1]));
-        parsers[t].get().parse(from, to);
+        while let k @ 0..PARTS = claim_parse.fetch_add(1, Relaxed) {
+            parsers[t].get().parse(&ids, log.as_ptr().add(cut[k]), log.as_ptr().add(cut[k + 1]));
+        }
 
-        // Global ids are ranks in unsigned byte order (a proper prefix first),
-        // which is the order lines are printed in within an hour.
+        // Lines are printed in unsigned byte order of the name within an hour
+        // (a proper prefix first), so the ids are put in that order.
         if barrier.wait().is_leader() {
-            let mut all = Interner::new();
-            for ps in &parsers {
-                let ps = ps.get();
-                ps.rank = ps.local.names.iter().map(|&n| all.id(n)).collect();
-            }
-            let mut sorted = all.names.clone();
-            sorted.sort_unstable();
-            let mut rank_of = vec![0; sorted.len()];
-            for (r, &n) in sorted.iter().enumerate() {
-                rank_of[all.id(n) as usize] = r as u32;
-            }
-            for id in parsers.iter().flat_map(|ps| ps.get().rank.iter_mut()) {
-                *id = rank_of[*id as usize];
-            }
-            *names.get() = sorted;
+            let all: Vec<_> = (0..ids.count.load(Relaxed)).map(|e| ids.name(e)).collect();
+            let mut order: Vec<u32> = (0..all.len() as u32).collect();
+            order.sort_unstable_by_key(|&e| all[e as usize]);
+            *names.get() = (all, order);
         }
         barrier.wait();
 
-        let names = &*names.get();
+        let (names, order) = &*names.get();
         let ne = names.len();
         let (mut start, mut errors, mut latency) = (vec![0u32; ne + 1], vec![0u32; ne], vec![]);
         while let h @ 0..HOURS = claim.fetch_add(1, Relaxed) {
@@ -365,7 +369,8 @@ fn main() {
             }
 
             let mut size = 0;
-            for e in 0..ne {
+            for &e in order {
+                let e = e as usize;
                 let a = &mut latency[start[e] as usize..start[e + 1] as usize];
                 let n = a.len();
                 if n == 0 {

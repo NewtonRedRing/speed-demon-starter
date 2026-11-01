@@ -7,6 +7,23 @@ Every step from the reference to your final version, each with the live-board ru
 | 0 | The reference, unchanged | | 32.05 | 228 | 0 |
 | 1 | Original C++ submission, e8f4a84 | run-93a4bea20d70 | 0.628347 | 34.73 | 48.326 |
 
+## November 1: claimed pieces and one shared endpoint table
+
+The log is cut into 96 line-aligned pieces that threads claim in turn, instead
+of one range per thread, so a slow core no longer delays the barrier. Endpoints
+are interned in one lock-free table shared by all threads (a free slot is
+claimed, filled and published), so ids are global while parsing: the serial
+table merge and the per-record rank lookups are gone, and the hour phase
+counts by id and walks the groups in name order. A first version that took a
+lock when a thread met a name was much slower (about 34 ms), because the
+threads all meet most names at once.
+
+Local Linux-volume runs with the official timer, fresh sandboxed containers
+and 16 interleaved runs per image: pieces alone 27.28 / 25.06 ms trimmed
+(before / after), shared table on top 25.96 / 23.34 ms. Memory was within 1 MB.
+Official full seed-1 hash, `check.py`, tiny seeds 2, 7, 42, 2026 and sample
+seeds 17 and 103 all match the reference. Local timings are not board results.
+
 ## Local candidate measurements (not board runs)
 
 | Candidate | Process median (s) | Peak RSS (MiB) | Repetitions | Validation |
