@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TIMER_CONTEXT = ROOT / "scripts"
 WALL_PATTERN = re.compile(r"SPEED_DEMON_PROCESS_NS=(\d+)")
 PEAK_PATTERN = re.compile(r"SPEED_DEMON_CGROUP_PEAK_BYTES=(\d+)")
+MINFLT_PATTERN = re.compile(r"SPEED_DEMON_MINOR_FAULTS=(\d+)")
 
 
 def invoke(args, *, cwd=ROOT, capture=False):
@@ -84,6 +85,7 @@ def measure(tag, runs):
         raise RuntimeError(f"{tag}: only {passes}/{runs} official SHA-256 checks passed")
     wall = [int(v) / 1e6 for v in WALL_PATTERN.findall(result.stderr + result.stdout)]
     mem = [int(v) / 1024**2 for v in PEAK_PATTERN.findall(result.stderr + result.stdout)]
+    faults = [int(v) for v in MINFLT_PATTERN.findall(result.stderr + result.stdout)]
     if len(wall) != runs:
         raise RuntimeError(
             f"{tag}: found {len(wall)} process-only timings for {runs} runs. "
@@ -96,7 +98,11 @@ def measure(tag, runs):
         print(f"{tag} maximum observed cgroup peak: {max(mem):.2f} MiB")
     else:
         print(f"{tag} cgroup memory.peak unavailable; memory comparison omitted")
-    return trimmed, max(mem) if mem else None
+    if len(faults) == runs:
+        print(f"{tag} median child minor faults: {statistics.median(faults):,.0f}")
+    else:
+        print(f"{tag} minor fault counter unavailable")
+    return trimmed, max(mem) if mem else None, statistics.median(faults) if len(faults) == runs else None
 
 
 def main():
@@ -107,6 +113,8 @@ def main():
                         help="Single-change experiment branch or commit")
     parser.add_argument("--runs", type=int, default=5,
                         help="Number of complete official-full-data runs for each (default 5)")
+    parser.add_argument("--reverse", action="store_true",
+                        help="Measure candidate first to detect run-order/thermal bias")
     args = parser.parse_args()
     if args.runs < 1:
         parser.error("--runs must be positive")
@@ -118,8 +126,12 @@ def main():
         directory = Path(temp)
         base_tag = build_revision(args.base_ref, "baseline", directory)
         candidate_tag = build_revision(args.candidate_ref, "candidate", directory)
-        baseline = measure(base_tag, args.runs)
-        candidate = measure(candidate_tag, args.runs)
+        if args.reverse:
+            candidate = measure(candidate_tag, args.runs)
+            baseline = measure(base_tag, args.runs)
+        else:
+            baseline = measure(base_tag, args.runs)
+            candidate = measure(candidate_tag, args.runs)
 
     print("\n===== REPRODUCIBLE TRACK A COMPARISON =====")
     print(f"base:      {args.base_ref}")
@@ -131,6 +143,9 @@ def main():
         memory_delta = candidate[1] / baseline[1] - 1
         print(f"Candidate peak memory: {memory_delta:+.2%} relative to baseline "
               f"({baseline[1]:.2f} vs {candidate[1]:.2f} MiB)")
+    if baseline[2] is not None and candidate[2] is not None:
+        print(f"Median child minor faults: {baseline[2]:,.0f} (baseline) vs "
+              f"{candidate[2]:,.0f} (candidate)")
     print("Both candidates produced the official expected SHA-256 on every run.")
     print("Do not promote solely on local time: also inspect memory and formatted scc lines.")
     print("Only a new official leaderboard run can establish a score improvement.")
