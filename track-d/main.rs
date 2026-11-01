@@ -477,6 +477,7 @@ fn main() {
     let mut ans = vec![INF; ends.len()];
     let ansr = Raw::of(&mut ans);
     let next = AtomicUsize::new(0);
+    const QUERY_BATCH: usize = 4; // nearby target IDs stay on one worker's cache
     // Bidirectional Dijkstra: grow the side with the smaller queue, record the
     // best length where the sides meet, and stop once the two smallest queued
     // keys add up to at least that. A side that runs dry has reached every node
@@ -485,51 +486,55 @@ fn main() {
         let mut dist = [Dist::new(n), Dist::new(n)];
         let mut queue = [RadixHeap::new(), RadixHeap::new()];
         loop {
-            let q = next.fetch_add(1, Relaxed);
-            let Some(&i) = order.get(q) else { return };
-            let ((s0, t0), (s, t)) = (queries[i], ends[i]);
-            if s0 == t0 {
-                unsafe { *ansr.at(i) = 0 };
-                continue;
-            }
-            if roff[t as usize + 1] == roff[t as usize] {
-                continue; // no in-edge: unreachable
-            }
-            let mut best = INF;
-            *dist[0].at(s) = 0;
-            queue[0].push(0, s);
-            *dist[1].at(t) = 0;
-            queue[1].push(0, t);
-            while queue[0].len > 0 && queue[1].len > 0 && queue[0].top() + queue[1].top() < best {
-                let k = (queue[1].len < queue[0].len) as usize;
-                let (go, ga, gh) = sides[k];
-                let (a, b) = dist.split_at_mut(1);
-                let (mine, other) = if k == 0 { (a, b) } else { (b, a) };
-                let (d, u) = queue[k].pop();
-                if d > mine[0].get(u) {
+            // OpenMP-like schedule(dynamic,4): adjacent target-sorted queries
+            // run on the same worker, but slow workers cannot pin long ranges.
+            let first = next.fetch_add(QUERY_BATCH, Relaxed);
+            if first >= order.len() { return; }
+            for &i in &order[first..(first + QUERY_BATCH).min(order.len())] {
+                let ((s0, t0), (s, t)) = (queries[i], ends[i]);
+                if s0 == t0 {
+                    unsafe { *ansr.at(i) = 0 };
                     continue;
                 }
-                let lo = unsafe { *go.get_unchecked(u as usize) };
-                let hi = unsafe { *go.get_unchecked(u as usize + 1) };
-                for e in lo..hi {
-                    let x = unsafe { *ga.get_unchecked(e as usize) };
-                    let (v, w) = (x & hmask, x >> hb);
-                    let w = if w == big { heavy_weight(gh, e) } else { w };
-                    let nd = d + w as u64;
-                    if nd < best {
-                        let slot = mine[0].at(v);
-                        if nd < *slot {
-                            *slot = nd;
-                            queue[k].push(nd, v);
-                            prefetch(go.as_ptr().wrapping_add(v as usize));
-                            best = best.min(nd.saturating_add(other[0].get(v)));
+                if roff[t as usize + 1] == roff[t as usize] {
+                    continue; // no in-edge: unreachable
+                }
+                let mut best = INF;
+                *dist[0].at(s) = 0;
+                queue[0].push(0, s);
+                *dist[1].at(t) = 0;
+                queue[1].push(0, t);
+                while queue[0].len > 0 && queue[1].len > 0 && queue[0].top() + queue[1].top() < best {
+                    let k = (queue[1].len < queue[0].len) as usize;
+                    let (go, ga, gh) = sides[k];
+                    let (a, b) = dist.split_at_mut(1);
+                    let (mine, other) = if k == 0 { (a, b) } else { (b, a) };
+                    let (d, u) = queue[k].pop();
+                    if d > mine[0].get(u) {
+                        continue;
+                    }
+                    let lo = unsafe { *go.get_unchecked(u as usize) };
+                    let hi = unsafe { *go.get_unchecked(u as usize + 1) };
+                    for e in lo..hi {
+                        let x = unsafe { *ga.get_unchecked(e as usize) };
+                        let (v, w) = (x & hmask, x >> hb);
+                        let w = if w == big { heavy_weight(gh, e) } else { w };
+                        let nd = d + w as u64;
+                        if nd < best {
+                            let slot = mine[0].at(v);
+                            if nd < *slot {
+                                *slot = nd;
+                                queue[k].push(nd, v);
+                                prefetch(go.as_ptr().wrapping_add(v as usize));
+                                best = best.min(nd.saturating_add(other[0].get(v)));
+                            }
                         }
                     }
                 }
+                unsafe { *ansr.at(i) = best };
+                queue.iter_mut().for_each(RadixHeap::clear);
+                dist.iter_mut().for_each(Dist::reset);
             }
-            unsafe { *ansr.at(i) = best };
-            queue.iter_mut().for_each(RadixHeap::clear);
-            dist.iter_mut().for_each(Dist::reset);
         }
     });
 
