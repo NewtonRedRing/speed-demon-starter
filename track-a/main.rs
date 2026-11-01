@@ -59,6 +59,7 @@ const PACKED_MAX: u32 = 1 << 20;
 
 // State the threads share, each touching its own part or waiting at a barrier
 // while one thread writes.
+#[repr(align(64))]
 struct Shared<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Shared<T> {}
 impl<T> Shared<T> {
