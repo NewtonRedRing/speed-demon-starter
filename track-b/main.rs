@@ -379,14 +379,12 @@ struct Units {
 }
 
 impl Units {
-    /// Writes x at the next place, but moves past it only if keep, so a token
-    /// that adds nothing costs a store and no branch.
-    fn put(&mut self, x: u16, keep: bool) {
+    fn put(&mut self, x: u16) {
         if self.at == self.end {
             self.grow();
         }
         unsafe { *(self.at as *mut u16) = x };
-        self.at += 2 * keep as usize;
+        self.at += 2;
     }
 
     #[cold]
@@ -398,12 +396,12 @@ impl Units {
         self.chunks.push(c);
     }
 
-    fn add(&mut self, keep: bool, offset: u32, doc: u32) {
+    fn add(&mut self, offset: u32, doc: u32) {
         let gap = doc - self.prev;
-        self.put((offset << 4 | gap.min(GAP)) as u16, keep);
-        self.prev = if keep { doc } else { self.prev };
-        if keep & (gap >= GAP) {
-            self.put(gap as u16, true);
+        self.put((offset << 4 | gap.min(GAP)) as u16);
+        self.prev = doc;
+        if gap >= GAP {
+            self.put(gap as u16);
         }
     }
 
@@ -525,10 +523,13 @@ fn main() {
                 bits[b * words + w].fetch_or(std::mem::take(x), Relaxed);
             }
         };
-        // Every token does the same work, kept or not by masks, so whether a
-        // term is new to the document, a list or a bitmap costs no branch.
+        // Bitmap OR is idempotent; only list postings need per-document
+        // deduplication. Unused terms and phrase-only anchors need no posting.
         let n = walk(&text[cut[t]..cut[t + 1]], first, &terms, #[inline(always)] |doc, id, s, len| {
             let i = (id as usize).min(nkeep);
+            if i == nkeep {
+                return;
+            }
             if i.wrapping_sub(a0) < nkeep - a0 {
                 let k = i - a0;
                 for &(_, q, j) in &anchored[astart[k]..astart[k + 1]] {
@@ -539,16 +540,23 @@ fn main() {
                     }
                 }
             }
-            if doc as usize / 64 != block {
-                let w = std::mem::replace(&mut block, doc as usize / 64);
-                flush(&mut pending, w);
+            if i < nbits {
+                if doc as usize / 64 != block {
+                    let w = std::mem::replace(&mut block, doc as usize / 64);
+                    flush(&mut pending, w);
+                }
+                pending[i] |= 1u64 << (doc % 64);
+                return;
+            }
+            if i >= lists {
+                return;
             }
             let mark = (doc - first + 1) as u16;
             let new = std::mem::replace(&mut last[i], mark) != mark;
-            let list = new & (i.wrapping_sub(nbits) < lists - nbits);
-            pending[i.min(nbits)] |= ((new & (i < nbits)) as u64) << (doc % 64);
-            buckets[i % BUCKETS].add(list, (i / BUCKETS) as u32, doc - first);
-            count[i] += list as u16;
+            if new {
+                buckets[i % BUCKETS].add((i / BUCKETS) as u32, doc - first);
+                count[i] += 1;
+            }
         });
         flush(&mut pending, block);
         buckets.iter_mut().for_each(Units::finish);

@@ -12,7 +12,8 @@ git history.
 | 2ef4945 | run-c08453a4bb25 | 48.717 ms | 11,825,152 B | 70.745228 | Correct; S=677, D=1 |
 | c1e304d | run-840bad07699d | 48.498 ms | 28,590,080 B | 66.960059 | 2^18-slot name table; rejected |
 | 39502cdb | run-0b1d0e65fdba | not recorded | 17,747,968 B | 68.996326 | Zero-copy EOF mapping; reverted |
-| 3529757 | run-6d316a3b4177 | not recorded | 11,599,872 B | **70.969633** | Submitted best |
+| 3529757 | run-6d316a3b4177 | not recorded | 11,599,872 B | 70.969633 | Previous best |
+| 719f5e2 | run-3c912b013ad6 | 44.564 ms | 11,374,592 B | **72.430291** | **Submitted best**; S=572, D=1 |
 
 Other scored runs: `run-7a3979243031` scored 70.905419, and
 `run-0917a954f355` scored 70.830007 with M=11,579,392 B. Their commits are not
@@ -20,13 +21,11 @@ recorded in this log.
 
 ## Submitted version
 
-The submitted version is commit `3529757`, scored at 70.969633 points. Its
-`main.rs` reads a fixed input path and writes a fixed output path, with no
-environment overrides. A later cleanup removes the test-only environment hooks
-for paths, which leaves the program's behavior unchanged. That cleanup passed
-the local `check.py c` gate: the offline build and the sandbox run both
-succeeded, and the output hash matches the official `expected_output_sha256`.
-It has no board run yet.
+The submitted version is commit `719f5e2`, scored at 72.430291 points, up
+1.460658 points from `3529757`. All board gates passed. Its
+`main.rs` reads fixed input/output paths without environment overrides. The
+offline build, sandbox and official full seed-1 output hash pass locally and
+on the board.
 
 ## Rejected board experiments
 
@@ -48,7 +47,10 @@ Correctness passed the official full seed-1 hash, official-reference comparisons
 on tiny seeds 2, 7, 42 and 2026, sample seeds 17 and 103, full seed 23, and a
 separate quote/boundary/collision test including a 65,541-byte name. Test data
 and benchmark scripts are outside the submission. A board result is required
-before calling this an improvement to the submitted best.
+before calling this an improvement to the submitted best. That result is now
+recorded above: 72.430291 points. Cache-line-fused membership and predicted
+membership prefetch were tested afterward but did not beat this candidate,
+so both were removed.
 
 Six workers were slower and were not retained.
 

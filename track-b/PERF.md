@@ -21,3 +21,26 @@ requested 106 ms / 41 MB target is still unmet.
 Run `run-d270ce788113` at `2ef4945` scored 69.244251 points. It was faster
 and used less memory than the commit before it, but it has 37 more source lines
 and scored lower overall, so it is not the submitted version.
+
+## November 1: role-specific scan candidate
+
+Bitmap terms now only OR membership bits; list terms alone deduplicate and
+append postings. Unused terms and phrase-only anchors create no posting state.
+The obsolete masked-write path was removed.
+
+Local interleaved Linux-volume runs with the official timer and fresh sandboxed
+containers consistently favored this approach, although the margin varied.
+One 12-run-per-image comparison gave trimmed means of 217.290 ms for the
+protected baseline and 205.659 ms for the role-specific scan (5.4% lower).
+The final simplified writer was rechecked with 12 runs per image: 245.374 ms
+versus 230.712 ms (6.0% lower), with essentially unchanged trimmed memory
+(53,217,792 versus 53,248,512 bytes). These are local measurements, not board
+results.
+
+Correctness matches the official full seed-1 hash and the official reference on
+tiny seeds 2, 7, 42 and 2026 and sample seeds 17 and 103.
+
+Rejected local alternatives: a 512-entry exact token cache, a second dictionary
+prefetch stage, a prefix-only candidate hash, a 32-token prefetch lag, smaller
+posting buffers, and generator-trained PGO. None justified its time, memory or
+formatted-source cost. They are not in the submission.
