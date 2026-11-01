@@ -4,7 +4,7 @@ Exact zero-dependency Rust implementation of the official directed shortest-path
 Track D specification.
 
 The graph is memory-mapped and built into packed forward and reverse CSR arrays,
-then ordered into BFS locality blobs of 1,024 nodes.
+then ordered into BFS locality blobs of 512 nodes.
 Weights that do not fit the packed field use an exact full-width side table;
 parallel edges, zero weights and directedness are preserved.
 

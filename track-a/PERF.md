@@ -47,5 +47,6 @@ full seed-1 hash.
 | Endpoint hash tags plus SWAR | 27.266 / 27.947 ms | No improvement; removed |
 | Full-scale generator-trained PGO | 25.313 / 24.723 ms | Too small to justify source/build cost and noise |
 | Median-first percentile selection | 24.336 / 24.214 ms | Inconclusive; removed |
+| Six or eight workers | 29.210 / 35.939 / 31.199 ms (12 / 6 / 8) | Slower; 12 retained |
 
 No Track A code change from these experiments was submitted.

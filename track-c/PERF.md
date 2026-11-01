@@ -74,3 +74,6 @@ not improve elapsed time enough to justify its memory or source-size cost:
   locally faster (47.339 / 45.369 ms), but raised trimmed memory from
   12,852,429 to 19,974,554 bytes; the combined time-memory score regressed.
   The 2^17-slot table remains.
+- Changing the exact-name prefetch batch from 16 to 32 or 8 also matched the
+  full hash but was slower in 16 interleaved runs: 37.713 ms versus 38.833
+  and 38.955 ms, respectively. Batch 16 remains.
