@@ -486,8 +486,10 @@ fn main() {
                 unsafe { *ansr.at(i) = 0 };
                 continue;
             }
-            if roff[t as usize + 1] == roff[t as usize] {
-                continue; // no in-edge: unreachable
+            if roff[t as usize + 1] == roff[t as usize]
+                || off[s as usize + 1] == off[s as usize]
+            {
+                continue; // no in-edge to target or no out-edge from source
             }
             let mut best = INF;
             *dist[0].at(s) = 0;
