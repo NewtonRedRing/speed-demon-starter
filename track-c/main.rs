@@ -724,18 +724,12 @@ fn render(regions: &Regions, groups: &[Agg]) -> Vec<u8> {
 }
 
 fn main() {
-    let var =
-        |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_string());
-    let (records, regions, output) = (
-        var("RECORDS_PATH", "/data/records.csv"),
-        var("REGIONS_PATH", "/data/regions.csv"),
-        var("OUTPUT_PATH", "/out/aggregates.txt"),
-    );
+    let (records, regions, output) = ("/data/records.csv", "/data/regions.csv", "/out/aggregates.txt");
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let result = map_file(&regions).and_then(|regions_data| {
+    let result = map_file(regions).and_then(|regions_data| {
         let regions = parse_regions(regions_data);
-        let groups = aggregate(map_file(&records)?, &regions, threads);
-        std::fs::write(&output, render(&regions, &groups))
+        let groups = aggregate(map_file(records)?, &regions, threads);
+        std::fs::write(output, render(&regions, &groups))
     });
     if let Err(e) = result {
         eprintln!("track-c: failed: {e}");
