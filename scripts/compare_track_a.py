@@ -105,6 +105,59 @@ def measure(tag, runs):
     return trimmed, max(mem) if mem else None, statistics.median(faults) if len(faults) == runs else None
 
 
+def measure_interleaved(base_tag, candidate_tag, runs, reverse=False):
+    """Alternate one validated baseline and candidate run per pair.
+
+    Every single run invokes check.py's official input AND output SHA-256 gate.
+    This avoids testing all baseline runs under one machine-load condition.
+    """
+    tags = {"baseline": base_tag, "candidate": candidate_tag}
+    results = {"baseline": [], "candidate": []}
+    names = ["baseline", "candidate"]
+    for i in range(runs):
+        order = list(reversed(names)) if (bool(i & 1) ^ reverse) else names
+        for label in order:
+            tag = tags[label]
+            result = invoke([
+                sys.executable, str(ROOT / "check.py"), "a", "--skip-build",
+                "--image", tag, "--runs", "1",
+            ], capture=True)
+            if not re.search(r"PASS\s+Track A run 1/1", result.stdout):
+                raise RuntimeError(f"{label} pair {i + 1}: official output SHA gate not confirmed")
+            logs = result.stderr + result.stdout
+            times = WALL_PATTERN.findall(logs)
+            if len(times) != 1:
+                raise RuntimeError(f"{label} pair {i + 1}: expected exactly one process timing")
+            peaks = PEAK_PATTERN.findall(logs)
+            minor = MINFLT_PATTERN.findall(logs)
+            results[label].append((
+                int(times[0]) / 1e6,
+                int(peaks[0]) / 1024**2 if len(peaks) == 1 else None,
+                int(minor[0]) if len(minor) == 1 else None,
+            ))
+        a, b = results["baseline"][-1][0], results["candidate"][-1][0]
+        print(f"pair {i + 1}/{runs}: baseline {a:.3f} ms | candidate {b:.3f} ms", flush=True)
+
+    def summarize(label):
+        samples = results[label]
+        times = [x[0] for x in samples]
+        middle = statistics.mean(sorted(times)[1:-1]) if runs >= 3 else statistics.mean(times)
+        peaks = [x[1] for x in samples if x[1] is not None]
+        minor = [x[2] for x in samples if x[2] is not None]
+        print(f"{label} interleaved process-only times (ms): " +
+              ", ".join(f"{x:.3f}" for x in times))
+        print(f"{label} trimmed mean: {middle:.3f} ms")
+        if len(minor) == runs:
+            print(f"{label} median child minor faults: {statistics.median(minor):,.0f}")
+        if len(peaks) == runs:
+            print(f"{label} maximum cgroup peak: {max(peaks):.2f} MiB")
+        return (middle,
+                max(peaks) if len(peaks) == runs else None,
+                statistics.median(minor) if len(minor) == runs else None)
+
+    return summarize("baseline"), summarize("candidate")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-ref", default="origin/speed-demon",
@@ -115,6 +168,8 @@ def main():
                         help="Number of complete official-full-data runs for each (default 5)")
     parser.add_argument("--reverse", action="store_true",
                         help="Measure candidate first to detect run-order/thermal bias")
+    parser.add_argument("--interleave", action="store_true",
+                        help="Alternate baseline/candidate single-run pairs; best for noisy Docker hosts")
     args = parser.parse_args()
     if args.runs < 1:
         parser.error("--runs must be positive")
@@ -126,7 +181,9 @@ def main():
         directory = Path(temp)
         base_tag = build_revision(args.base_ref, "baseline", directory)
         candidate_tag = build_revision(args.candidate_ref, "candidate", directory)
-        if args.reverse:
+        if args.interleave:
+            baseline, candidate = measure_interleaved(base_tag, candidate_tag, args.runs, args.reverse)
+        elif args.reverse:
             candidate = measure(candidate_tag, args.runs)
             baseline = measure(base_tag, args.runs)
         else:
