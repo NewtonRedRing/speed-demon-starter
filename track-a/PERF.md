@@ -28,6 +28,10 @@ S=356 and 80.134076 points: no gain over the previous source (30.669 ms, 80.13
 typical), so the local gain did not carry over to the board machine. The source
 is kept because it is equal on the board and simpler in the serial step.
 
+## November 1: read-ahead prefetch
+
+One software prefetch of the log 3,072 bytes ahead of the line being parsed. In 20 interleaved local runs per image the trimmed time was 26.28 ms without and 25.49 ms with it (512, 1,536 and 6,144 bytes were similar); memory unchanged. Full seed-1 hash and check.py pass. The board result is recorded in the run table once measured.
+
 ## Local candidate measurements (not board runs)
 
 | Candidate | Process median (s) | Peak RSS (MiB) | Repetitions | Validation |

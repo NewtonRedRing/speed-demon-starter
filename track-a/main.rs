@@ -208,6 +208,7 @@ impl Parser {
 
     unsafe fn parse(&mut self, ids: &Interner, mut p: *const u8, end: *const u8) {
         while p < end {
+            _mm_prefetch::<_MM_HINT_T0>(p.add(3072).cast()); // the log is read once, in order
             // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
             let d = |i: usize| (*p.add(i) - b'0') as usize;
             let day = d(8) * 10 + d(9) + if d(6) == 0 { 0 } else { 31 };
