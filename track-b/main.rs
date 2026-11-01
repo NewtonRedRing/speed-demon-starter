@@ -173,7 +173,6 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
     let mut look = |r: &(__m256i, usize, *const u8, usize)| f(t.find(r.0, r.1), r.2, r.3);
     let mut n = 0usize;
     loop {
-        _mm_prefetch::<_MM_HINT_T0>(p.add(1024).cast()); // the text is read once, in order
         let (word, nl) = classes(p);
         let stop = if nl != 0 { nl.trailing_zeros() } else { 64 }; // the window's bytes in this document
         let mut m = word & ((1u128 << stop) - 1) as u64;
