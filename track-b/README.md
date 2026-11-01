@@ -30,8 +30,8 @@ doc-offset format, independently of the available worker count.
 The retained candidate passed five final production-build official-input/output
 checks. Final fresh-output local trimmed time fell from 364.180 ms to
 331.222 ms and maximum observed cgroup peak from 93.155 MB to 55.194 MB.
-These are VM measurements,
-not an official score or the requested 106 ms/41 MB target.
+These are VM measurements, not board measurements. The latest official result
+is in `PERF.md`; the requested 106 ms/41 MB target remains unmet.
 
 ```powershell
 python scripts\investigate_tracks.py --tracks b --runs 9 --variants baseline shard-posts --output .out\b-postings.json

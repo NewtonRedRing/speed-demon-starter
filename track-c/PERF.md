@@ -204,3 +204,11 @@ The runner defaults to immutable baseline
 The final report `.out/four-track-fresh-output.json` supersedes earlier
 reused-output measurements, whose memory accounting could inherit page charges.
 The 20 ms/11 MB target has not been established.
+
+## Official board result — commit `2ef4945`
+
+Track C source was unchanged by this push. The board nevertheless ran and
+scored it successfully: `run-c08453a4bb25`, T=48.717 ms,
+M=11,825,152 B, S=677, D=1, K=25.995882, 70.745228 points.
+All official gates passed. This is below the existing best
+`run-7a3979243031` (70.905419 points). The 20 ms/11 MB target remains unmet.

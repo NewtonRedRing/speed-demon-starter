@@ -127,3 +127,11 @@ observed cgroup peaks are not official i5-13500 or parent-cgroup results.
 The final report `.out/four-track-fresh-output.json` supersedes earlier
 reused-output measurements, whose memory accounting could inherit page charges.
 The 120 ms/66 MB target has not been established.
+
+## Official board result — commit `2ef4945`
+
+Track D source was unchanged by this push. The board nevertheless ran and
+scored it successfully: `run-b47491020917`, T=177.553 ms,
+M=75,284,480 B, S=491, D=1, K=23.028217, 68.113015 points.
+All official gates passed. This is below the existing best
+`run-e3a230f2ca26` (68.316671 points). The 120 ms/66 MB target remains unmet.

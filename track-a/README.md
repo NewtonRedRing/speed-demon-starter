@@ -28,8 +28,9 @@ Timing changed direction across batches. The final nine-pair production-build
 comparison, with fresh tmpfs output on every run, found time ratio 0.9953
 (bootstrap 95% interval 0.8249..1.0610), with median paired peak reduction of
 10.6%. The complete-score interval still crosses no change.
-These are local VM measurements, not official results or the 16 ms/18 MB target.
-All five final production-build official-input/output checks passed.
+These local measurements are not official scores. The latest official
+scoring-machine result is recorded in `PERF.md`; the 16 ms/18 MB target remains
+unmet.
 
 Reproduce the isolated comparison from the repository root:
 

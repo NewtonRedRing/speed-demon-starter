@@ -553,4 +553,14 @@ The A-specific runner also provides fault/mapping probes and parse-only mode.
 Its final smoke builds passed all five Rust regression checks for both variants.
 Raw local reports are under ignored `.out`; no benchmark code enters the track
 build context. Five final production A checks and all twenty four-track
-correctness checks passed. The 16 ms/18 MB target remains unverified.
+correctness checks passed.
+
+## Official board result — commit `2ef4945`
+
+The board scored this commit successfully: run `run-a3f9ee9d24f4`,
+T=30.669 ms, M=18,886,656 B, S=349, D=1, K=40.429629,
+**80.334988 points**. All build, correctness, timeout and sandbox gates passed.
+This exceeds the previous Track A best (`run-5fbf4e3e8868`, 79.686448 points)
+by 0.648540 points. The scored T is essentially unchanged from that best
+(30.690 ms); lower M drives the improvement despite one extra source line.
+The requested 16 ms/18 MB is still unmet: both T and M remain above target.

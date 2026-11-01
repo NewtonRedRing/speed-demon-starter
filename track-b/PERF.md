@@ -263,5 +263,17 @@ counts. Local child timing/cgroup observations on an i7 VM cannot substitute
 for final i5-13500 timing or the organizer's parent-cgroup peak.
 
 All five final B production checks, and all twenty checks across A-D, passed
-the exact full official-data hashes. No push or new board score was produced.
-The 106 ms/41 MB target remains unverified.
+the exact full official-data hashes.
+
+## Official board result — commit `2ef4945`
+
+The board scored this commit successfully: run `run-d270ce788113`,
+T=238.498 ms, M=51,601,408 B, S=647, D=1, K=24.259677,
+69.244251 points. All build, correctness, timeout and sandbox gates passed.
+Against the prior run of the immediately preceding code (`cbdc7aa`,
+270.185 ms / 91,328,512 B), this is faster and uses substantially less memory.
+However, it is **not a new personal best**: `run-712fb991a4c8` remains higher at
+69.739111 points (231.992 ms / 51,568,640 B / 610 lines). The compact-posting
+change improves the current baseline but has not beaten the best historical
+score; the extra 37 lines and timing explain the gap. The requested 106 ms/41 MB
+target remains unmet.
