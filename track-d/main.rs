@@ -35,6 +35,7 @@ const PAGE: usize = 512; // distances per page
 /// A pointer the threads share; every use writes indices no other thread writes.
 #[derive(Clone, Copy)]
 struct Raw<T>(*mut T);
+// Each thread writes only its own indices of the pointed-to slice (see its callers).
 unsafe impl<T> Send for Raw<T> {}
 unsafe impl<T> Sync for Raw<T> {}
 impl<T> Raw<T> {

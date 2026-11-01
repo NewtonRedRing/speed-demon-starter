@@ -93,6 +93,7 @@ fn parse_regions(data: &[u8]) -> Regions {
             at += 1;
         }
         let code = &data[at + 1..at + 4];
+        // Packs the three letters into 15 bits (5 per letter) to index a dense table.
         let slot = &mut index[code.iter().fold(0usize, |a, &c| a << 5 | (c & 31) as usize)];
         if *slot == 0 {
             countries.push([code[0], code[1], code[2]]);
@@ -422,6 +423,7 @@ impl<'a> Structure<'a> {
                 // paired closing positions minus openings produce inclusive
                 // quote parity in one subtraction, including unmatched opens.
                 // Incoming parity toggles every bit in the current block.
+                // Deposits 0101... into the quote positions: marks every opening (odd-numbered) quote.
                 let opens = unsafe { _pdep_u64(0x5555_5555_5555_5555, self.q) };
                 let prefix = (self.q ^ opens).wrapping_sub(opens) ^ self.carry;
                 self.carry = ((prefix as i64) >> 63) as u64;
@@ -447,9 +449,10 @@ fn decoded_text_len(raw_len: usize, quote_bytes: u64) -> usize {
 #[inline]
 fn digits(data: &[u8], at: usize) -> (u64, usize) {
     let w = u64::from_le_bytes(data[at..at + 8].try_into().unwrap());
+    // Digit bytes have high nibble 3, so a nonzero byte here is a non-digit. The first one ends the run.
     let not_digit = (w & 0xF0F0_F0F0_F0F0_F0F0) ^ 0x3030_3030_3030_3030;
     let mut n = not_digit.trailing_zeros() as usize / 8;
-    // Digits to the top bytes, so the first one lands in the highest decimal place.
+    // SWAR: shift the digits to the top bytes, then fold pairs, quads and octets with multiplies.
     let w = (w << (64 - 8 * n.max(1)) & 0x0F0F_0F0F_0F0F_0F0F).wrapping_mul(2561) >> 8;
     let w = ((w & 0x00FF_00FF_00FF_00FF).wrapping_mul(6_553_601)) >> 16;
     let mut v = ((w & 0x0000_FFFF_0000_FFFF).wrapping_mul(42_949_672_960_001)) >> 32;
@@ -517,6 +520,7 @@ fn parse_records(
     let mut sep = Structure::new(data, start);
     while i < end {
         prefetch_read(data.as_ptr().wrapping_add(i + 1536));
+        // 0xEF opens the 3-byte UTF-8 BOM at a line start; skip it.
         i += 3 * (data[i] == 0xEF) as usize;
 
         let f1 = sep.next();

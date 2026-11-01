@@ -69,6 +69,7 @@ static WORD: [bool; 256] = {
 
 /// The key of the token of len (at most 32) bytes at p: its bytes lowercased
 /// (OR-ing 0x20 lowercases letters and keeps digits) and zero padded.
+/// The KEEP mask is loaded at 32 - len, so its first len bytes are 0xFF.
 unsafe fn key(p: *const u8, len: usize) -> __m256i {
     static KEEP: [u8; 64] = {
         let (mut k, mut i) = ([0; 64], 0);
@@ -82,6 +83,7 @@ unsafe fn key(p: *const u8, len: usize) -> __m256i {
 }
 
 fn hash(k: __m256i) -> usize {
+    // Two multiply-xorshift rounds over the four 64-bit lanes (SplitMix-style constants).
     let w: [u64; 4] = unsafe { std::mem::transmute(k) };
     let h = (w[0] ^ w[2].rotate_left(29)).wrapping_mul(0x9E3779B97F4A7C15);
     let h = h ^ (w[1] ^ w[3].rotate_left(29)).wrapping_mul(0xBF58476D1CE4E5B9);
