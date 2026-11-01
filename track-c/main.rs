@@ -426,7 +426,7 @@ fn parse_records(
     let unmatched = regions.countries.len();
     let mut i = start;
     while i < end {
-        prefetch_read(data.as_ptr().wrapping_add(i + 1536));
+        prefetch_read(data.as_ptr().wrapping_add(i + 2048));
         // 0xEF opens the 3-byte UTF-8 BOM at a line start; skip it.
         i += 3 * (data[i] == 0xEF) as usize;
 
