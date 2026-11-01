@@ -11,12 +11,13 @@ git history.
 | dfdc930 | run-2c406b83bfaf | 0.806407 s | 205.30 MB | 50.651659 | 533 formatted source lines |
 | 2ef4945 | run-d270ce788113 | 238.498 ms | 51,601,408 B | 69.244251 | S=647, D=1, K=24.259677 |
 | 6759b53 | run-712fb991a4c8 | 231.992 ms | 51,568,640 B | 69.739111 | Previous best; 610 lines |
-| 0e3b9ac | run-56343bb059d4 | 209.118 ms | 51,953,664 B | **70.780882** | **Submitted version**; S=620, D=1 |
+| 0e3b9ac | run-56343bb059d4 | 209.118 ms | 51,953,664 B | 70.780882 | Role-specific scan; S=620, D=1 |
+| 54de273 | run-830e8acc9e88 | 207.777 ms | 50,855,936 B | **70.917314** | **Submitted version**; S=625, D=1 |
 
 ## Submitted version
 
-The submitted version is commit `0e3b9ac`, scored at 70.780882 points on run
-`run-56343bb059d4`, up 1.041771 points from the previous best. All board gates
+The submitted version is commit `54de273`, scored at 70.917314 points on run
+`run-830e8acc9e88`, up 1.178203 points from the pre-optimization best. All board gates
 passed. This is our best Track B result, not the contest's track record. The
 requested 106 ms / 41 MB target is still unmet.
 
@@ -50,7 +51,7 @@ prefetch stage, a prefix-only candidate hash, a 32-token prefetch lag, smaller
 posting buffers, and generator-trained PGO. None justified its time, memory or
 formatted-source cost. They are not in the submission.
 
-## November 1: compact dictionary candidate
+## November 1: compact dictionary
 
 Each dictionary slot now packs a 14-bit hash tag and 18-bit term ID plus one
 into 32 bits instead of 64. Collisions still require full exact token equality.
@@ -68,7 +69,12 @@ Absolute local times vary substantially with host conditions.
 
 The official sandbox/full seed-1 hash and reference comparisons on tiny seeds
 2, 7, 42, 2026, sample seeds 17, 103 and full seed 23 all passed.
-This remains a candidate until it beats the protected 70.780882 board points.
+The board confirmed 70.917314 points, up 0.136432 from the protected
+70.780882, with every gate passed. The compact dictionary is retained.
 
 A separate cache-line-fused dictionary was rejected: 180.546 / 187.846 ms
 and 53,586,432 / 68,510,208 bytes, with matching official output hashes.
+
+An exact, immutable direct cache for tokens of at most three bytes was also
+rejected: 16 paired runs gave 214.720 / 225.789 ms versus the compact
+dictionary alone. Both matched the official full seed-1 hash.
