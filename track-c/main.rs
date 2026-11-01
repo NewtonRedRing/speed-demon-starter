@@ -281,7 +281,7 @@ impl Names {
     }
 }
 
-const BATCH: usize = 16;
+const BATCH: usize = 32;
 
 struct Sightings<'a> {
     names: &'a Names,
