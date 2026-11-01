@@ -123,7 +123,8 @@ const FIXED: [&[u8]; 13] = [
 const FIXED_ID: [u8; 32] = [3, 6, 0, 0, 0, 0, 0, 2, 0, 0, 0, 8, 10, 13, 5, 0,
     0, 0, 0, 12, 0, 1, 7, 0, 0, 9, 0, 0, 4, 11, 0, 0];
 
-// Endpoint names to dense ids in first-seen order, shared by every thread.
+// Fixed endpoints have reserved ids 0..13; all other names get concurrent
+// first-seen ids starting at 13. Every output hour is sorted by name bytes.
 // Open addressing on a CRC of the name's first and last eight bytes (masked
 // when the name is shorter; the rest of the line keeps both loads in bounds).
 // Names point into the log. A free slot is claimed with BUSY, filled in, then
