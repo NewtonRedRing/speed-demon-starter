@@ -35,3 +35,19 @@ containers and 12 interleaved runs per image gave:
 All matched the official full seed-1 output hash. The gains were too small
 relative to local variability to promote, and neither changes which three
 tracks contribute to our overall score. The original 512-node page remains.
+
+## November 1: larger BFS locality blobs
+
+Changing the BFS locality target from 512 to 1,024 nodes matched the official
+full seed-1 hash in every benchmark and passed the official sandbox gate plus
+reference comparisons on tiny seeds 2, 7, 42, 2026, sample seeds 17 and 103,
+and full seed 23.
+
+In the first 16-run comparison (protected / 256 / 1,024 nodes), trimmed times
+were 255.011 / 252.543 / 246.469 ms. A separate 24-pair baseline comparison
+gave 262.501 / 250.469 ms; across both comparisons, 1,024-node blobs were
+faster in 30 of 40 pairs, with median paired ratio 0.96103, mean ratio
+0.93546, and paired bootstrap 95% interval [0.87964, 0.97667]. Trimmed
+memory was about 0.21 MB higher. A single 16-run 2,048-node trial was
+inconclusive. The 1,024-node variant is being submitted for board validation;
+it is retained only if it beats 68.316671 points.

@@ -12,14 +12,15 @@ git history.
 | 2ef4945 | run-d270ce788113 | 238.498 ms | 51,601,408 B | 69.244251 | S=647, D=1, K=24.259677 |
 | 6759b53 | run-712fb991a4c8 | 231.992 ms | 51,568,640 B | 69.739111 | Previous best; 610 lines |
 | 0e3b9ac | run-56343bb059d4 | 209.118 ms | 51,953,664 B | 70.780882 | Role-specific scan; S=620, D=1 |
-| 54de273 | run-830e8acc9e88 | 207.777 ms | 50,855,936 B | **70.917314** | **Submitted version**; S=625, D=1 |
+| 54de273 | run-830e8acc9e88 | 207.777 ms | 50,855,936 B | 70.917314 | Compact dictionary; S=625, D=1 |
+| f0c2833 | run-8fc6c96282b9 | 206.138 ms | 50,802,688 B | **70.992252** | **Submitted version**; S=628, D=1 |
 
 ## Submitted version
 
-The submitted version is commit `54de273`, scored at 70.917314 points on run
-`run-830e8acc9e88`, up 1.178203 points from the pre-optimization best. All board gates
-passed. This is our best Track B result, not the contest's track record. The
-requested 106 ms / 41 MB target is still unmet.
+The submitted version is commit `f0c2833`, scored at 70.992252 points on run
+`run-8fc6c96282b9`, up 1.253141 points from the pre-optimization best. All
+board gates passed. This is our best Track B result, not the contest's track
+record. The requested 106 ms / 41 MB target is still unmet.
 
 Run `run-d270ce788113` at `2ef4945` scored 69.244251 points. It was faster
 and used less memory than the commit before it, but it has 37 more source lines
@@ -90,7 +91,7 @@ full hash but gave only 205.882 / 204.231 ms in 16 paired runs, without a
 meaningful memory reduction. That marginal result did not justify its extra
 source and was removed.
 
-## November 1: CRC32C hash candidate
+## November 1: CRC32C hash
 
 The dictionary hash now uses hardware CRC32C over all four 64-bit lanes of the
 exact, lowercase, zero-padded token key. The 32-bit result supplies the
@@ -104,6 +105,5 @@ In 24 locally paired runs, the candidate was faster in 17 pairs. Its median
 time ratio was 0.96647, mean ratio 0.96933, and seed-42 10,000-resample paired
 bootstrap 95% interval for the mean ratio was [0.95109, 0.98748]. Trimmed
 means were 231.887 / 223.489 ms (protected / candidate); memory was
-52,045,312 / 52,152,064 bytes. These local runs justify a board trial; the
-candidate is not considered an improvement until it beats the submitted
-70.917314 board points.
+52,045,312 / 52,152,064 bytes. The board confirmed the improvement: 70.992252
+points, up 0.074938 from the compact-hash version, with all gates passed.

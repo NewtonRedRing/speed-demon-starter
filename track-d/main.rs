@@ -28,7 +28,7 @@ extern "C" {
 }
 
 const INF: u64 = u64::MAX;
-const BLOB: usize = 512; // nodes per locality blob
+const BLOB: usize = 1024; // nodes per locality blob
 const PART_BITS: u32 = 16; // nodes per part: 2^16, so a part's counters fit in L2
 const PAGE: usize = 512; // distances per page
 
