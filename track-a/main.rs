@@ -78,6 +78,17 @@ unsafe fn eq32(p: *const u8, c: u8) -> u32 {
     _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c as i8))) as u32
 }
 
+// Classify both delimiters from the same 32-byte load.
+// Keep this separate from eq32: the uncommon long-field fallback needs only one.
+#[inline(always)]
+unsafe fn eq32_pair(p: *const u8, a: u8, b: u8) -> (u32, u32) {
+    let v = _mm256_loadu_si256(p.cast());
+    (
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(a as i8))) as u32,
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b as i8))) as u32,
+    )
+}
+
 // The byte the window found, or the first c from s on when the line runs past
 // the window (one is known to follow).
 unsafe fn find(in_window: bool, at: *const u8, mut s: *const u8, c: u8) -> *const u8 {
@@ -202,8 +213,10 @@ impl Parser {
             // Spaces and newlines in the 64 bytes after the timestamp. Only an
             // endpoint near its 125-byte maximum pushes past the window.
             let m = p.add(28);
-            let sp = eq32(m, b' ') as u64 | (eq32(m.add(32), b' ') as u64) << 32;
-            let nl = eq32(m, b'\n') as u64 | (eq32(m.add(32), b'\n') as u64) << 32;
+            let (sp0, nl0) = eq32_pair(m, b' ', b'\n');
+            let (sp1, nl1) = eq32_pair(m.add(32), b' ', b'\n');
+            let sp = sp0 as u64 | (sp1 as u64) << 32;
+            let nl = nl0 as u64 | (nl1 as u64) << 32;
             let at = |bits: u64| m.add(bits.trailing_zeros() as usize);
             let name = at(sp).add(1);
             let name_end = find(nl != 0, at(sp & (sp - 1)), name, b' ');
