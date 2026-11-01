@@ -23,6 +23,10 @@ and 16 interleaved runs per image: pieces alone 27.28 / 25.06 ms trimmed
 (before / after), shared table on top 25.96 / 23.34 ms. Memory was within 1 MB.
 Official full seed-1 hash, `check.py`, tiny seeds 2, 7, 42, 2026 and sample
 seeds 17 and 103 all match the reference. Local timings are not board results.
+The board run for this commit (`cae3c7b`) measured 30.783 ms, 19,308,544 B,
+S=356 and 80.134076 points: no gain over the previous source (30.669 ms, 80.13
+typical), so the local gain did not carry over to the board machine. The source
+is kept because it is equal on the board and simpler in the serial step.
 
 ## Local candidate measurements (not board runs)
 
