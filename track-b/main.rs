@@ -269,7 +269,7 @@ unsafe fn around(terms: &Terms, s: *const u8, len: usize, phrase: &[u32], j: usi
     true
 }
 
-/// A set of documents: a sorted list, or a bitmap. Both leaf kinds are
+/// A set of documents: a decoded list or a bitmap. Bitmap leaves are
 /// borrowed and copied only when an operator must mutate them.
 enum Docs<'a> {
     List(Cow<'a, [u32]>),
@@ -620,21 +620,6 @@ fn main() {
     });
     drop(scans);
     let post: Vec<u16> = unsafe { std::mem::transmute(post) };
-    // Resolve each posting's shard-local u16 offset to its global u32 doc id
-    // exactly once, instead of re-allocating/reconstructing it per query.
-    let mut posting_docs: Vec<u32> = post.into_iter().map(u32::from).collect();
-    let mut posting_end = vec![0usize; lists];
-    for i in nbits..lists {
-        let mut at = start[i] as usize;
-        for (t, &first) in firsts.iter().enumerate() {
-            let len = seg[i * THREADS + t] as usize;
-            for d in &mut posting_docs[at..at + len] {
-                *d += first;
-            }
-            at += len;
-        }
-        posting_end[i] = at;
-    }
     let bits: Vec<u64> = unsafe { std::mem::transmute(bits) };
     let mut found = found.into_inner().unwrap();
     found.sort_unstable();
@@ -645,7 +630,16 @@ fn main() {
     unsafe { mallopt(-3, 64 << 20) };
     let docs = |id: u32| match id as usize {
         i if i < nbits => Docs::Bits(Cow::Borrowed(&bits[i * words..(i + 1) * words])),
-        i => Docs::List(Cow::Borrowed(&posting_docs[start[i] as usize..posting_end[i]])),
+        i => {
+            let mut at = start[i] as usize;
+            let segs = &seg[i * THREADS..][..THREADS];
+            let mut docs = Vec::with_capacity(segs.iter().map(|&n| n as usize).sum());
+            for (&n, &first) in segs.iter().zip(&firsts) {
+                docs.extend(post[at..at + n as usize].iter().map(|&d| first + d as u32));
+                at += n as usize;
+            }
+            Docs::List(Cow::Owned(docs))
+        }
     };
     let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);

@@ -444,7 +444,6 @@ No new score above 79.686448 is claimed. No experiment is promoted until
 independently verified against the organizer's full dataset and shown to
 improve the complete machine-score tradeoff on the target CPU.
 
-
 ## 2026-11-01: Experiment #1 — file-mapping prefault
 
 - Branch: `experiment/track-a-prefault`; candidate commit `5560b3f4`.
@@ -460,8 +459,98 @@ improve the complete machine-score tradeoff on the target CPU.
   an `--interleave` mode (alternating baseline/candidate within each pair),
   and `--reverse` to reverse the first pair's order. The scripts do not
   contribute to the submitted `track-a` source-size metric.
-- Status: **implemented on isolated branch, not yet built or measured in the
-  assistant environment**. The branch was not merged into `speed-demon`.
+- At the time this experiment was first documented, it had not yet been built
+  or measured and was not merged into `speed-demon`. A subsequent isolated
+  full-input `MADV_POPULATE_READ` comparison found no supported gain; see the
+  later investigation section below.
 - Decision criteria: full public input/output hashes must match for all runs;
   compare trimmed process times, maximum memory and formatted source count.
   Total minor faults alone do not prove time savings.
+
+## 2026-11-01: isolated harness and hot-loop investigation
+
+The current working candidate differs from the restored best source by one
+line: `drop((start, errors, latency));` before final output planning. This
+releases worker-local aggregation scratch before formatting. It is not the
+historical fused/radix candidate described above.
+
+The organizer's setup places `/out` on host tmpfs. The final confirmation
+therefore used tmpfs output, the unchanged offline production Dockerfile,
+the original complete public seed-1 input, and exact output SHA-256 on every
+run. The expected output is removed before every run and unexpected entries
+fail the gate. Nine adjacent pairs alternated AB/BA order after excluded warmup.
+MB below is decimal; trimmed time removes the fastest and slowest observations
+from each nine-observation sample, and is not an official five-run statistic.
+
+| Candidate | Local trimmed T | Maximum observed cgroup peak | Paired T ratio, bootstrap 95% interval |
+|---|---:|---:|---|
+| Pinned baseline | 37.688 ms | 23.843 MB | 1 |
+| Release worker scratch, retained | 35.615 ms | 21.406 MB | 0.9953 [0.8249, 1.0610] |
+
+This batch's median paired peak ratio was 0.8941. Its complete local K ratio
+was 1.0254 with interval 0.9924..1.1111, crossing no improvement.
+**Only the memory reduction is repeatable;
+a time or score improvement is not established.** Scratch release remains a
+small memory-reduction candidate pending target-machine comparison, not a
+claimed score win. Earlier batches changed direction on timing.
+
+The final report is `.out/four-track-fresh-output.json`. Earlier reports
+reused the output inode between runs, allowing stale-file correctness checks
+and potentially inherited page charges. Their memory/score estimates are
+exploratory only and are superseded by this fresh-output rerun.
+
+Canonical source accounting includes the Dockerfile: 348 baseline lines,
+349 candidate lines. Some earlier exploratory JSON counted only Rust; those
+counts must not be used as official S. Initial disk-backed output experiments
+are also explicitly preliminary, not evidence about the organizer's tmpfs.
+
+### Disposition of proposed changes
+
+| Idea | Evidence and decision |
+|---|---|
+| Input prefaulting | Serial mmap/touch diagnostic: baseline 7.862 ms, 3,648 minor faults; populate 7.422 ms, same faults. Whole-process preliminary medians were 46.427/47.020/50.041 ms for baseline/MADV_POPULATE_READ/MAP_POPULATE. No supported gain; unchanged. The touch diagnostic does not isolate fault cost. |
+| Read-only file THP | Kernel configuration disables `CONFIG_READ_ONLY_THP_FOR_FS`. All mapping probes showed 4 KiB pages, `FilePmdMapped: 0`, `THPeligible: 0`; advice did not create huge pages. Cannot extrapolate to the scoring kernel. |
+| Chunk-only THP disabling | Tested as an isolated variant; no reliable local advantage. Process-wide setting unchanged. |
+| Startup flags | Fat LTO, panic-abort, one codegen unit and native CPU were already enabled by direct rustc. Isolated strip/static-link/fstat changes did not justify promotion. |
+| One load, two comparisons | Optimized assembly already shares the offset-28 and offset-60 vector loads between comparisons. Explicit source rewriting did not remove loads. |
+| Eight-way bucket interner | Fifteen preliminary disk-output pairs produced paired T ratio 1.0735; no supported gain. Not retained. |
+| 64-entry hot cache | Fifteen preliminary pairs: T ratio 1.1870, interval 1.1411..1.3131. Rejected locally. |
+| Parser-time counters | Must count per hour AND endpoint, not one 8 KiB table. Lazy hour-aware arrays increased peak memory; time/score benefit inconclusive. Not retained. |
+| Fixed hour labels | Stack and constant variants were tested independently; no repeatable whole-score benefit. Not retained. |
+| Output fallocate | No supported gain. The final harness uses tmpfs, not disk block allocation. Not retained. |
+| Six versus twelve workers | Fifteen preliminary pairs favored twelve for time; lower six-worker memory did not establish a score gain. Not retained. |
+| Heap trimming/summary mmap thresholds | Tmpfs retests did not justify extra code over plain scratch release. Not retained. |
+| Final chunk release | No supported improvement beyond the existing hour-task reclamation. Not retained. |
+
+Not implemented or established by this investigation: non-temporal output,
+producer/consumer SMT split, explicit sibling affinity, backward parsing,
+two-line SIMD, libc scan replacement, branchless wide latency, software
+pipelining, new small-group networks, compressed records, or a 56-line rewrite.
+They remain hypotheses, not claimed gains. The current representation packs
+latency plus endpoint/error information in four-byte records; it is not simply
+a standalone 12.4 MB latency array that can be replaced by three-byte values.
+
+The VM is an i7-13850HX with unverified P-core/SMT topology, not the scoring
+i5-13500. `perf_event_open` is denied, so cycles, instructions, cache misses and
+branch misses were not measured. No official target-machine fault-cost or
+topology conclusion is possible here. Observed local cgroup peaks are not the
+organizer's post-removal parent-cgroup accounting.
+
+Reproduction (repository root):
+
+```powershell
+python scripts\investigate_tracks.py --tracks a --runs 9 --variants baseline release-scratch --output .out\a-scratch.json
+python scripts\investigate_tracks.py --tracks a --runs 15 --variants baseline release-scratch --output .out\a-confirmation.json
+python scripts\investigate_track_a.py --help
+python -m unittest discover -s tests -p test_track_a_probe.py -v
+python check.py all --runs 5
+```
+
+Both experiment runners default to immutable baseline
+`7a9886d0635e3deb74493f2c23cde76c30c521c2`; use `--base-ref` deliberately
+for another revision. Variants fail when expected source anchors are absent.
+The A-specific runner also provides fault/mapping probes and parse-only mode.
+Its final smoke builds passed all five Rust regression checks for both variants.
+Raw local reports are under ignored `.out`; no benchmark code enters the track
+build context. Five final production A checks and all twenty four-track
+correctness checks passed. The 16 ms/18 MB target remains unverified.

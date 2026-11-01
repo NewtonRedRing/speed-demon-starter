@@ -20,6 +20,24 @@ With another 24 hours: reduce per-token dictionary/state traffic and replace
 repeated Boolean block work only when an exact full-dataset benchmark improves
 the official K axes.
 
-The experimental shared-postings branch amortises doc ID reconstruction across
-all Boolean queries and borrows list terms copy-on-write. The 12-worker
-scan remains necessary for the compact 15-bit local doc-offset format.
+Compact shard-local `u16` postings are retained; Boolean list leaves decode
+their document IDs on demand. Global `u32` materialisation increased peak
+memory and lost a nine-pair alternating local comparison. Copy-on-write
+Boolean operations and the 1/32 bitmap density threshold are unchanged.
+Twelve logical shards remain necessary for the compact 15-bit local
+doc-offset format, independently of the available worker count.
+
+The retained candidate passed five final production-build official-input/output
+checks. Final fresh-output local trimmed time fell from 364.180 ms to
+331.222 ms and maximum observed cgroup peak from 93.155 MB to 55.194 MB.
+These are VM measurements,
+not an official score or the requested 106 ms/41 MB target.
+
+```powershell
+python scripts\investigate_tracks.py --tracks b --runs 9 --variants baseline shard-posts --output .out\b-postings.json
+```
+
+The runner uses immutable baseline commit
+`7a9886d0635e3deb74493f2c23cde76c30c521c2`, preserving its offline PGO
+Dockerfile; it defaults to tmpfs output and validates every output hash.
+See `PERF.md` for uncertainty and rejected alternatives.

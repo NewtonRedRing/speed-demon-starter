@@ -96,3 +96,34 @@ entire measured query stage is only about a quarter second locally, so its
 preprocessing cost would need a demonstrated whole-process win.
 All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
 strict warnings and all four offline sandbox checks pass. No new score exists.
+
+## 2026-11-01: isolated staging and locality experiments
+
+Nine adjacent alternating pairs per candidate, after excluded warmup, used the unchanged
+offline PGO Dockerfile and complete original public seed-1 hashes. Output was
+freshly created on tmpfs every run; unexpected entries fail. Local trimmed T
+discards each sample's fastest and slowest observations; MB is decimal.
+The baseline pools twenty-seven observations across the three candidates.
+
+| Candidate | Local trimmed T | Maximum observed cgroup peak |
+|---|---:|---:|
+| Baseline | 310.776 ms | 80.007 MB |
+| Six-byte staging records | 318.160 ms | 78.758 MB |
+| Locality blob size 256 | 308.596 ms | 79.561 MB |
+| Locality blob size 1024 | 302.668 ms | 79.766 MB |
+
+Every paired time confidence interval crossed 1. The six-byte staging change
+saved little peak memory, and none established a reliable complete-score gain;
+all were rejected. Production source is unchanged and passed five final full
+official-data checks.
+
+```powershell
+python scripts\investigate_tracks.py --tracks d --runs 9 --variants baseline six-byte-records blob-256 blob-1024 --output .out\d-experiments.json
+```
+
+The runner defaults to immutable baseline
+`7a9886d0635e3deb74493f2c23cde76c30c521c2`. Local i7 VM timing and
+observed cgroup peaks are not official i5-13500 or parent-cgroup results.
+The final report `.out/four-track-fresh-output.json` supersedes earlier
+reused-output measurements, whose memory accounting could inherit page charges.
+The 120 ms/66 MB target has not been established.

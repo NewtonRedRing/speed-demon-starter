@@ -171,3 +171,36 @@ cannot isolate the mmap experiment. Restore the original copied/padded tail
 and best single-seed PGO build; retain the exact long-name byte comparison
 and separately verified BMI2 PDEP parity formula. No final gain claimed
 until another board run.
+
+## 2026-11-01: isolated tmpfs-output experiments
+
+Nine adjacent alternating pairs per candidate, after excluded warmup, used the unchanged
+offline PGO Dockerfile and exact original public seed-1 input/output hashes.
+Output is freshly created on tmpfs every run; unexpected output entries fail.
+Local trimmed T discards the fastest and slowest observations; MB is decimal.
+The baseline pools eighteen observations across both candidates.
+
+| Candidate | Local trimmed T | Maximum observed cgroup peak |
+|---|---:|---:|
+| Baseline | 76.269 ms | 13.836 MB |
+| Input views for long names | 72.503 ms | 12.214 MB |
+| Batch size 32 instead of 16 | 77.839 ms | 13.685 MB |
+
+Long-name input views passed forced hash/prefix-collision and concurrent
+publication checks. Their timing changed direction across batches: the final
+paired time ratio was 0.9620 (interval 0.8891..1.0927), and complete local K
+ratio 1.0426 (0.9758..1.0878), still crossing no improvement.
+Larger batching also did not establish a gain. Neither change was retained.
+The production source is unchanged and passed five final full official-data
+checks. The local i7 VM is not the scoring i5-13500, and its observed cgroup
+peak is not the official post-removal parent-cgroup measurement.
+
+```powershell
+python scripts\investigate_tracks.py --tracks c --runs 9 --variants baseline long-name-views batch-32 --output .out\c-experiments.json
+```
+
+The runner defaults to immutable baseline
+`7a9886d0635e3deb74493f2c23cde76c30c521c2` and tmpfs output.
+The final report `.out/four-track-fresh-output.json` supersedes earlier
+reused-output measurements, whose memory accounting could inherit page charges.
+The 20 ms/11 MB target has not been established.

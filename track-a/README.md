@@ -16,6 +16,33 @@ endpoint order.
 
 Dependencies: none.
 
+## Current candidate: isolated scratch release
+
+The source is the restored 348-line best-scoring baseline plus explicit release
+of each worker's count, error and latency scratch before output planning.
+Canonical Rust plus Dockerfile accounting is now 349 lines. Historical
+fused/radix sections below describe experiments, not this implementation.
+
+This is retained as a memory-reduction candidate, not an established score win.
+Timing changed direction across batches. The final nine-pair production-build
+comparison, with fresh tmpfs output on every run, found time ratio 0.9953
+(bootstrap 95% interval 0.8249..1.0610), with median paired peak reduction of
+10.6%. The complete-score interval still crosses no change.
+These are local VM measurements, not official results or the 16 ms/18 MB target.
+All five final production-build official-input/output checks passed.
+
+Reproduce the isolated comparison from the repository root:
+
+```powershell
+python scripts\investigate_tracks.py --tracks a --runs 9 --variants baseline release-scratch --output .out\a-scratch.json
+```
+
+The runner uses immutable baseline commit
+`7a9886d0635e3deb74493f2c23cde76c30c521c2`, not the edited working tree.
+It preserves the production Dockerfile, warms input outside the measured
+container, defaults to tmpfs output, and checks every output SHA-256.
+See `PERF.md` for the other tested ideas and local-harness limitations.
+
 With another 24 hours: profile parsing/interner cache behavior and percentile
 selection on the scoring CPU, retaining only changes that improve full-process
 K on exact holdout-style datasets.

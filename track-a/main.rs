@@ -393,6 +393,7 @@ fn main() {
             at[h].store(size as u64, Relaxed);
         }
 
+        drop((start, errors, latency));
         if barrier.wait().is_leader() {
             let mut total = 0;
             for size in &at {

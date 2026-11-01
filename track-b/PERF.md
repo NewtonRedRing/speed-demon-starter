@@ -220,3 +220,48 @@ bitmap density remains 1/32; a 1/16 threshold requires separate verification.
 The shared u32 postings and copy-on-write Boolean lists avoid repeated list
 construction but can cost additional transient memory. This commit requires
 correctness hash and cgroup time/memory validation on the official runner.
+
+## 2026-11-01: reject global posting expansion in isolation
+
+The current working candidate removes the experimental global `u32` posting
+array and its transient conversion peak. It retains compact shard-local `u16`
+offsets and decodes each Boolean list leaf into an owned `Vec<u32>` as needed.
+Copy-on-write Boolean operators, twelve logical shards, CPU-set worker
+portability, and density threshold 1/32 are unchanged.
+
+Nine adjacent AB/BA pairs used the original complete public seed-1 corpus,
+unchanged offline production PGO Dockerfile, externally warmed input and tmpfs
+output. Every run starts without the expected output; unexpected entries fail.
+Every output matched the official SHA-256. MB is decimal; local trimmed
+T excludes each sample's fastest and slowest observations.
+
+| Candidate | Local trimmed T | Maximum observed cgroup peak |
+|---|---:|---:|
+| Global u32 posting baseline | 364.180 ms | 93.155 MB |
+| Shard-local postings, retained | 331.222 ms | 55.194 MB |
+
+The retained candidate's paired time ratio was 0.91249, bootstrap 95% interval
+0.85569..0.95301. Median paired memory ratio was 0.5859. Full canonical source
+accounting fell from 653 to 647 lines, including the Dockerfile. The complete
+local K ratio was 1.1634, interval 1.1415..1.2036; this is not a board score.
+Earlier exploratory density-1/16 and skip-unused-token variants did not justify
+changes over compact postings alone; neither was retained.
+
+The final report is `.out/four-track-fresh-output.json`. Earlier reports
+reused the output inode; their potentially inherited page charges and
+stale-file gate are superseded by this fresh-output validation.
+
+```powershell
+python scripts\investigate_tracks.py --tracks b --runs 9 --variants baseline shard-posts --output .out\b-postings.json
+python check.py all --runs 5
+```
+
+The experiment runner uses immutable baseline
+`7a9886d0635e3deb74493f2c23cde76c30c521c2` by default rather than the
+working tree. It preserves the production Dockerfile/PGO and reports full source
+counts. Local child timing/cgroup observations on an i7 VM cannot substitute
+for final i5-13500 timing or the organizer's parent-cgroup peak.
+
+All five final B production checks, and all twenty checks across A-D, passed
+the exact full official-data hashes. No push or new board score was produced.
+The 106 ms/41 MB target remains unverified.
