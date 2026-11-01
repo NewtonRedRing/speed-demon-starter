@@ -18,7 +18,7 @@
 use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 use std::ffi::c_void;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
 use std::sync::Mutex;
 
 extern "C" {
@@ -124,12 +124,11 @@ struct RadixHeap {
     b: Vec<Vec<(u64, u32)>>,
     len: usize,
     last: u64,
-    occupied: u128, // 65 radix buckets, including the top bucket
 }
 
 impl RadixHeap {
     fn new() -> Self {
-        RadixHeap { b: (0..65).map(|_| Vec::new()).collect(), len: 0, last: 0, occupied: 0 }
+        RadixHeap { b: (0..65).map(|_| Vec::new()).collect(), len: 0, last: 0 }
     }
     fn slot(&self, k: u64) -> usize {
         (64 - (k ^ self.last).leading_zeros()) as usize
@@ -137,20 +136,17 @@ impl RadixHeap {
     fn push(&mut self, k: u64, u: u32) {
         let s = self.slot(k);
         unsafe { self.b.get_unchecked_mut(s) }.push((k, u));
-        self.occupied |= 1u128 << s;
         self.len += 1;
     }
     /// The smallest key (the heap must not be empty).
     fn top(&mut self) -> u64 {
         if self.b[0].is_empty() {
-            let i = (self.occupied & !1u128).trailing_zeros() as usize;
+            let i = (1..65).find(|&i| !self.b[i].is_empty()).unwrap();
             let mut v = std::mem::take(&mut self.b[i]);
-            self.occupied &= !(1u128 << i);
             self.last = v.iter().map(|e| e.0).min().unwrap();
             for &(k, u) in &v {
                 let s = self.slot(k);
                 self.b[s].push((k, u));
-                self.occupied |= 1u128 << s;
             }
             v.clear();
             self.b[i] = v;
@@ -160,13 +156,11 @@ impl RadixHeap {
     fn pop(&mut self) -> (u64, u32) {
         self.top();
         self.len -= 1;
-        let item = self.b[0].pop().unwrap();
-        if self.b[0].is_empty() { self.occupied &= !1u128; }
-        item
+        self.b[0].pop().unwrap()
     }
     fn clear(&mut self) {
         self.b.iter_mut().for_each(Vec::clear);
-        (self.len, self.last, self.occupied) = (0, 0, 0);
+        (self.len, self.last) = (0, 0);
     }
 }
 
@@ -317,24 +311,10 @@ fn main() {
     // unclaimed nodes (claimed by compare-exchange), then starts the next one
     // from the last one's unclaimed frontier, so consecutive ids are close on
     // the map.
-    // Packed atomic claims: 64 vertex flags per word instead of one byte each.
-    // CAS keeps the same exactly-one-winner semantics as the byte flags.
-    let claimed: Vec<AtomicU64> = (0..n.div_ceil(64)).map(|_| AtomicU64::new(0)).collect();
-    let unclaimed = |v: u32| {
-        let bit = 1u64 << (v & 63);
-        claimed[(v as usize) >> 6].load(Relaxed) & bit == 0
-    };
+    let claimed: Vec<AtomicU8> = (0..n).map(|_| AtomicU8::new(0)).collect();
     let claim = |v: u32| {
-        let bit = 1u64 << (v & 63);
-        let c = &claimed[(v as usize) >> 6];
-        let mut old = c.load(Relaxed);
-        while old & bit == 0 {
-            match c.compare_exchange_weak(old, old | bit, Relaxed, Relaxed) {
-                Ok(_) => return true,
-                Err(actual) => old = actual,
-            }
-        }
-        false
+        let c = &claimed[v as usize];
+        c.load(Relaxed) == 0 && c.compare_exchange(0, 1, Relaxed, Relaxed).is_ok()
     };
     let (first_v, link_v) = (first, link);
     let (first, link) = (&first_v[..], &link_v[..]);
@@ -379,7 +359,7 @@ fn main() {
                 let u = ord[i] as usize;
                 for e in first[u]..first[u + 1] {
                     let v = link[e as usize] & hmask;
-                    if unclaimed(v) {
+                    if claimed[v as usize].load(Relaxed) == 0 {
                         seeds.push(v);
                     }
                 }
@@ -397,7 +377,7 @@ fn main() {
     on_threads(nt, |t| chains[t].iter().zip(start[t]..).for_each(|(&u, k)| unsafe { *ir.at(u as usize) = k }));
     let mut k = start[nt];
     for u in 0..n {
-        if unclaimed(u as u32) {
+        if claimed[u].load(Relaxed) == 0 {
             (id_v[u], k) = (k, k + 1);
         }
     }
@@ -500,10 +480,8 @@ fn main() {
                 unsafe { *ansr.at(i) = 0 };
                 continue;
             }
-            if roff[t as usize + 1] == roff[t as usize]
-                || off[s as usize + 1] == off[s as usize]
-            {
-                continue; // no in-edge to target or no out-edge from source
+            if roff[t as usize + 1] == roff[t as usize] {
+                continue; // no in-edge: unreachable
             }
             let mut best = INF;
             *dist[0].at(s) = 0;

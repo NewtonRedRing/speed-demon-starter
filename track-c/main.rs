@@ -281,7 +281,7 @@ impl Names {
     }
 }
 
-const BATCH: usize = 32;
+const BATCH: usize = 16;
 
 struct Sightings<'a> {
     names: &'a Names,
@@ -314,26 +314,17 @@ impl<'a> Sightings<'a> {
     }
 
     fn flush(&mut self) {
-        // Ping-pong software pipeline: prefetch next bitmap target while
-        // applying the previous batch's atomics. OR operations commute, and
-        // every name still passes the exact shared-table lookup.
-        let old_bits = self.bits_len;
-        let next_bits = self.seen_len;
-        for i in 0..next_bits {
-            let (group, h, p, len) = self.seen[i];
+        for &(word, bit) in &self.bits[..self.bits_len] {
+            self.names.bits[word].fetch_or(bit, Relaxed);
+        }
+        self.bits_len = 0;
+        for &(group, h, p, len) in &self.seen[..self.seen_len] {
             let id = self.names.number(h, p, len);
             let word = group * NAME_WORDS + id / 64;
             prefetch_write::<AtomicU64>(&self.names.bits[word]);
-            if i < old_bits {
-                let (old_word, old_bit) = self.bits[i];
-                self.names.bits[old_word].fetch_or(old_bit, Relaxed);
-            }
-            self.bits[i] = (word, 1u64 << (id % 64));
+            self.bits[self.bits_len] = (word, 1 << (id % 64));
+            self.bits_len += 1;
         }
-        for &(word, bit) in &self.bits[next_bits.min(old_bits)..old_bits] {
-            self.names.bits[word].fetch_or(bit, Relaxed);
-        }
-        self.bits_len = next_bits;
         self.seen_len = 0;
     }
 
@@ -362,11 +353,7 @@ fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
         let word = |p: usize| data.as_ptr().add(p).cast::<u64>().read_unaligned();
         let first = word(from) & byte_mask(len);
         let last = if len >= 8 { word(to - 8) } else { 0 };
-        // Independent CRC32 chains overlap on the P-core; exact name bytes
-        // are still compared in Names::number after probing.
-        let a = _mm_crc32_u64(len as u64, first);
-        let b = _mm_crc32_u64(0, last);
-        let h = a ^ b.rotate_left(17);
+        let h = _mm_crc32_u64(_mm_crc32_u64(len as u64, first), last);
         h.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ h.rotate_left(29)
     }
 }

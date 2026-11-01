@@ -30,12 +30,6 @@ const GAP: u32 = 15; // a unit's 4-bit doc gap; GAP means the whole gap follows 
 const DOC_BITS: u32 = 15; // a thread's share holds under 2^15 documents
 const ID_MASK: u32 = (1 << 18) - 1;
 
-// 64K-bit negative filter: a hit is only a candidate, never a match.
-#[inline(always)]
-fn fast_bit(len: usize, first: u8, last: u8) -> usize {
-    (len * 257 + (first | 0x20) as usize * 131 + (last | 0x20) as usize * 1987) & 65535
-}
-
 /// The file, mapped over a spare zero page so loads of 32 bytes past any of
 /// its bytes stay inside the mapping.
 fn map(path: &str) -> &'static [u8] {
@@ -92,18 +86,10 @@ unsafe fn key(p: *const u8, len: usize) -> __m256i {
 fn hash(k: __m256i) -> usize {
     let w: [u64; 4] = unsafe { std::mem::transmute(k) };
     unsafe {
-        // All token bytes are ASCII alphanumeric and therefore nonzero.
-        // Zero upper lanes identify short token keys exactly. This hash is
-        // used for both dictionary construction and every document lookup.
-        if w[1] == 0 {
-            return _mm_crc32_u64(0, w[0]) as usize;
-        }
-        if w[2] == 0 {
-            return _mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[1]) as usize;
-        }
-        let a = _mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[2]);
-        let b = _mm_crc32_u64(_mm_crc32_u64(0, w[1]), w[3]);
-        (a ^ b.rotate_left(17)) as usize
+        _mm_crc32_u64(
+            _mm_crc32_u64(_mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[1]), w[2]),
+            w[3],
+        ) as usize
     }
 }
 
@@ -117,7 +103,6 @@ fn same(a: __m256i, b: __m256i) -> bool {
 struct Terms {
     slot: Vec<u32>,
     keys: Vec<__m256i>,
-    allowed: Vec<u64>,
 }
 
 impl Terms {
@@ -146,8 +131,6 @@ impl Terms {
     }
 
     fn insert(&mut self, term: &[u8]) -> u32 {
-        let bit = fast_bit(term.len(), term[0], term[term.len() - 1]);
-        self.allowed[bit >> 6] |= 1u64 << (bit & 63);
         let k = unsafe { key(term.as_ptr(), term.len()) };
         let (h, mask) = (hash(k), self.slot.len() - 1);
         let mut i = h & mask;
@@ -208,10 +191,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
             }
             m &= !0u64 << (s + len); // here the token ends inside the window
             if len <= 32 {
-                let q = p.add(s as usize);
-                let bit = fast_bit(len as usize, *q, *q.add(len as usize - 1));
-                if t.allowed[bit >> 6] & (1u64 << (bit & 63)) == 0 { continue; }
-                let k = key(q, len as usize);
+                let k = key(p.add(s as usize), len as usize);
                 let h = hash(k);
                 let slot = t.slot.as_ptr().add(h & (t.slot.len() - 1));
                 _mm_prefetch::<_MM_HINT_T0>(slot.cast());
@@ -289,13 +269,12 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
     let bit = |d: u32| (d as usize / 64, 1u64 << (d % 64));
     match (cur, op, term) {
         (Bits(mut a), _, Bits(b)) => {
-            let x = a.to_mut();
-            // Hoist the operation out of the data loop, exposing contiguous
-            // AND/OR/ANDNOT loops for LLVM's AVX2 vectorizer.
-            match op {
-                b'A' => for (x, &y) in x.iter_mut().zip(b.iter()) { *x &= y; },
-                b'O' => for (x, &y) in x.iter_mut().zip(b.iter()) { *x |= y; },
-                _ => for (x, &y) in x.iter_mut().zip(b.iter()) { *x &= !y; },
+            for (x, &y) in a.to_mut().iter_mut().zip(b.iter()) {
+                *x = match op {
+                    b'A' => *x & y,
+                    b'O' => *x | y,
+                    _ => *x & !y,
+                };
             }
             Bits(a)
         }
@@ -444,7 +423,7 @@ fn main() {
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) };
     let qtext = map("/data/queries.txt");
     let slots = vec![0; (qtext.len() / 8).next_power_of_two()];
-    let mut terms = Terms { slot: slots, keys: Vec::with_capacity(qtext.len() / 16), allowed: vec![0; 1024] };
+    let mut terms = Terms { slot: slots, keys: Vec::with_capacity(qtext.len() / 16) };
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);

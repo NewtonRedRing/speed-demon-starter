@@ -14,6 +14,11 @@ generated on 2026-11-01 at 13:00:25 UTC.
 Source: https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/board/board.json
 Team: `NewtonRedHeat`, board slug `newtonredheat-dba6a3`.
 
+**Restored Nov 1:** the later hardware-tuning commits (`9f6b2a0` and ancestors)
+scored below these bests on every track (A 76.68, B 70.22, C 72.12, D 67.39),
+so all four track trees were restored to the exact trees above. Track B's
+board best is 71.500513 (`1c278b6`).
+
 **Important:** these are historical best verified results for each individual
 directory. The combined commit must still be built, correctness-checked and
 scored by the board or final judge. The board may measure different timings,

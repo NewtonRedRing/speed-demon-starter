@@ -1,7 +1,7 @@
 FROM python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962 AS train-data
 WORKDIR /gen
 COPY pgo_gen.py .
-RUN python3 pgo_gen.py --seed 271828 --scale full --out /train
+RUN python3 pgo_gen.py --seed 271828 --scale sample --out /train
 
 FROM halloumee/speed-demon-rust:1.99.1-trixie-llvm-tools@sha256:13e4ee7135d8eac6c56476c7d1aee201f36479f4745fd5d0e6b4529f4e13251a AS build
 WORKDIR /app
