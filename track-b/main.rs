@@ -86,10 +86,9 @@ unsafe fn key(p: *const u8, len: usize) -> __m256i {
 fn hash(k: __m256i) -> usize {
     let w: [u64; 4] = unsafe { std::mem::transmute(k) };
     unsafe {
-        _mm_crc32_u64(
-            _mm_crc32_u64(_mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[1]), w[2]),
-            w[3],
-        ) as usize
+        let a = _mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[2]);
+        let b = _mm_crc32_u64(_mm_crc32_u64(0, w[1]), w[3]);
+        (a ^ b.rotate_left(17)) as usize
     }
 }
 
