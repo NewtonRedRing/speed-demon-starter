@@ -20,7 +20,6 @@ use std::sync::Mutex;
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn mallopt(param: i32, value: i32) -> i32;
-    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
     fn prctl(option: i32, ...) -> i32;
 }
 
@@ -44,16 +43,6 @@ fn map(path: &str) -> &'static [u8] {
     }
 }
 
-/// Gives the pages inside part t (of nt) of b back to the kernel, so that each
-/// thread does its share of the unmapping that exit would otherwise do alone.
-/// Only for memory that is finished with.
-fn release<T>(b: &[T], t: usize, nt: usize) {
-    let (p, n) = (b.as_ptr() as usize, std::mem::size_of_val(b));
-    let (lo, hi) = ((p + n * t / nt + 4095) & !4095, (p + n * (t + 1) / nt) & !4095);
-    if hi > lo {
-        unsafe { madvise(lo as *mut _, hi - lo, 4) }; // MADV_DONTNEED
-    }
-}
 /// Runs f(t) on every thread and collects what each returns.
 fn on_threads<R: Send>(f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     let f = &f;
@@ -573,7 +562,6 @@ fn main() {
             }
         });
         flush(&mut pending, block);
-        release(&text[cut[t]..cut[t + 1]], 0, 1);
         buckets.iter_mut().for_each(Units::finish);
         assert!(n < 1 << DOC_BITS, "too many documents per thread");
         found.lock().unwrap().extend(mine);
@@ -661,6 +649,4 @@ fn main() {
     });
     let out: String = chunks.into_iter().map(|c| c.into_inner().unwrap()).collect();
     std::fs::write("/out/results.txt", out).expect("/out/results.txt");
-    on_threads(|t| (release(&post, t, THREADS), release(&bits, t, THREADS)).1);
-    std::process::exit(0);
 }

@@ -25,7 +25,6 @@ extern "C" {
     fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut c_void;
     fn prctl(op: i32, a: u64, b: u64, c: u64, d: u64) -> i32;
     fn mallopt(param: i32, value: i32) -> i32;
-    fn madvise(addr: *mut c_void, len: usize, advice: i32) -> i32;
 }
 
 const INF: u64 = u64::MAX;
@@ -47,16 +46,6 @@ impl<T> Raw<T> {
     }
 }
 
-/// Gives the pages inside part t (of nt) of b back to the kernel, so that each
-/// thread does its share of the unmapping that exit would otherwise do alone.
-/// Only for memory that is finished with.
-fn release<T>(b: &[T], t: usize, nt: usize) {
-    let (p, n) = (b.as_ptr() as usize, std::mem::size_of_val(b));
-    let (lo, hi) = ((p + n * t / nt + 4095) & !4095, (p + n * (t + 1) / nt) & !4095);
-    if hi > lo {
-        unsafe { madvise(lo as *mut _, hi - lo, 4) }; // MADV_DONTNEED
-    }
-}
 fn prefetch<T>(p: *const T) {
     unsafe { _mm_prefetch::<_MM_HINT_T0>(p as *const i8) }
 }
@@ -263,7 +252,6 @@ fn main() {
             }
             b.0.push(((u & ((1 << sh) - 1)) as u64) << 32 | (v | w << hb) as u64);
         }
-        release(&text[cut[t]..cut[t + 1]], 0, 1);
         out
     });
     // Part p's edges start where part p - 1's end.
@@ -536,6 +524,4 @@ fn main() {
     // INF prints as -1 (u64::MAX as i64); every real distance is below 2^63.
     let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
     std::fs::write("/out/distances.txt", out).unwrap();
-    on_threads(nt, |t| [&off[..], &adj[..], &roff[..], &radj[..]].iter().for_each(|b| release(b, t, nt)));
-    std::process::exit(0);
 }

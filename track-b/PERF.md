@@ -123,25 +123,3 @@ comparison (trimmed 223.030 and 227.463 ms versus 220.925 ms).
 A 4-million-bit exact Bloom prefilter for query-term membership also matched
 the full hash but was slower in a 16-run comparison (213.307 / 248.996 ms,
 protected / candidate) and used more memory. It was removed.
-
-## November 1: query evaluation without an index (rejected)
-
-The scan was changed to keep no postings: each BOOL term sets a bit in a mask
-for the current block of 64 documents, and when the block ends every query
-that one of its terms can trigger (the first term, the rarer side of each AND,
-both sides of each OR) is evaluated on the masks and keeps only its count,
-sum and first ten. Output matched the official hash on the first run and peak
-memory fell from 52 MB to 34-36 MB, but time rose from 195-230 ms to
-260-300 ms in local paired runs: 18.6M query-block evaluations at about 30-100
-ns each (instruction bound with two threads per core), against the 3,918
-64-document blocks per query that a bitmap operation needs 3,918 words for.
-Packing each query and its results into one 32-byte record, running the
-quarter of queries with common triggers in every block, and branch-free
-operators did not close the gap (ablation: 198 ms for the scan without any
-evaluation, +60 ms for the common queries, +31 ms for the rest). The
-postings-and-bitmap design is retained.
-
-Reading ahead in the document text (1 KB or 2 KB ahead, per 64-byte window)
-scored lower on the board in two runs (204 ms against 193-197 ms with the
-unchanged source), as did a bitmap threshold of 1/16 (slower locally) and
-1/64 (+8 MB).
