@@ -15,7 +15,7 @@ Every step from the reference to your final version, each with the live-board ru
 | Packed bidirectional CSR and sparse radix-queue searches | 0.564543 | 132.82 | 5 | Full public seed-1 hash on every run |
 | Block-buffered graph scanning; final candidate | 0.356099 | 135.66 | 5 | Full public seed-1 hash on every run |
 
-Command: `python scripts\benchmark.py d --runs 5` from the repository root.
+Command: the local `scripts/benchmark.py` harness, removed in the cleanup (7f649c8). `python check.py d` reproduces the official gate.
 Tiny input, independent all-pairs random-graph oracles (including full-width
 weights and zero edges), strict GCC warnings and a production-style sandbox run
 pass. Timings exclude Docker startup; hardware and host load differ from the
@@ -118,7 +118,7 @@ all were rejected. Production source is unchanged and passed five final full
 official-data checks.
 
 ```powershell
-python scripts\investigate_tracks.py --tracks d --runs 9 --variants baseline six-byte-records blob-256 blob-1024 --output .out\d-experiments.json
+# removed harness: python scripts\investigate_tracks.py --tracks d --runs 9 --variants baseline six-byte-records blob-256 blob-1024 --output .out\d-experiments.json
 ```
 
 The runner defaults to immutable baseline

@@ -16,7 +16,7 @@ Every step from the reference to your final version, each with the live-board ru
 | Read-mostly membership fast path; final candidate | 0.118340 | 14.94 | 5 | Full public seed-1 hash on every run |
 | Name table 2^18 slots (load 0.38 instead of 0.77); in-container median 26.9 ms vs 29.2 ms | n/a (in-container) | 215.8 vs 208.9 (VmHWM incl. mapped input) | 7 | Full public seed-1 hash on every run; `check.py c --runs 3` PASS |
 
-Command: `python scripts\benchmark.py c --runs 5` from the repository root.
+Command: the local `scripts/benchmark.py` harness, removed in the cleanup (7f649c8). `python check.py c` reproduces the official gate.
 Tiny input, a repeated independent hostile CSV oracle, strict GCC warnings and a
 production-style sandbox run pass. Timings exclude Docker startup; hardware and
 host load differ from the board; cross-batch ratios are indicative rather than
@@ -197,7 +197,7 @@ checks. The local i7 VM is not the scoring i5-13500, and its observed cgroup
 peak is not the official post-removal parent-cgroup measurement.
 
 ```powershell
-python scripts\investigate_tracks.py --tracks c --runs 9 --variants baseline long-name-views batch-32 --output .out\c-experiments.json
+# removed harness: python scripts\investigate_tracks.py --tracks c --runs 9 --variants baseline long-name-views batch-32 --output .out\c-experiments.json
 ```
 
 The runner defaults to immutable baseline

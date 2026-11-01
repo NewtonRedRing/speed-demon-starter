@@ -15,7 +15,7 @@ Every step from the reference to your final version, each with the live-board ru
 | Parallel streaming, exact endpoint table, percentile selection | 0.104180 | 43.21 | 5 | Full public seed-1 hash on every run |
 | Smaller sparse-group reservations; final candidate | 0.064004 | 40.90 | 5 | Full public seed-1 hash on every run |
 
-Command: `python scripts\benchmark.py a --runs 5` from the repository root.
+Command: the local `scripts/benchmark.py` harness, removed in the cleanup (7f649c8). `python check.py a` reproduces the official gate.
 Tiny input, independent empty/randomized percentile oracles and a production-style
 sandbox run also pass. Strict GCC warnings pass. Timings exclude Docker startup;
 host load and hardware differ from the board, so cross-batch ratios are indicative,
@@ -539,11 +539,11 @@ organizer's post-removal parent-cgroup accounting.
 Reproduction (repository root):
 
 ```powershell
-python scripts\investigate_tracks.py --tracks a --runs 9 --variants baseline release-scratch --output .out\a-scratch.json
-python scripts\investigate_tracks.py --tracks a --runs 15 --variants baseline release-scratch --output .out\a-confirmation.json
+# removed harness: python scripts\investigate_tracks.py --tracks a --runs 9 --variants baseline release-scratch --output .out\a-scratch.json
+# removed harness: python scripts\investigate_tracks.py --tracks a --runs 15 --variants baseline release-scratch --output .out\a-confirmation.json
 python scripts\investigate_track_a.py --help
 python -m unittest discover -s tests -p test_track_a_probe.py -v
-python check.py all --runs 5
+python check.py a
 ```
 
 Both experiment runners default to immutable baseline

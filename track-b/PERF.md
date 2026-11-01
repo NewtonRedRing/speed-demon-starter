@@ -15,7 +15,7 @@ Every step from the reference to your final version, each with the live-board ru
 | Phrase automaton plus adaptive Boolean postings | 1.095037 | 235.47 | 5 | Full public seed-1 hash on every run |
 | Bounded phrase summaries, compact posting headers, four malloc arenas | 0.834935 | 202.97 | 5 | Full public seed-1 hash on every run |
 
-Command: `python scripts\benchmark.py b --runs 5` from the repository root.
+Command: the local `scripts/benchmark.py` harness, removed in the cleanup (7f649c8). `python check.py b` reproduces the official gate.
 Tiny input, independent phrase/Unicode/Boolean and parallel bitmap-merge oracles,
 strict GCC warnings and a production-style sandbox run pass. Timings exclude
 Docker startup; hardware and host load differ from the board. Cross-batch ratios
@@ -252,8 +252,8 @@ reused the output inode; their potentially inherited page charges and
 stale-file gate are superseded by this fresh-output validation.
 
 ```powershell
-python scripts\investigate_tracks.py --tracks b --runs 9 --variants baseline shard-posts --output .out\b-postings.json
-python check.py all --runs 5
+# removed harness: python scripts\investigate_tracks.py --tracks b --runs 9 --variants baseline shard-posts --output .out\b-postings.json
+python check.py b
 ```
 
 The experiment runner uses immutable baseline
