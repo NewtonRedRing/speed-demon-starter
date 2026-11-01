@@ -196,3 +196,32 @@ the local Docker VM exposes it.
 own i5-13500 CPU, higher-precision runner, cgroup peak, plus rustfmt/scc
 static axes. Promote a candidate into `speed-demon` only if correct and
 faster after accounting for memory and formatted source-size penalties.
+
+
+### Experiment #1: prefault the exact original Track A input
+
+`experiment/track-a-prefault` adds exactly one executable change to the
+known-best Track A: `madvise(input_map, size, MADV_POPULATE_READ)` just after
+the file-backed `mmap`. The call is timed, and the experiment fails if the
+kernel rejects it. **Do not infer a speedup from fewer fault counters**:
+`madvise` itself may incur the faults before the parser.
+
+From **PowerShell**:
+
+```powershell
+git switch speed-demon
+git pull --ff-only origin speed-demon
+git fetch origin
+python3 scripts/compare_track_a.py --base-ref origin/speed-demon --candidate-ref origin/experiment/track-a-prefault --interleave --runs 9
+python3 scripts/compare_track_a.py --base-ref origin/speed-demon --candidate-ref origin/experiment/track-a-prefault --interleave --reverse --runs 9
+```
+
+The instrumented local timer prints per-run process time, child
+`getrusage(RUSAGE_CHILDREN)` minor faults, and cgroup `memory.peak` when
+available. Every run verifies the full public seed-1 input SHA-256 and
+official output SHA-256. The timer and comparator live outside `track-a/`
+and are **never part of the scored image**. Measurements are from your Docker
+Linux VM, not the organizer's calibrated scoring CPU.
+
+Keep `speed-demon` unchanged unless the candidate improves the complete
+score tradeoff reliably and passes the official correctness gate.

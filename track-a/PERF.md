@@ -443,3 +443,25 @@ alter the scored track's source-size or dependency axes.
 No new score above 79.686448 is claimed. No experiment is promoted until
 independently verified against the organizer's full dataset and shown to
 improve the complete machine-score tradeoff on the target CPU.
+
+
+## 2026-11-01: Experiment #1 — file-mapping prefault
+
+- Branch: `experiment/track-a-prefault`; candidate commit `5560b3f4`.
+- Baseline: byte-for-byte original highest-scoring Track A source at
+  `73169015` / Git blob `a16b72dd8ef8c05c44431e7ee15daa6122684b09`.
+- **Only scored-code change:** `assert_eq!(madvise(p.cast(), size, 22), 0)`
+  after `mmap` of the read-only input file, with 22 = `MADV_POPULATE_READ`.
+- The syscall operates inside the timed process. It can relocate page faults,
+  not make them free. Linux 5.14+ is required; fail if unsupported rather
+  than silently accepting a no-op.
+- Local diagnostics added to `scripts/track_a_timer.rs` measure Linux child
+  minor/major faults with `getrusage(RUSAGE_CHILDREN)`. The A/B helper adds
+  an `--interleave` mode (alternating baseline/candidate within each pair),
+  and `--reverse` to reverse the first pair's order. The scripts do not
+  contribute to the submitted `track-a` source-size metric.
+- Status: **implemented on isolated branch, not yet built or measured in the
+  assistant environment**. The branch was not merged into `speed-demon`.
+- Decision criteria: full public input/output hashes must match for all runs;
+  compare trimmed process times, maximum memory and formatted source count.
+  Total minor faults alone do not prove time savings.
