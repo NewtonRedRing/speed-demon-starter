@@ -210,7 +210,6 @@ fn main() {
     // Plain pages (a part-touched array with huge pages would count whole
     // 2 MB pages), and freed arrays really go back to the kernel.
     unsafe {
-        prctl(41, 1, 0, 0, 0); // PR_SET_THP_DISABLE
         mallopt(-3, 1 << 16); // M_MMAP_THRESHOLD
     }
     let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
