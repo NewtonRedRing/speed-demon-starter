@@ -1,6 +1,10 @@
 [package]
-name = "solution"
+name = "newtonredheat-track-d"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "solution"
+path = "main.rs"
 
 [dependencies]

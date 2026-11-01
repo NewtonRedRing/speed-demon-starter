@@ -1,59 +1,98 @@
 # Track D: performance log
 
-Every board run this track has scored, with the commit it measured. Judges can
-check each run ID against the live board. Earlier local experiment logs are in
-git history.
+Every step from the reference to your final version, each with the live-board run ID that measured it. Judges check that the run IDs exist and that each change moved the way you say it did.
 
-| Commit | Board run | T | M | Points | Notes |
+| Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
-| (reference) | | 72.69 s | 893 MB | 0 | Reference, unchanged |
-| e8f4a84 (original C++) | run-db27d85c8981 | 8.748280 s | 115.79 MB | 27.364 | Original submission |
-| dfdc930 | run-c3a3efa5980d | 0.418953 s | 141.78 MB | 57.008935 | 365 formatted source lines |
-| 2ef4945 | run-b47491020917 | 177.553 ms | 75,284,480 B | 68.113015 | Track D source unchanged; S=491, D=1, K=23.028217 |
-| 6759b53 | run-e3a230f2ca26 | 174.011 ms | 76,247,040 B | **68.316671** | **Submitted version**; S=485, D=1 |
-| c915724 | run-8d7df9f46a1d | 178.043 ms | 76,292,096 B | 68.065400 | 1,024-node blobs only; below best |
-| 8f6a12b | run-05c08d78cd3f | 177.661 ms | 74,711,040 B | 68.179668 | 1,024-node blobs + 64-node pages; below best |
+| 0 | The reference, unchanged | | 72.69 | 893 | 0 |
+| 1 | Original C++ submission, e8f4a84 | run-db27d85c8981 | 8.748280 | 115.79 | 27.364 |
 
-## Submitted version
+## Local candidate measurements (not board runs)
 
-The submitted version is commit `6759b53`, scored at 68.316671 points on run
-`run-e3a230f2ca26`. It is our best Track D result on the board. The requested
-120 ms / 66 MB target is still unmet.
+| Candidate | Process median (s) | Peak RSS (MiB) | Repetitions | Validation |
+|---|---:|---:|---:|---|
+| Previous implementation | 7.028240 | 110.66 | 3 | Full public seed-1 hash |
+| Packed bidirectional CSR and sparse radix-queue searches | 0.564543 | 132.82 | 5 | Full public seed-1 hash on every run |
+| Block-buffered graph scanning; final candidate | 0.356099 | 135.66 | 5 | Full public seed-1 hash on every run |
 
-Commit `2ef4945` did not change Track D's source. Its re-run scored 68.113015
-points, below the submitted version.
+Command: `python scripts\benchmark.py d --runs 5` from the repository root.
+Tiny input, independent all-pairs random-graph oracles (including full-width
+weights and zero edges), strict GCC warnings and a production-style sandbox run
+pass. Timings exclude Docker startup; hardware and host load differ from the
+board; cross-batch ratios are indicative rather than controlled comparisons.
+Final candidate is approximately 19.7x faster than the recorded local baseline
+with higher RSS. Expanded parallel-construction oracles and ASan/UBSan also pass.
+A dense-distance experiment was slower and was removed.
+90 points and first place remain unverified.
+Latest official-input recheck: five runs, median 0.326934 s, peak RSS 136.10 MiB.
+Inputs and outputs verified against the live manifest linked from the board.
+The published candidate's actual board result is recorded below.
 
-## November 1: local distance-page experiments
+## Confirmed board result and rejected local experiment
 
-The official monotonic timer, prewarmed Linux-volume input, fresh sandboxed
-containers and 12 interleaved runs per image gave:
+Commit `dfdc930`: run `run-c3a3efa5980d`, 0.418953 s, 141.78 MB,
+365 formatted source lines, **57.008935 points**. Correctness passed.
 
-| Distance page | Trimmed time | Trimmed memory |
-|---|---|---|
-| 512 nodes (protected baseline) | 188.073 ms | 76,818,944 B |
-| 64 nodes | 186.250 ms | 75,510,272 B |
-| 128 nodes | 189.005 ms | 75,050,496 B |
+A six-worker variant passed the official full output hash but measured
+0.522989 s / 107.71 MiB versus twelve workers at 0.409246 s / 136.98 MiB.
+The time penalty outweighed the memory benefit, so it was removed.
 
-All matched the official full seed-1 output hash. The gains were too small
-relative to local variability to promote, and neither changes which three
-tracks contribute to our overall score. The original 512-node page remains.
+## Subsequent speed-first parser and search tuning
 
-## November 1: larger BFS locality blobs
+Complete buffered rows now parse in one numeric pass after finding the block's
+last complete newline, instead of searching for every edge's newline first.
+Search skips relaxations at or above the current best distance before consulting
+the opposite frontier. A redundant radix-key runtime check was removed:
+nonnegative Dijkstra weights already guarantee monotone inserted keys.
+Input and output failure reporting remains.
 
-Changing the BFS locality target from 512 to 1,024 nodes matched the official
-full seed-1 hash in every benchmark and passed the official sandbox gate plus
-reference comparisons on tiny seeds 2, 7, 42, 2026, sample seeds 17 and 103,
-and full seed 23.
+Eight alternating runs per executable in one official-data sandbox:
 
-In the first 16-run comparison (protected / 256 / 1,024 nodes), trimmed times
-were 255.011 / 252.543 / 246.469 ms. A separate 24-pair baseline comparison
-gave 262.501 / 250.469 ms; across both comparisons, 1,024-node blobs were
-faster in 30 of 40 pairs, with median paired ratio 0.96103, mean ratio
-0.93546, and paired bootstrap 95% interval [0.87964, 0.97667]. Trimmed
-memory was about 0.21 MB higher. A single 16-run 2,048-node trial was
-inconclusive. The 1,024-node-only variant scored 68.065400 points on the board,
-and the 1,024-node/64-node-page combination scored 68.179668. Both were below
-the protected 68.316671, so the 512-node blobs and 512-node distance pages are
-restored. The local combination appeared faster and smaller in one 16-pair
-test (184.993 / 181.030 ms and 76,814,746 / 76,208,128 B; protected /
-candidate), but board results decide promotion.
+| Executable | Median process time (s) | Maximum RSS (MiB) |
+|---|---:|---:|
+| Start-of-pass implementation | 0.459892 | 138.95 |
+| Retained candidate | 0.436360 | 136.98 |
+
+This is **5.1% lower median time**. An earlier controlled batch measured
+0.386281 s before versus 0.379875 s after; the gain is modest and host-sensitive.
+A separate final five-run batch measured 0.399363 s / 133.26 MiB.
+
+Cached raw edges with per-worker degree arrays and prefix-owned CSR scatter
+removed construction atomics but were slower and larger: controlled medians
+0.475922 s / about 140 MB baseline, 0.505225 s / 304 MB local-degree candidate,
+and 0.542144 s / 324 MB with full-width aligned edges. Both alternatives were
+removed; packed six-byte CSR with sparse overflow weights remains.
+
+Every full official hash passes. All 14 regression tests, all eight solution
+methods under ASan/UBSan, strict warnings and all four offline production
+sandbox checks pass. There is no new official score.
+
+## Profile-guided queue and edge-storage compaction
+
+Temporary phase timers measured 38-45 ms counting degrees, 17-18 ms allocating
+and prefixing, 65-69 ms filling edges, and 229-252 ms answering queries.
+Timers were removed. Radix entries now occupy twelve rather than sixteen bytes,
+preserving all 64 distance bits. Finding a bucket minimum compares only distance;
+node-ID tie comparisons never affected that minimum distance.
+Edge arrays use overwrite allocation: checked degrees and unique atomic cursors
+fill every slot before searches begin, so zero-initialization was redundant.
+
+Eight alternating official-input runs per executable in one sandbox:
+
+| Executable | Median process time (s) | Maximum RSS (MiB) |
+|---|---:|---:|
+| Start-of-pass implementation | 0.464529 | 135.01 |
+| Packed queue and overwrite edge arrays | 0.450791 | 133.96 |
+
+This is **3.0% lower median time**. An earlier three-way comparison measured
+0.410595 s before, 0.407331 s with packed queues but zero-initialized arrays,
+and 0.396743 s with both changes. A separate final five-run retained batch
+measured 0.394181 s / 130.77 MiB. Total CPU time did not improve consistently;
+elapsed gains and their transfer to scoring hardware remain host-dependent.
+
+Own-distance-first relaxation and speculative sparse-distance prefetch were
+exact but slower and were removed. No landmark preprocessing was added: the
+entire measured query stage is only about a quarter second locally, so its
+preprocessing cost would need a demonstrated whole-process win.
+All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
+strict warnings and all four offline sandbox checks pass. No new score exists.

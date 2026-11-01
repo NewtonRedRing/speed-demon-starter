@@ -84,13 +84,10 @@ unsafe fn find(in_window: bool, at: *const u8, mut s: *const u8, c: u8) -> *cons
     if in_window {
         return at;
     }
-    loop {
-        let mask = eq32(s, c);
-        if mask != 0 {
-            return s.add(mask.trailing_zeros() as usize);
-        }
+    while eq32(s, c) == 0 {
         s = s.add(32);
     }
+    s.add(eq32(s, c).trailing_zeros() as usize)
 }
 
 fn width(x: u32) -> usize {
