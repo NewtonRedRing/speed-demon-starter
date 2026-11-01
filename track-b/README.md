@@ -4,9 +4,10 @@ Exact zero-dependency Rust implementation of the official Track B specification.
 
 Queries are parsed first into a compact exact term dictionary. Corpus shards are
 memory-mapped and tokenized with ASCII case folding; non-ASCII bytes remain
-separators as required. The immutable dictionary uses open addressing,
-multiply-xorshift hashing and 32-bit slots packing 14-bit hash tags with 18-bit
-term IDs plus one. Full 32-byte SIMD token equality resolves tag collisions.
+separators as required. The immutable dictionary uses open addressing and
+CRC32C over each exact 32-byte lowercase token key. Its 32-bit slots pack a
+14-bit hash tag with an 18-bit term ID plus one; full SIMD equality resolves
+tag collisions.
 
 Frequent Boolean terms are accumulated as 64-document membership words; OR
 makes repeated occurrences idempotent. Less frequent terms use deduplicated

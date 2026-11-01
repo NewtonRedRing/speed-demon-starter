@@ -89,3 +89,21 @@ Rebuilding the dictionary without phrase-verification-only terms matched the
 full hash but gave only 205.882 / 204.231 ms in 16 paired runs, without a
 meaningful memory reduction. That marginal result did not justify its extra
 source and was removed.
+
+## November 1: CRC32C hash candidate
+
+The dictionary hash now uses hardware CRC32C over all four 64-bit lanes of the
+exact, lowercase, zero-padded token key. The 32-bit result supplies the
+18-bit table index and 14-bit candidate tag; complete 32-byte SIMD equality
+still resolves every tag match, so collisions cannot change the result.
+The official sandbox/full seed-1 hash and reference comparisons on tiny seeds
+2, 7, 42, 2026, sample seeds 17, 103 and full seed 23 passed. Canonical
+formatted source is S=628, three lines above the compact-hash version.
+
+In 24 locally paired runs, the candidate was faster in 17 pairs. Its median
+time ratio was 0.96647, mean ratio 0.96933, and seed-42 10,000-resample paired
+bootstrap 95% interval for the mean ratio was [0.95109, 0.98748]. Trimmed
+means were 231.887 / 223.489 ms (protected / candidate); memory was
+52,045,312 / 52,152,064 bytes. These local runs justify a board trial; the
+candidate is not considered an improvement until it beats the submitted
+70.917314 board points.

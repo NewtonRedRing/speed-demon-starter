@@ -84,11 +84,13 @@ unsafe fn key(p: *const u8, len: usize) -> __m256i {
 }
 
 fn hash(k: __m256i) -> usize {
-    // Two multiply-xorshift rounds over the four 64-bit lanes (SplitMix-style constants).
     let w: [u64; 4] = unsafe { std::mem::transmute(k) };
-    let h = (w[0] ^ w[2].rotate_left(29)).wrapping_mul(0x9E3779B97F4A7C15);
-    let h = h ^ (w[1] ^ w[3].rotate_left(29)).wrapping_mul(0xBF58476D1CE4E5B9);
-    (h ^ h >> 29) as usize
+    unsafe {
+        _mm_crc32_u64(
+            _mm_crc32_u64(_mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[1]), w[2]),
+            w[3],
+        ) as usize
+    }
 }
 
 fn same(a: __m256i, b: __m256i) -> bool {
@@ -110,7 +112,7 @@ impl Terms {
         loop {
             match self.slot[i] {
                 0 => return self.keys.len() as u32,
-                s if (s ^ (h >> 32) as u32) & !ID_MASK == 0 && same(self.keys[(s & ID_MASK) as usize - 1], k) => return (s & ID_MASK) - 1,
+                s if (s ^ (h as u32 & !ID_MASK)) & !ID_MASK == 0 && same(self.keys[(s & ID_MASK) as usize - 1], k) => return (s & ID_MASK) - 1,
                 _ => i = (i + 1) & mask,
             }
         }
@@ -134,13 +136,13 @@ impl Terms {
         let mut i = h & mask;
         while self.slot[i] != 0 {
             let s = self.slot[i];
-            if (s ^ (h >> 32) as u32) & !ID_MASK == 0 && same(self.keys[(s & ID_MASK) as usize - 1], k) {
+            if (s ^ (h as u32 & !ID_MASK)) & !ID_MASK == 0 && same(self.keys[(s & ID_MASK) as usize - 1], k) {
                 return (s & ID_MASK) - 1;
             }
             i = (i + 1) & mask;
         }
         self.keys.push(k);
-        self.slot[i] = (h >> 32) as u32 & !ID_MASK | self.keys.len() as u32;
+        self.slot[i] = h as u32 & !ID_MASK | self.keys.len() as u32;
         self.keys.len() as u32 - 1
     }
 }
