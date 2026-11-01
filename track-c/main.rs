@@ -314,17 +314,26 @@ impl<'a> Sightings<'a> {
     }
 
     fn flush(&mut self) {
-        for &(word, bit) in &self.bits[..self.bits_len] {
-            self.names.bits[word].fetch_or(bit, Relaxed);
-        }
-        self.bits_len = 0;
-        for &(group, h, p, len) in &self.seen[..self.seen_len] {
+        // Ping-pong software pipeline: prefetch next bitmap target while
+        // applying the previous batch's atomics. OR operations commute, and
+        // every name still passes the exact shared-table lookup.
+        let old_bits = self.bits_len;
+        let next_bits = self.seen_len;
+        for i in 0..next_bits {
+            let (group, h, p, len) = self.seen[i];
             let id = self.names.number(h, p, len);
             let word = group * NAME_WORDS + id / 64;
             prefetch_write::<AtomicU64>(&self.names.bits[word]);
-            self.bits[self.bits_len] = (word, 1 << (id % 64));
-            self.bits_len += 1;
+            if i < old_bits {
+                let (old_word, old_bit) = self.bits[i];
+                self.names.bits[old_word].fetch_or(old_bit, Relaxed);
+            }
+            self.bits[i] = (word, 1u64 << (id % 64));
         }
+        for &(word, bit) in &self.bits[next_bits..old_bits] {
+            self.names.bits[word].fetch_or(bit, Relaxed);
+        }
+        self.bits_len = next_bits;
         self.seen_len = 0;
     }
 
