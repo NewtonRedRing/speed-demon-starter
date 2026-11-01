@@ -327,14 +327,11 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
 
 /// "count sum id1 ... id10" for a set of documents.
 fn line(out: &mut String, docs: &Docs) {
-    // Every result prints at most ten doc IDs: keep them on the stack.
-    let (mut count, mut sum, mut first_len) = (0u64, 0u64, 0usize);
-    let mut first = [0u32; 10];
+    let (mut count, mut sum, mut first) = (0u64, 0u64, Vec::with_capacity(10));
     match docs {
         Docs::List(v) => {
             (count, sum) = (v.len() as u64, v.iter().map(|&d| d as u64).sum());
-            first_len = v.len().min(10);
-            first[..first_len].copy_from_slice(&v[..first_len]);
+            first.extend(v.iter().take(10));
         }
         Docs::Bits(b) => {
             // Bit k of a position adds 2^k for each set bit whose position has it.
@@ -344,16 +341,15 @@ fn line(out: &mut String, docs: &Docs) {
                 let within: u64 = (0..6).map(|k| ((x & SEL[k]).count_ones() as u64) << k).sum();
                 (count, sum) = (count + c, sum + c * 64 * w as u64 + within);
                 let mut m = x;
-                while m != 0 && first_len < 10 {
-                    first[first_len] = w as u32 * 64 + m.trailing_zeros();
-                    first_len += 1;
+                while m != 0 && first.len() < 10 {
+                    first.push(w as u32 * 64 + m.trailing_zeros());
                     m &= m - 1;
                 }
             }
         }
     }
     write!(out, "{count} {sum}").unwrap();
-    first[..first_len].iter().for_each(|d| write!(out, " {d}").unwrap());
+    first.iter().for_each(|d| write!(out, " {d}").unwrap());
     out.push('\n');
 }
 
