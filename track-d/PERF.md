@@ -11,6 +11,7 @@ git history.
 | dfdc930 | run-c3a3efa5980d | 0.418953 s | 141.78 MB | 57.008935 | 365 formatted source lines |
 | 2ef4945 | run-b47491020917 | 177.553 ms | 75,284,480 B | 68.113015 | Track D source unchanged; S=491, D=1, K=23.028217 |
 | 6759b53 | run-e3a230f2ca26 | 174.011 ms | 76,247,040 B | **68.316671** | **Submitted version**; S=485, D=1 |
+| c915724 | run-8d7df9f46a1d | 178.043 ms | 76,292,096 B | 68.065400 | 1,024-node blobs only; below best |
 
 ## Submitted version
 
@@ -49,5 +50,9 @@ gave 262.501 / 250.469 ms; across both comparisons, 1,024-node blobs were
 faster in 30 of 40 pairs, with median paired ratio 0.96103, mean ratio
 0.93546, and paired bootstrap 95% interval [0.87964, 0.97667]. Trimmed
 memory was about 0.21 MB higher. A single 16-run 2,048-node trial was
-inconclusive. The 1,024-node variant is being submitted for board validation;
-it is retained only if it beats 68.316671 points.
+inconclusive. The 1,024-node-only variant scored 68.065400 points on the board, below the
+protected 68.316671. It is not retained. The combined 1,024-node blobs and
+64-node distance pages were faster and lower-memory in a 16-pair local test
+(184.993 / 181.030 ms and 76,814,746 / 76,208,128 B; protected / candidate).
+This exact candidate passed all seven additional reference datasets; it is
+being submitted and will be retained only if it beats 68.316671 points.

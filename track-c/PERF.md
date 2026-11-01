@@ -70,3 +70,7 @@ not improve elapsed time enough to justify its memory or source-size cost:
 - A 1,024-entry per-worker exact-name cache, and a 2,048-bucket dictionary.
 - Buffered record parsing, cache-line-separated membership, and arena-backed name views.
 - Stripe-owned country deduplication: exact, but slower and about 72 MB.
+- Doubling the current name table to 2^18 slots matched the full hash and was
+  locally faster (47.339 / 45.369 ms), but raised trimmed memory from
+  12,852,429 to 19,974,554 bytes; the combined time-memory score regressed.
+  The 2^17-slot table remains.
