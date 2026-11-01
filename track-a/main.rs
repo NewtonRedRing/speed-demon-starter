@@ -349,7 +349,9 @@ fn main() {
 
         let (names, order) = &*names.get();
         let ne = names.len();
-        let (mut start, mut errors, mut latency) = (vec![0u32; ne + 1], vec![0u32; ne], vec![]);
+        // Reuse a worker-local cursor across all hours: no per-hour allocations.
+        let (mut start, mut errors, mut cursor, mut latency) =
+            (vec![0u32; ne + 1], vec![0u32; ne], vec![0u32; ne], vec![]);
         while let h @ 0..HOURS = claim.fetch_add(1, Relaxed) {
             // Counting sort of the hour's latencies by endpoint rank: count into
             // start[e + 1], prefix, then place each latency at its group's cursor.
@@ -362,7 +364,7 @@ fn main() {
                 start[e + 1] += start[e];
             }
             latency.resize(start[ne] as usize, 0);
-            let mut cursor = start[..ne].to_vec();
+            cursor.copy_from_slice(&start[..ne]);
             for ps in &parsers {
                 ps.get().each(h, |e, _, l| (latency[cursor[e] as usize], cursor[e]) = (l, cursor[e] + 1));
             }
@@ -404,7 +406,7 @@ fn main() {
             at[h].store(size as u64, Relaxed);
         }
 
-        drop((start, errors, latency));
+        drop((start, errors, cursor, latency));
         if barrier.wait().is_leader() {
             let mut total = 0;
             for size in &at {
