@@ -95,7 +95,7 @@ published full-scale inputs and expected outputs, however, can be replicated
 - `data/` and `.out/` — local untracked data and output directories
 
 Each submission directory includes its pinned `Dockerfile`,
-`.speed-demon.toml`, `Cargo.toml`, `main.rs`, `README.md` and `PERF.md`.
+`.speed-demon.toml`, `main.rs`, `README.md` and `PERF.md`.
 The Dockerfiles use Rust edition 2021 and `target-cpu=native`. Track C also
 trains and uses PGO inside the offline build, using a generator permitted
 by the official rules. Do not confuse local test data with build-time PGO
