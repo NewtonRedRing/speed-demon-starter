@@ -239,7 +239,6 @@ fn main() {
         out.iter_mut().for_each(|b| b.0.reserve(guess));
         let mut i = cut[t];
         while i < cut[t + 1] {
-            prefetch(text.as_ptr().wrapping_add(i + 3072)); // the edge list is read once, in order
             let u = number(text, &mut i);
             let v = number(text, &mut i);
             let mut w = number(text, &mut i);
