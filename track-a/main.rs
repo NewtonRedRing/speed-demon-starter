@@ -330,6 +330,11 @@ fn main() {
     let work = |t: usize| unsafe {
         while let k @ 0..PARTS = claim_parse.fetch_add(1, Relaxed) {
             parsers[t].get().parse(&ids, log.as_ptr().add(cut[k]), log.as_ptr().add(cut[k + 1]));
+            // Unmap the piece's whole pages now, in parallel, instead of all at exit.
+            let (from, to) = ((cut[k] + 4095) & !4095, cut[k + 1] & !4095);
+            if to > from {
+                madvise(log.as_ptr().add(from) as *mut c_void, to - from, 4); // MADV_DONTNEED
+            }
         }
 
         // Lines are printed in unsigned byte order of the name within an hour
@@ -431,4 +436,5 @@ fn main() {
         }
     };
     std::thread::scope(|s| (0..THREADS).for_each(|t| _ = s.spawn(move || work(t))));
+    std::process::exit(0); // skip the destructors
 }
