@@ -35,6 +35,23 @@ It has no board run yet.
 - `39502cdb`, zero-copy EOF mapping (`run-0b1d0e65fdba`): 68.996326 points.
   M rose to 17.75 MB. Reverted to the copied, padded tail.
 
+## November 1: field-specific parser candidate
+
+Local Docker measurements are not board measurements. With Linux-volume input,
+the official monotonic timer, cores 0-11, fresh containers and tmpfs output,
+12 interleaved runs per image gave trimmed means of 56.307 ms for the protected
+baseline and 50.048 ms for the candidate (11.1% lower). Memory was noisy:
+trimmed means were 12,819,456 and 14,067,200 bytes respectively. The candidate
+also removes the general CSV structural stream and the pending-record queue.
+
+Correctness passed the official full seed-1 hash, official-reference comparisons
+on tiny seeds 2, 7, 42 and 2026, sample seeds 17 and 103, full seed 23, and a
+separate quote/boundary/collision test including a 65,541-byte name. Test data
+and benchmark scripts are outside the submission. A board result is required
+before calling this an improvement to the submitted best.
+
+Six workers were slower and were not retained.
+
 ## Rejected local experiments
 
 Each of these matched the official output hash but was removed because it did

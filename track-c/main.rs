@@ -12,7 +12,7 @@
 //!   closing quote (a `"` followed by another `"` is an escaped pair).
 //! - `names_distinct` keeps nothing per record. All workers share one
 //!   lock-free table that numbers each distinct name (by a 64-bit hash of
-//!   its raw bytes; escaping is one to one, so equal names have equal raw
+//!   its length and boundary bytes; escaping is one to one, so equal names have equal raw
 //!   bytes) and one bit per (country, name number). A country's distinct
 //!   count is the popcount of its row. Lookups are batched and prefetched
 //!   so their cache misses overlap.
@@ -24,7 +24,7 @@
 //!   run past the file-backed mapping.
 
 use std::arch::x86_64::{
-    __m256i, _pdep_u64, _mm_crc32_u64, _mm256_cmpeq_epi8, _mm256_loadu_si256,
+    __m256i, _mm_crc32_u64, _mm256_cmpeq_epi8, _mm256_loadu_si256,
     _mm256_movemask_epi8, _mm256_set1_epi8,
 };
 use std::cell::UnsafeCell;
@@ -151,7 +151,7 @@ impl Agg {
 /// high bit set=ready. Generated name bytes are printable ASCII, so that high
 /// bit cannot collide with real key data. Names up to 16 raw bytes are stored
 /// exactly in the slot. Longer names store an exact first eight bytes plus a
-/// marked full-name hash as a candidate filter, then compare every remaining
+/// marked second eight bytes as a candidate filter, then compare every remaining
 /// byte from the side arena before equality is accepted.
 const NAME_SLOTS: usize = 1 << 17;
 const NAME_WORDS: usize = NAME_SLOTS / 64;
@@ -349,20 +349,13 @@ fn prefetch_write<T>(p: *const T) {
 #[inline(always)]
 fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
     let len = to - from;
-    let mut h = len as u64;
-    let mut p = from;
     unsafe {
-        while p + 8 <= to {
-            h = _mm_crc32_u64(h, (data.as_ptr().add(p) as *const u64).read_unaligned());
-            p += 8;
-        }
-        if p < to {
-            let mut tail = 0u64;
-            std::ptr::copy_nonoverlapping(data.as_ptr().add(p), (&mut tail as *mut u64).cast(), to - p);
-            h = _mm_crc32_u64(h, tail);
-        }
+        let word = |p: usize| data.as_ptr().add(p).cast::<u64>().read_unaligned();
+        let first = word(from) & byte_mask(len);
+        let last = if len >= 8 { word(to - 8) } else { 0 };
+        let h = _mm_crc32_u64(_mm_crc32_u64(len as u64, first), last);
+        h.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ h.rotate_left(29)
     }
-    h.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (h.rotate_left(29))
 }
 
 // --- Record parsing (spec section 2.1) ----------------------------------
@@ -376,73 +369,30 @@ fn match32(data: &[u8], at: usize, c: u8) -> u32 {
     }
 }
 
+// Spec 2.2: a text field is quoted or empty. Skip escaped pairs, treating
+// commas and embedded newlines as ordinary bytes until the closing quote.
+// Returns raw start/end, decoded length, and the next field's start.
 #[inline(always)]
-fn match64(data: &[u8], at: usize, c: u8) -> u64 {
-    match32(data, at, c) as u64 | ((match32(data, at + 32, c) as u64) << 32)
-}
-
-#[derive(Clone, Copy)]
-struct Separator {
-    at: usize,
-    quotes: u64,
-}
-
-/// Streams commas/newlines that are outside quoted CSV fields. Quote parity
-/// for all 64 bytes is computed with BMI2 alternating-bit deposit, so
-/// names and notes are not rescanned byte-by-byte just to locate separators.
-struct Structure<'a> {
-    data: &'a [u8],
-    block: usize,
-    bits: u64,
-    carry: u64,
-    q: u64,
-    before: u64,
-}
-
-impl<'a> Structure<'a> {
-    #[inline]
-    fn new(data: &'a [u8], start: usize) -> Self {
-        Self { data, block: start, bits: 0, carry: 0, q: 0, before: 0 }
+fn text_field(data: &[u8], at: usize) -> (usize, usize, usize, usize) {
+    if data[at] == b',' {
+        return (at, at, 0, at + 1);
     }
-
-    #[inline(always)]
-    fn next(&mut self) -> Separator {
-        while self.bits == 0 {
-            if self.block + 64 > self.data.len() {
-                return Separator { at: self.data.len(), quotes: self.before + self.q.count_ones() as u64 };
-            }
-            let at = self.block;
-            self.block += 64;
-            self.before += self.q.count_ones() as u64;
-            self.q = match64(self.data, at, b'"');
-            let structural = match64(self.data, at, b',') | match64(self.data, at, b'\n');
-            if self.q == 0 && self.carry == 0 {
-                self.bits = structural;
-            } else {
-                // BMI2 PDEP marks alternating opening quote positions. Their
-                // paired closing positions minus openings produce inclusive
-                // quote parity in one subtraction, including unmatched opens.
-                // Incoming parity toggles every bit in the current block.
-                // Deposits 0101... into the quote positions: marks every opening (odd-numbered) quote.
-                let opens = unsafe { _pdep_u64(0x5555_5555_5555_5555, self.q) };
-                let prefix = (self.q ^ opens).wrapping_sub(opens) ^ self.carry;
-                self.carry = ((prefix as i64) >> 63) as u64;
-                self.bits = structural & !prefix;
-            }
+    let start = at + 1;
+    let mut p = start;
+    let mut escaped = 0;
+    loop {
+        let bits = match32(data, p, b'"');
+        if bits == 0 {
+            p += 32;
+            continue;
         }
-        let i = self.bits.trailing_zeros() as usize;
-        self.bits &= self.bits - 1;
-        let before_bit = if i == 0 { 0 } else { (1u64 << i) - 1 };
-        Separator {
-            at: self.block - 64 + i,
-            quotes: self.before + (self.q & before_bit).count_ones() as u64,
+        p += bits.trailing_zeros() as usize;
+        if data[p + 1] != b'"' {
+            return (start, p, p - start - escaped, p + 2);
         }
+        escaped += 1;
+        p += 2;
     }
-}
-
-#[inline(always)]
-fn decoded_text_len(raw_len: usize, quote_bytes: u64) -> usize {
-    raw_len - if quote_bytes == 0 { 0 } else { quote_bytes as usize / 2 + 1 }
 }
 
 /// The run of ASCII digits at `data[at..]` as (value, length).
@@ -463,48 +413,8 @@ fn digits(data: &[u8], at: usize) -> (u64, usize) {
     (v, n)
 }
 
-/// Parses every record in `data[start..end]` (both record boundaries; the
-/// 64 bytes after `end` must be readable) into `groups`.
-#[derive(Clone, Copy, Default)]
-struct Pending {
-    id: u64,
-    region: usize,
-    cents: i64,
-    name_bytes: u64,
-    note_bytes: u64,
-    hash: u64,
-    ptr: usize,
-    len: usize,
-}
-
-#[inline(always)]
-fn retire_pending(
-    p: Pending,
-    regions: &Regions,
-    unmatched: usize,
-    sightings: &mut Sightings,
-    groups: &mut [Agg],
-) {
-    let g = if p.region < regions.group_of.len() {
-        let x = unsafe { *regions.group_of.get_unchecked(p.region) };
-        if x != 0 { x as usize - 1 } else { unmatched }
-    } else {
-        unmatched
-    };
-    let agg = unsafe { groups.get_unchecked_mut(g) };
-    agg.count += 1;
-    agg.id_sum += p.id;
-    agg.amount_sum += p.cents;
-    agg.amount_min = agg.amount_min.min(p.cents);
-    agg.amount_max = agg.amount_max.max(p.cents);
-    agg.name_bytes += p.name_bytes;
-    agg.note_bytes += p.note_bytes;
-    sightings.push(g, p.hash, p.ptr, p.len);
-}
-
-/// Parses every record in data[start..end]. Region lookup and aggregation are
-/// deliberately retired 16 records after parse so the random region-table
-/// read overlaps with CSV scanning and name hashing.
+/// Parses record-aligned data[start..end] with 64 readable lookahead bytes.
+/// Name lookups remain batched.
 fn parse_records(
     data: &[u8],
     start: usize,
@@ -514,25 +424,18 @@ fn parse_records(
     groups: &mut [Agg],
 ) {
     let unmatched = regions.countries.len();
-    let mut pending = [Pending::default(); BATCH];
-    let mut pending_len = 0usize;
     let mut i = start;
-    let mut sep = Structure::new(data, start);
     while i < end {
         prefetch_read(data.as_ptr().wrapping_add(i + 1536));
         // 0xEF opens the 3-byte UTF-8 BOM at a line start; skip it.
         i += 3 * (data[i] == 0xEF) as usize;
 
-        let f1 = sep.next();
-        let f2 = sep.next();
-        let f3 = sep.next();
-        let f4 = sep.next();
-        let eol = sep.next();
+        let (id, id_len) = digits(data, i);
+        let (ns, ne, name_bytes, note_at) = text_field(data, i + id_len + 1);
+        let (_, _, note_bytes, region_at) = text_field(data, note_at);
+        let (region, region_len) = digits(data, region_at);
 
-        let (id, _) = digits(data, i);
-        let (region, _) = digits(data, f3.at + 1);
-
-        let mut a = f4.at + 1;
+        let mut a = region_at + region_len + 1;
         let neg = data[a] == b'-';
         a += neg as usize;
         let (whole, n) = digits(data, a);
@@ -542,37 +445,24 @@ fn parse_records(
             + (data[frac + 1] - b'0') as u64) as i64;
         let cents = if neg { -cents } else { cents };
 
-        let nq = f2.quotes - f1.quotes;
-        let tq = f3.quotes - f2.quotes;
-        let quoted = nq != 0;
-        let ns = f1.at + 1 + quoted as usize;
-        let ne = f2.at - quoted as usize;
         let region = region as usize;
-        if region < regions.group_of.len() {
-            prefetch_read(unsafe { regions.group_of.as_ptr().add(region) });
-        }
-
-        pending[pending_len] = Pending {
-            id,
-            region,
-            cents,
-            name_bytes: decoded_text_len(f2.at - (f1.at + 1), nq) as u64,
-            note_bytes: decoded_text_len(f3.at - (f2.at + 1), tq) as u64,
-            hash: hash_name(data, ns, ne),
-            ptr: data.as_ptr().wrapping_add(ns) as usize,
-            len: ne - ns,
+        let g = if region < regions.group_of.len() {
+            let x = unsafe { *regions.group_of.get_unchecked(region) };
+            if x != 0 { x as usize - 1 } else { unmatched }
+        } else {
+            unmatched
         };
-        pending_len += 1;
-        if pending_len == BATCH {
-            for &x in &pending {
-                retire_pending(x, regions, unmatched, sightings, groups);
-            }
-            pending_len = 0;
-        }
-        i = eol.at + 1;
-    }
-    for &x in &pending[..pending_len] {
-        retire_pending(x, regions, unmatched, sightings, groups);
+        let agg = &mut groups[g];
+        agg.count += 1;
+        agg.id_sum += id;
+        agg.amount_sum += cents;
+        agg.amount_min = agg.amount_min.min(cents);
+        agg.amount_max = agg.amount_max.max(cents);
+        agg.name_bytes += name_bytes as u64;
+        agg.note_bytes += note_bytes as u64;
+        sightings.push(g, hash_name(data, ns, ne), data.as_ptr().wrapping_add(ns) as usize, ne - ns);
+        i = frac + 2;
+        i += (data[i] == b'\r') as usize + 1;
     }
 }
 
@@ -728,6 +618,9 @@ fn render(regions: &Regions, groups: &[Agg]) -> Vec<u8> {
 }
 
 fn main() {
+    extern "C" { fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32; }
+    // Keep sparsely touched tables from being charged as whole 2 MB pages.
+    unsafe { prctl(41, 1, 0, 0, 0) }; // PR_SET_THP_DISABLE
     let (records, regions, output) = ("/data/records.csv", "/data/regions.csv", "/out/aggregates.txt");
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let result = map_file(regions).and_then(|regions_data| {
