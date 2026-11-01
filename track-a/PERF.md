@@ -30,7 +30,7 @@ is kept because it is equal on the board and simpler in the serial step.
 
 ## November 1: read-ahead prefetch
 
-One software prefetch of the log 3,072 bytes ahead of the line being parsed. In 20 interleaved local runs per image the trimmed time was 26.28 ms without and 25.49 ms with it (512, 1,536 and 6,144 bytes were similar); memory unchanged. Full seed-1 hash and check.py pass. The board result is recorded in the run table once measured.
+One software prefetch of the log ahead of the line being parsed (the final source uses 2,048 bytes). Local runs saw only about 0.8 ms from it, but the board measured it: no prefetch 30.78 ms; 3,072 bytes 29.04 ms (80.738 points, run on a4aa542); 2,048 bytes 28.33 ms (80.946 points, a0fc00f, best); 1,024 bytes 32.8 ms and 8,192 bytes 31.1 ms (both on runs where the unchanged Track B was also 5-10% slower, so the ratio of A to B is the fair comparison: 0.1464 at 2,048, 0.1462-0.1471 at 3,072, 0.1515 at 8,192, 0.1546 at 1,024). A non-temporal hint (_MM_HINT_NTA) at 2,048 bytes scored lower (ratio 0.152). Static linking, sizing the group lists up front, and a second prefetch were also tried on the board and scored lower or equal. Full seed-1 hash and check.py pass.
 
 ## Local candidate measurements (not board runs)
 
