@@ -70,3 +70,14 @@ not improve elapsed time enough to justify its memory or source-size cost:
 - A 1,024-entry per-worker exact-name cache, and a 2,048-bucket dictionary.
 - Buffered record parsing, cache-line-separated membership, and arena-backed name views.
 - Stripe-owned country deduplication: exact, but slower and about 72 MB.
+
+
+## November 1: parallel page release
+
+Each worker now hands the whole pages of every chunk it has parsed back to the
+kernel (`madvise(MADV_DONTNEED)` on the file mapping), so the unmapping of the
+202 MB input is spread over the 12 workers instead of being done by the
+exiting process alone. The board measured 42.15 and 42.35 ms (72.847 points)
+against 44.2-45.0 ms for the same source without it. Longer read-ahead (2 KB and
+4 KB, against 1.5 KB) scored lower, as did aligning the per-country counters and
+zero-allocating the name tables.

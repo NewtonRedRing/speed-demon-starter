@@ -579,3 +579,14 @@ Its final smoke builds passed all five Rust regression checks for both variants.
 Raw local reports are under ignored `.out`; no benchmark code enters the track
 build context. Five final production A checks and all twenty four-track
 correctness checks passed. The 16 ms/18 MB target remains unverified.
+
+
+## November 1: unmapping the input while parsing
+
+After parsing a piece, the worker hands the piece's whole pages back to the
+kernel (`madvise(MADV_DONTNEED)`) and the program ends with `process::exit(0)`
+once the output is written. The board measured 24.1 ms and 19.6 MB (82.674
+points, `1acffd9`) against 28.3 ms before: the unmapping of the 239 MB input,
+which exit used to do on one core, is now spread over the 12 workers. Ending the
+process from the last worker to finish, and a position-independent code model,
+made no measurable difference (24.09-24.16 ms) and were not kept.
