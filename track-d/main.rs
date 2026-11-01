@@ -18,7 +18,7 @@
 use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 use std::ffi::c_void;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::Mutex;
 
 extern "C" {
@@ -317,10 +317,24 @@ fn main() {
     // unclaimed nodes (claimed by compare-exchange), then starts the next one
     // from the last one's unclaimed frontier, so consecutive ids are close on
     // the map.
-    let claimed: Vec<AtomicU8> = (0..n).map(|_| AtomicU8::new(0)).collect();
+    // Packed atomic claims: 64 vertex flags per word instead of one byte each.
+    // CAS keeps the same exactly-one-winner semantics as the byte flags.
+    let claimed: Vec<AtomicU64> = (0..n.div_ceil(64)).map(|_| AtomicU64::new(0)).collect();
+    let unclaimed = |v: u32| {
+        let bit = 1u64 << (v & 63);
+        claimed[(v as usize) >> 6].load(Relaxed) & bit == 0
+    };
     let claim = |v: u32| {
-        let c = &claimed[v as usize];
-        c.load(Relaxed) == 0 && c.compare_exchange(0, 1, Relaxed, Relaxed).is_ok()
+        let bit = 1u64 << (v & 63);
+        let c = &claimed[(v as usize) >> 6];
+        let mut old = c.load(Relaxed);
+        while old & bit == 0 {
+            match c.compare_exchange_weak(old, old | bit, Relaxed, Relaxed) {
+                Ok(_) => return true,
+                Err(actual) => old = actual,
+            }
+        }
+        false
     };
     let (first_v, link_v) = (first, link);
     let (first, link) = (&first_v[..], &link_v[..]);
@@ -365,7 +379,7 @@ fn main() {
                 let u = ord[i] as usize;
                 for e in first[u]..first[u + 1] {
                     let v = link[e as usize] & hmask;
-                    if claimed[v as usize].load(Relaxed) == 0 {
+                    if unclaimed(v) {
                         seeds.push(v);
                     }
                 }
@@ -383,7 +397,7 @@ fn main() {
     on_threads(nt, |t| chains[t].iter().zip(start[t]..).for_each(|(&u, k)| unsafe { *ir.at(u as usize) = k }));
     let mut k = start[nt];
     for u in 0..n {
-        if claimed[u].load(Relaxed) == 0 {
+        if unclaimed(u as u32) {
             (id_v[u], k) = (k, k + 1);
         }
     }
