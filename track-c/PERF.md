@@ -53,6 +53,8 @@ membership prefetch were tested afterward but did not beat this candidate,
 so both were removed.
 
 Six workers were slower and were not retained.
+Eliding hot-path bounds checks also failed to justify its memory variation
+and additional unsafe invariants; the checked version was retained.
 
 ## Rejected local experiments
 

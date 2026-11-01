@@ -10,12 +10,14 @@ git history.
 | e8f4a84 (original C++) | run-04e59f26d537 | 6.275489 s | 404.82 MB | 27.840 | Original submission |
 | dfdc930 | run-2c406b83bfaf | 0.806407 s | 205.30 MB | 50.651659 | 533 formatted source lines |
 | 2ef4945 | run-d270ce788113 | 238.498 ms | 51,601,408 B | 69.244251 | S=647, D=1, K=24.259677 |
-| 6759b53 | run-712fb991a4c8 | 231.992 ms | 51,568,640 B | **69.739111** | **Submitted version**; 610 lines |
+| 6759b53 | run-712fb991a4c8 | 231.992 ms | 51,568,640 B | 69.739111 | Previous best; 610 lines |
+| 0e3b9ac | run-56343bb059d4 | 209.118 ms | 51,953,664 B | **70.780882** | **Submitted version**; S=620, D=1 |
 
 ## Submitted version
 
-The submitted version is commit `6759b53`, scored at 69.739111 points on run
-`run-712fb991a4c8`. It is the best Track B result on the board. The
+The submitted version is commit `0e3b9ac`, scored at 70.780882 points on run
+`run-56343bb059d4`, up 1.041771 points from the previous best. All board gates
+passed. This is our best Track B result, not the contest's track record. The
 requested 106 ms / 41 MB target is still unmet.
 
 Run `run-d270ce788113` at `2ef4945` scored 69.244251 points. It was faster
@@ -36,6 +38,9 @@ The final simplified writer was rechecked with 12 runs per image: 245.374 ms
 versus 230.712 ms (6.0% lower), with essentially unchanged trimmed memory
 (53,217,792 versus 53,248,512 bytes). These are local measurements, not board
 results.
+
+The board confirmed the improvement: 209.118 ms, 51,953,664 bytes, S=620, D=1
+and 70.780882 points, recorded above.
 
 Correctness matches the official full seed-1 hash and the official reference on
 tiny seeds 2, 7, 42 and 2026 and sample seeds 17 and 103.

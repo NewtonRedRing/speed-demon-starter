@@ -20,3 +20,18 @@ The submitted version is commit `6759b53`, scored at 68.316671 points on run
 
 Commit `2ef4945` did not change Track D's source. Its re-run scored 68.113015
 points, below the submitted version.
+
+## November 1: local distance-page experiments
+
+The official monotonic timer, prewarmed Linux-volume input, fresh sandboxed
+containers and 12 interleaved runs per image gave:
+
+| Distance page | Trimmed time | Trimmed memory |
+|---|---|---|
+| 512 nodes (protected baseline) | 188.073 ms | 76,818,944 B |
+| 64 nodes | 186.250 ms | 75,510,272 B |
+| 128 nodes | 189.005 ms | 75,050,496 B |
+
+All matched the official full seed-1 output hash. The gains were too small
+relative to local variability to promote, and neither changes which three
+tracks contribute to our overall score. The original 512-node page remains.
