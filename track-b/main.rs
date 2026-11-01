@@ -640,19 +640,19 @@ fn main() {
         for k in first..first + count {
             let chunk = &chunks[k];
             let mut out = String::new();
-        for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
-            let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
-            let set = if phrase {
-                let at = found.partition_point(|m| m.0 < q as u32);
-                Docs::List(found[at..].iter().take_while(|m| m.0 == q as u32).map(|m| m.1).collect())
-            } else {
-                let cur = docs(tids[0]);
-                ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| match &cur {
-                    Docs::List(v) if v.is_empty() && op != b'O' => cur, // nothing left to narrow
-                    _ => apply(cur, op, docs(id)),
-                })
-            };
-            line(&mut out, &set);
+            for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
+                let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
+                let set = if phrase {
+                    let at = found.partition_point(|m| m.0 < q as u32);
+                    Docs::List(found[at..].iter().take_while(|m| m.0 == q as u32).map(|m| m.1).collect())
+                } else {
+                    let cur = docs(tids[0]);
+                    ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| match &cur {
+                        Docs::List(v) if v.is_empty() && op != b'O' => cur, // nothing left to narrow
+                        _ => apply(cur, op, docs(id)),
+                    })
+                };
+                line(&mut out, &set);
         }
             *chunk.lock().unwrap() = out;
         }
