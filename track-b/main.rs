@@ -20,6 +20,7 @@ use std::sync::Mutex;
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn mallopt(param: i32, value: i32) -> i32;
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
     fn prctl(option: i32, ...) -> i32;
 }
 
@@ -40,6 +41,17 @@ fn map(path: &str) -> &'static [u8] {
         let ok = len == 0 || mmap(p, len, 1, 0x12, file.as_raw_fd(), 0) == p; // MAP_PRIVATE | MAP_FIXED
         assert!(p as isize != -1 && ok, "mmap {path}");
         std::slice::from_raw_parts(p, len)
+    }
+}
+
+/// Gives the pages inside part t (of nt) of b back to the kernel, so that each
+/// thread does its share of the unmapping that exit would otherwise do alone.
+/// Only for memory that is finished with.
+fn release<T>(b: &[T], t: usize, nt: usize) {
+    let (p, n) = (b.as_ptr() as usize, std::mem::size_of_val(b));
+    let (lo, hi) = ((p + n * t / nt + 4095) & !4095, (p + n * (t + 1) / nt) & !4095);
+    if hi > lo {
+        unsafe { madvise(lo as *mut _, hi - lo, 4) }; // MADV_DONTNEED
     }
 }
 
@@ -627,26 +639,33 @@ fn main() {
     };
     let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
-    on_threads(|_| loop {
-        let k = next.fetch_add(1, Relaxed);
-        let Some(chunk) = chunks.get(k) else { return };
-        let mut out = String::new();
-        for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
-            let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
-            let set = if phrase {
-                let at = found.partition_point(|m| m.0 < q as u32);
-                Docs::List(found[at..].iter().take_while(|m| m.0 == q as u32).map(|m| m.1).collect())
-            } else {
-                let cur = docs(tids[0]);
-                ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| match &cur {
-                    Docs::List(v) if v.is_empty() && op != b'O' => cur, // nothing left to narrow
-                    _ => apply(cur, op, docs(id)),
-                })
-            };
-            line(&mut out, &set);
+    let done = std::sync::Barrier::new(THREADS);
+    on_threads(|t| {
+        loop {
+            let k = next.fetch_add(1, Relaxed);
+            let Some(chunk) = chunks.get(k) else { break };
+            let mut out = String::new();
+            for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
+                let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
+                let set = if phrase {
+                    let at = found.partition_point(|m| m.0 < q as u32);
+                    Docs::List(found[at..].iter().take_while(|m| m.0 == q as u32).map(|m| m.1).collect())
+                } else {
+                    let cur = docs(tids[0]);
+                    ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| match &cur {
+                        Docs::List(v) if v.is_empty() && op != b'O' => cur, // nothing left to narrow
+                        _ => apply(cur, op, docs(id)),
+                    })
+                };
+                line(&mut out, &set);
+            }
+            *chunk.lock().unwrap() = out;
         }
-        *chunk.lock().unwrap() = out;
+        done.wait();
+        release(&post, t, THREADS);
+        release(&bits, t, THREADS);
     });
     let out: String = chunks.into_iter().map(|c| c.into_inner().unwrap()).collect();
     std::fs::write("/out/results.txt", out).expect("/out/results.txt");
+    std::process::exit(0);
 }
