@@ -334,6 +334,20 @@ impl<'a> Sightings<'a> {
     }
 }
 
+/// Gives the whole pages inside b back to the kernel, so that each worker does
+/// its share of the unmapping that exit would otherwise do alone. Only for
+/// memory that is finished with.
+fn release(b: &[u8]) {
+    extern "C" {
+        fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+    }
+    let (p, n) = (b.as_ptr() as usize, b.len());
+    let (lo, hi) = ((p + 4095) & !4095, (p + n) & !4095);
+    if hi > lo {
+        unsafe { madvise(lo as *mut u8, hi - lo, 4) }; // MADV_DONTNEED
+    }
+}
+
 /// Hints that `p` will be read soon; never faults, even past a mapping's end.
 #[inline(always)]
 fn prefetch_read<T>(p: *const T) {
@@ -511,14 +525,9 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
                             sightings.finish();
                             return groups;
                         }
-                        parse_records(
-                            data,
-                            bound(k),
-                            bound(k + 1),
-                            regions,
-                            &mut sightings,
-                            &mut groups,
-                        );
+                        let (from, to) = (bound(k), bound(k + 1));
+                        parse_records(data, from, to, regions, &mut sightings, &mut groups);
+                        release(&data[from..to]);
                     }
                 })
             })
