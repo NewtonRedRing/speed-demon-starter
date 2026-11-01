@@ -330,7 +330,7 @@ impl<'a> Sightings<'a> {
             }
             self.bits[i] = (word, 1u64 << (id % 64));
         }
-        for &(word, bit) in &self.bits[next_bits..old_bits] {
+        for &(word, bit) in &self.bits[next_bits.min(old_bits)..old_bits] {
             self.names.bits[word].fetch_or(bit, Relaxed);
         }
         self.bits_len = next_bits;
