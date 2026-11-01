@@ -13,14 +13,17 @@ git history.
 | 6759b53 | run-712fb991a4c8 | 231.992 ms | 51,568,640 B | 69.739111 | Previous best; 610 lines |
 | 0e3b9ac | run-56343bb059d4 | 209.118 ms | 51,953,664 B | 70.780882 | Role-specific scan; S=620, D=1 |
 | 54de273 | run-830e8acc9e88 | 207.777 ms | 50,855,936 B | 70.917314 | Compact dictionary; S=625, D=1 |
-| f0c2833 | run-8fc6c96282b9 | 206.138 ms | 50,802,688 B | **70.992252** | **Submitted version**; S=628, D=1 |
+| f0c2833 | run-8fc6c96282b9 | 206.138 ms | 50,802,688 B | 70.992252 | CRC32C hash; S=628, D=1 |
+| ef8b612 | run-f988a68010bc | 203.795 ms | 50,561,024 B | **71.137073** | **Submitted version**; CRC32C, LAG=8 |
+| b6f1ad7 | run-b6b1c11b6690 | 203.732 ms | 50,704,384 B | 71.128134 | LAG=4; below best |
 
 ## Submitted version
 
-The submitted version is commit `f0c2833`, scored at 70.992252 points on run
-`run-8fc6c96282b9`, up 1.253141 points from the pre-optimization best. All
-board gates passed. This is our best Track B result, not the contest's track
-record. The requested 106 ms / 41 MB target is still unmet.
+The best Track B board result is 71.137073 points on run `run-f988a68010bc`,
+commit `ef8b612`, using the CRC32C hash and eight-token prefetch lag. A later
+four-token-lag submission scored 71.128134, just below that protected best;
+the source is restored to LAG=8. Both runs passed every board gate. The
+requested 106 ms / 41 MB target is still unmet.
 
 Run `run-d270ce788113` at `2ef4945` scored 69.244251 points. It was faster
 and used less memory than the commit before it, but it has 37 more source lines
@@ -112,13 +115,11 @@ means were 231.887 / 223.489 ms (protected / candidate); memory was
 52,045,312 / 52,152,064 bytes. The board confirmed the improvement: 70.992252
 points, up 0.074938 from the compact-hash version, with all gates passed.
 
-## November 1: four-token prefetch lag candidate
+The four-token lag passed the same reference suite and looked faster locally
+over 40 paired runs, but scored slightly below the best on the board. Lag 2
+and 1 also matched the full hash but were slower than lag 4 in a 12-run
+comparison (trimmed 223.030 and 227.463 ms versus 220.925 ms).
 
-Reducing the token lookup lag from eight to four matched the official output
-hash and passed the full seed-1 gate plus reference comparisons on tiny seeds
-2, 7, 42, 2026, sample seeds 17, 103 and full seed 23. Across 40 paired local
-runs it was faster in 28, with median time ratio 0.98542, mean ratio 0.98224,
-and seed-42 10,000-resample paired bootstrap 95% interval [0.96871, 0.99606].
-Trimmed times from the two runs were 224.427 / 218.826 ms and 238.397 /
-236.501 ms (lag 8 / lag 4). Memory was effectively unchanged. It is submitted
-for board validation and retained only if it beats 70.992252 points.
+A 4-million-bit exact Bloom prefilter for query-term membership also matched
+the full hash but was slower in a 16-run comparison (213.307 / 248.996 ms,
+protected / candidate) and used more memory. It was removed.

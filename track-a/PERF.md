@@ -49,5 +49,6 @@ full seed-1 hash.
 | Median-first percentile selection | 24.336 / 24.214 ms | Inconclusive; removed |
 | Six or eight workers | 29.210 / 35.939 / 31.199 ms (12 / 6 / 8) | Slower; 12 retained |
 | Multiply-xorshift endpoint hash | 25.854 / 26.244 ms | Slower than CRC32C; removed |
+| 4 KB instead of 16 KB record chunks | 23.683 / 23.436 then 26.722 / 26.913 ms | Time and memory inconclusive; 16 KB retained |
 
 No Track A code change from these experiments was submitted.
