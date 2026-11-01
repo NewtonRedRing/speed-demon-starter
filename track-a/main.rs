@@ -370,7 +370,6 @@ fn main() {
             }
 
             let mut size = 0;
-            lines[h].get().reserve_exact(ne);
             for &e in order {
                 let e = e as usize;
                 let a = &mut latency[start[e] as usize..start[e + 1] as usize];

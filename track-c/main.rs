@@ -123,7 +123,6 @@ fn parse_regions(data: &[u8]) -> Regions {
 // --- Aggregation --------------------------------------------------------
 
 #[derive(Clone, Default)]
-#[repr(align(64))] // one cache line per country
 struct Agg {
     count: u64,
     id_sum: u64,
@@ -182,12 +181,6 @@ struct Names {
     bits: Vec<AtomicU64>,
 }
 
-/// n zeroed elements (all-zero is a valid T) from the kernel, so pages cost nothing until a worker touches them.
-fn zeroed_vec<T>(n: usize) -> Vec<T> {
-    let layout = std::alloc::Layout::array::<T>(n).unwrap();
-    unsafe { Vec::from_raw_parts(std::alloc::alloc_zeroed(layout).cast(), n, n) }
-}
-
 fn zeroed(n: usize) -> Vec<AtomicU64> {
     let mut v = std::mem::ManuallyDrop::new(vec![0u64; n]);
     unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast(), v.len(), v.capacity()) }
@@ -216,8 +209,11 @@ unsafe fn name_words(p: usize, len: usize) -> (u64, u64) {
 impl Names {
     fn new(groups: usize) -> Self {
         Self {
-            slots: zeroed_vec(NAME_SLOTS),
-            meta: zeroed_vec(NAME_SLOTS),
+            slots: (0..NAME_SLOTS).map(|_| NameSlot {
+                lo: AtomicU64::new(0),
+                hi: UnsafeCell::new(0),
+            }).collect(),
+            meta: (0..NAME_SLOTS).map(|_| MetaCell(UnsafeCell::new(0))).collect(),
             arena: ByteArena(UnsafeCell::new(vec![0u8; NAME_ARENA])),
             used: AtomicU32::new(0),
             bits: zeroed(groups * NAME_WORDS),
