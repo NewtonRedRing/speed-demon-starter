@@ -590,3 +590,5 @@ points, `1acffd9`) against 28.3 ms before: the unmapping of the 239 MB input,
 which exit used to do on one core, is now spread over the 12 workers. Ending the
 process from the last worker to finish, and a position-independent code model,
 made no measurable difference (24.09-24.16 ms) and were not kept.
+
+A static non-PIE binary (-C target-feature=+crt-static -C relocation-model=static) together with a teammate's change that reuses the percentile scatter cursors per worker measured 23.93 ms and 19.99 MB on the board (82.656 points; 82.763 on the run before it), about 0.2-0.3 ms below the previous 24.1 ms, and is kept.

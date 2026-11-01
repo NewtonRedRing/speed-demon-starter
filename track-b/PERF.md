@@ -145,3 +145,5 @@ Other board experiments that did not help: reading ahead in the document text
 threshold of 1/16 (slower locally) and 1/64 (+8 MB), and handing the postings,
 bitmaps and text pages back to the kernel in parallel before a direct exit
 (191-194 ms against 193-197 ms: within the noise, so not kept).
+
+Handing the postings and bitmaps back from the answer workers behind a barrier, then exiting directly, measured 198.6 ms and 49.7 MB (71.350 points) on the board, slower than the unchanged source, and was reverted.
