@@ -280,12 +280,13 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
     let bit = |d: u32| (d as usize / 64, 1u64 << (d % 64));
     match (cur, op, term) {
         (Bits(mut a), _, Bits(b)) => {
-            for (x, &y) in a.to_mut().iter_mut().zip(b.iter()) {
-                *x = match op {
-                    b'A' => *x & y,
-                    b'O' => *x | y,
-                    _ => *x & !y,
-                };
+            let x = a.to_mut();
+            // Hoist the operation out of the data loop, exposing contiguous
+            // AND/OR/ANDNOT loops for LLVM's AVX2 vectorizer.
+            match op {
+                b'A' => for (x, &y) in x.iter_mut().zip(b.iter()) { *x &= y; },
+                b'O' => for (x, &y) in x.iter_mut().zip(b.iter()) { *x |= y; },
+                _ => for (x, &y) in x.iter_mut().zip(b.iter()) { *x &= !y; },
             }
             Bits(a)
         }
