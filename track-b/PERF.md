@@ -91,6 +91,10 @@ full hash but gave only 205.882 / 204.231 ms in 16 paired runs, without a
 meaningful memory reduction. That marginal result did not justify its extra
 source and was removed.
 
+Doubling scan-output buckets from 32 to 64 also matched the full hash but was
+slower in 16 paired runs (216.288 / 225.605 ms trimmed time) and used about
+0.57 MB more memory. The 32-bucket layout remains.
+
 ## November 1: CRC32C hash
 
 The dictionary hash now uses hardware CRC32C over all four 64-bit lanes of the
@@ -107,3 +111,14 @@ bootstrap 95% interval for the mean ratio was [0.95109, 0.98748]. Trimmed
 means were 231.887 / 223.489 ms (protected / candidate); memory was
 52,045,312 / 52,152,064 bytes. The board confirmed the improvement: 70.992252
 points, up 0.074938 from the compact-hash version, with all gates passed.
+
+## November 1: four-token prefetch lag candidate
+
+Reducing the token lookup lag from eight to four matched the official output
+hash and passed the full seed-1 gate plus reference comparisons on tiny seeds
+2, 7, 42, 2026, sample seeds 17, 103 and full seed 23. Across 40 paired local
+runs it was faster in 28, with median time ratio 0.98542, mean ratio 0.98224,
+and seed-42 10,000-resample paired bootstrap 95% interval [0.96871, 0.99606].
+Trimmed times from the two runs were 224.427 / 218.826 ms and 238.397 /
+236.501 ms (lag 8 / lag 4). Memory was effectively unchanged. It is submitted
+for board validation and retained only if it beats 70.992252 points.

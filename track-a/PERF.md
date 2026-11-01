@@ -48,5 +48,6 @@ full seed-1 hash.
 | Full-scale generator-trained PGO | 25.313 / 24.723 ms | Too small to justify source/build cost and noise |
 | Median-first percentile selection | 24.336 / 24.214 ms | Inconclusive; removed |
 | Six or eight workers | 29.210 / 35.939 / 31.199 ms (12 / 6 / 8) | Slower; 12 retained |
+| Multiply-xorshift endpoint hash | 25.854 / 26.244 ms | Slower than CRC32C; removed |
 
 No Track A code change from these experiments was submitted.
