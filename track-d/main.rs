@@ -124,11 +124,12 @@ struct RadixHeap {
     b: Vec<Vec<(u64, u32)>>,
     len: usize,
     last: u64,
+    occupied: u128, // 65 radix buckets, including the top bucket
 }
 
 impl RadixHeap {
     fn new() -> Self {
-        RadixHeap { b: (0..65).map(|_| Vec::new()).collect(), len: 0, last: 0 }
+        RadixHeap { b: (0..65).map(|_| Vec::new()).collect(), len: 0, last: 0, occupied: 0 }
     }
     fn slot(&self, k: u64) -> usize {
         (64 - (k ^ self.last).leading_zeros()) as usize
@@ -136,17 +137,20 @@ impl RadixHeap {
     fn push(&mut self, k: u64, u: u32) {
         let s = self.slot(k);
         unsafe { self.b.get_unchecked_mut(s) }.push((k, u));
+        self.occupied |= 1u128 << s;
         self.len += 1;
     }
     /// The smallest key (the heap must not be empty).
     fn top(&mut self) -> u64 {
         if self.b[0].is_empty() {
-            let i = (1..65).find(|&i| !self.b[i].is_empty()).unwrap();
+            let i = (self.occupied & !1u128).trailing_zeros() as usize;
             let mut v = std::mem::take(&mut self.b[i]);
+            self.occupied &= !(1u128 << i);
             self.last = v.iter().map(|e| e.0).min().unwrap();
             for &(k, u) in &v {
                 let s = self.slot(k);
                 self.b[s].push((k, u));
+                self.occupied |= 1u128 << s;
             }
             v.clear();
             self.b[i] = v;
@@ -156,11 +160,13 @@ impl RadixHeap {
     fn pop(&mut self) -> (u64, u32) {
         self.top();
         self.len -= 1;
-        self.b[0].pop().unwrap()
+        let item = self.b[0].pop().unwrap();
+        if self.b[0].is_empty() { self.occupied &= !1u128; }
+        item
     }
     fn clear(&mut self) {
         self.b.iter_mut().for_each(Vec::clear);
-        (self.len, self.last) = (0, 0);
+        (self.len, self.last, self.occupied) = (0, 0, 0);
     }
 }
 
