@@ -78,3 +78,14 @@ and 53,586,432 / 68,510,208 bytes, with matching official output hashes.
 An exact, immutable direct cache for tokens of at most three bytes was also
 rejected: 16 paired runs gave 214.720 / 225.789 ms versus the compact
 dictionary alone. Both matched the official full seed-1 hash.
+
+Independent start/end token masks also did not improve trimmed time
+(192.705 / 192.781 ms). A lower-instruction SIMD range classifier passed an
+exhaustive 256-byte predicate check and the full output hash, but 40 paired
+runs gave a bootstrap mean-time ratio interval of [0.96695, 1.00207].
+Neither was retained.
+
+Rebuilding the dictionary without phrase-verification-only terms matched the
+full hash but gave only 205.882 / 204.231 ms in 16 paired runs, without a
+meaningful memory reduction. That marginal result did not justify its extra
+source and was removed.

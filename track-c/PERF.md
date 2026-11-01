@@ -56,6 +56,11 @@ Six workers were slower and were not retained.
 Eliding hot-path bounds checks also failed to justify its memory variation
 and additional unsafe invariants; the checked version was retained.
 
+A bounded producer/consumer mailbox prototype routed name IDs to country owners
+so only one worker updated each bitmap row. It matched the official full seed-1
+hash but was slower in 12 paired local runs: 32.043 / 45.700 ms
+(protected / prototype). The extra routing and synchronization were not retained.
+
 ## Rejected local experiments
 
 Each of these matched the official output hash but was removed because it did
