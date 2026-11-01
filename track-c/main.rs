@@ -152,7 +152,7 @@ impl Agg {
 /// exactly in the slot. Longer names store an exact first eight bytes plus a
 /// marked full-name hash as a candidate filter, then compare every remaining
 /// byte from the side arena before equality is accepted.
-const NAME_SLOTS: usize = 1 << 17;
+const NAME_SLOTS: usize = 1 << 18;
 const NAME_WORDS: usize = NAME_SLOTS / 64;
 const NAME_ARENA: usize = 1 << 20;
 const OCCUPIED: u64 = 1 << 63;

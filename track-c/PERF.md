@@ -14,6 +14,7 @@ Every step from the reference to your final version, each with the live-board ru
 | Previous implementation | 3.299495 | 375.38 | 3 | Full public seed-1 hash |
 | Quote-safe parallel parsing and exact shared name membership | 0.184681 | 15.32 | 5 | Full public seed-1 hash on every run |
 | Read-mostly membership fast path; final candidate | 0.118340 | 14.94 | 5 | Full public seed-1 hash on every run |
+| Name table 2^18 slots (load 0.38 instead of 0.77); in-container median 26.9 ms vs 29.2 ms | n/a (in-container) | 215.8 vs 208.9 (VmHWM incl. mapped input) | 7 | Full public seed-1 hash on every run; `check.py c --runs 3` PASS |
 
 Command: `python scripts\benchmark.py c --runs 5` from the repository root.
 Tiny input, a repeated independent hostile CSV oracle, strict GCC warnings and a
