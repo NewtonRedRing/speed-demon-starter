@@ -49,3 +49,26 @@ Rejected local alternatives: a 512-entry exact token cache, a second dictionary
 prefetch stage, a prefix-only candidate hash, a 32-token prefetch lag, smaller
 posting buffers, and generator-trained PGO. None justified its time, memory or
 formatted-source cost. They are not in the submission.
+
+## November 1: compact dictionary candidate
+
+Each dictionary slot now packs a 14-bit hash tag and 18-bit term ID plus one
+into 32 bits instead of 64. Collisions still require full exact token equality.
+The existing 131,072-term limit fits with room for the empty-slot sentinel.
+Canonical formatted source is S=625, five lines above the protected version.
+
+Two globally shuffled local comparisons disagreed on time: 199.789 / 186.842 ms
+and 196.805 / 201.421 ms (protected / candidate). To control temporal drift, a
+third comparison grouped runs into 24 pairs with independently randomized order
+inside each pair. The candidate's median paired time ratio was 0.96680 and
+mean ratio 0.97168; a seed-42, 10,000-resample paired bootstrap gave a 95%
+mean-ratio interval of [0.95183, 0.99116]. It was faster in 16 of 24 pairs.
+Trimmed means were 268.690 / 258.771 ms and 53,147,136 / 52,154,368 bytes.
+Absolute local times vary substantially with host conditions.
+
+The official sandbox/full seed-1 hash and reference comparisons on tiny seeds
+2, 7, 42, 2026, sample seeds 17, 103 and full seed 23 all passed.
+This remains a candidate until it beats the protected 70.780882 board points.
+
+A separate cache-line-fused dictionary was rejected: 180.546 / 187.846 ms
+and 53,586,432 / 68,510,208 bytes, with matching official output hashes.

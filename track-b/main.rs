@@ -28,6 +28,7 @@ const NONE: u32 = u32::MAX;
 const BUCKETS: usize = 32; // scan output streams per thread; term i goes to bucket i % BUCKETS
 const GAP: u32 = 15; // a unit's 4-bit doc gap; GAP means the whole gap follows in the next unit
 const DOC_BITS: u32 = 15; // a thread's share holds under 2^15 documents
+const ID_MASK: u32 = (1 << 18) - 1;
 
 /// The file, mapped over a spare zero page so loads of 32 bytes past any of
 /// its bytes stay inside the mapping.
@@ -94,11 +95,11 @@ fn same(a: __m256i, b: __m256i) -> bool {
     unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, b)) == -1 }
 }
 
-/// Query terms to dense ids: open addressing, each slot the top 32 hash bits
-/// above id + 1 (0 if free), so a mismatch rarely loads a key. A token that
-/// is no term gets the id one past the last term, so callers need no branch.
+/// Query terms to dense ids: each 32-bit slot packs a 14-bit hash tag above
+/// an 18-bit id + 1 (0 if free). Matching tags still require exact equality.
+/// A token that is no term gets the id one past the last term.
 struct Terms {
-    slot: Vec<u64>,
+    slot: Vec<u32>,
     keys: Vec<__m256i>,
 }
 
@@ -109,7 +110,7 @@ impl Terms {
         loop {
             match self.slot[i] {
                 0 => return self.keys.len() as u32,
-                s if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) => return s as u32 - 1,
+                s if (s ^ (h >> 32) as u32) & !ID_MASK == 0 && same(self.keys[(s & ID_MASK) as usize - 1], k) => return (s & ID_MASK) - 1,
                 _ => i = (i + 1) & mask,
             }
         }
@@ -123,7 +124,7 @@ impl Terms {
         }
         self.keys = keys;
         for s in self.slot.iter_mut().filter(|s| **s != 0) {
-            *s = *s >> 32 << 32 | (new[*s as u32 as usize - 1] + 1) as u64;
+            *s = *s & !ID_MASK | new[(*s & ID_MASK) as usize - 1] + 1;
         }
     }
 
@@ -133,13 +134,13 @@ impl Terms {
         let mut i = h & mask;
         while self.slot[i] != 0 {
             let s = self.slot[i];
-            if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) {
-                return s as u32 - 1;
+            if (s ^ (h >> 32) as u32) & !ID_MASK == 0 && same(self.keys[(s & ID_MASK) as usize - 1], k) {
+                return (s & ID_MASK) - 1;
             }
             i = (i + 1) & mask;
         }
         self.keys.push(k);
-        self.slot[i] = (h as u64 >> 32) << 32 | self.keys.len() as u64;
+        self.slot[i] = (h >> 32) as u32 & !ID_MASK | self.keys.len() as u32;
         self.keys.len() as u32 - 1
     }
 }
