@@ -213,3 +213,13 @@ scored it successfully: `run-c08453a4bb25`, T=48.717 ms,
 M=11,825,152 B, S=677, D=1, K=25.995882, 70.745228 points.
 All official gates passed. This is below the existing best
 `run-7a3979243031` (70.905419 points). The 20 ms/11 MB target remains unmet.
+
+## Official board result — commit `c1e304d` (name table 2^18)
+
+Run `run-840bad07699d`: T=48.498 ms, **M=28,590,080 B** (up from
+11,599,872 B at `3529757`), S=677, D=1, K=21.837413, **66.960059 points**.
+All gates passed, but this is worse than the previous commit. The board keeps
+the best run (`run-6d316a3b4177`, 70.969633), so the leaderboard standing is
+unchanged. The 2^18 change gave no board speedup, and the memory cost is far
+larger than the local VmHWM estimate suggested. Revert candidate: the 2^17
+table at `3529757`.
