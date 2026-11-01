@@ -92,6 +92,15 @@ unsafe fn key(p: *const u8, len: usize) -> __m256i {
 fn hash(k: __m256i) -> usize {
     let w: [u64; 4] = unsafe { std::mem::transmute(k) };
     unsafe {
+        // All token bytes are ASCII alphanumeric and therefore nonzero.
+        // Zero upper lanes identify short token keys exactly. This hash is
+        // used for both dictionary construction and every document lookup.
+        if w[1] == 0 {
+            return _mm_crc32_u64(0, w[0]) as usize;
+        }
+        if w[2] == 0 {
+            return _mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[1]) as usize;
+        }
         let a = _mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[2]);
         let b = _mm_crc32_u64(_mm_crc32_u64(0, w[1]), w[3]);
         (a ^ b.rotate_left(17)) as usize
