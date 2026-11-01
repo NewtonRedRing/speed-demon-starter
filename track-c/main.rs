@@ -412,9 +412,7 @@ fn text_field(data: &[u8], at: usize) -> (usize, usize, usize, usize) {
 /// The run of ASCII digits at `data[at..]` as (value, length).
 #[inline]
 fn digits(data: &[u8], at: usize) -> (u64, usize) {
-    // Both callers guarantee an 8-byte window: the regions parser checks
-    // at + 8 <= len, and record chunks retain at least 64 bytes of lookahead.
-    // Avoid a hot slice-bound check and temporary [u8; 8] conversion.
+    // Region bounds check or padded records guarantee 8 readable bytes.
     let w = u64::from_le(unsafe { data.as_ptr().add(at).cast::<u64>().read_unaligned() });
     // Digit bytes have high nibble 3, so a nonzero byte here is a non-digit. The first one ends the run.
     let not_digit = (w & 0xF0F0_F0F0_F0F0_F0F0) ^ 0x3030_3030_3030_3030;
