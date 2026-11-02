@@ -1,12 +1,27 @@
-# Speed Demon 2026: best board result per track
+# Speed Demon 2026 — verified best-source consolidation
 
-Team `NewtonRedHeat`. Best runs on the public board (full public dataset, seed 1), as of November 2, 09:27 UTC:
+Team: `NewtonRedHeat`. Evidence: [official public-seed-1 board feed](https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/board/board.json), generated **2026-11-02 10:37:46 UTC**. These are the latest *retrievable* historical best per-track runs at that feed timestamp; individual runs are not a benchmark of the merged branch head.
 
-| Track | Commit | Points | Time | Peak memory |
-|---|---|---:|---:|---:|
-| A | `df4943d` | 82.763241 | 23.96 ms | 19.4 MB |
-| B | `f8ae231` | 71.694746 | 191.08 ms | 50.9 MB |
-| C | `63ec07b` | 73.956052 | 37.853 ms | 10.22 MB |
-| D | `6759b53` | 68.316671 | 174.01 ms | 76.2 MB |
+| Track | Official board best commit | Points | Runtime | Peak memory | Output gates |
+|---|---|---:|---:|---:|---|
+| A — Ingest | `eea0f63220e5c1a782c5627941d55f154833f8b9` | 83.585525 | 23.187 ms | 15,110,144 bytes | passed |
+| B — Index | `126b40894cb67d44283296176cfaf17f300b2220` | 72.043345 | 185.745 ms | 46,850,048 bytes | passed |
+| C — Join | `63ec07b1d10a6cd7fd9a169f9b9a80d684a03dd8` | 73.956052 | 37.853 ms | 10,215,424 bytes | passed |
+| D — Traverse | `a4807ddacffcaf958e8cce89428777ffdc5f6445` | 67.766726 | 145.480 ms | 77,139,968 bytes | passed |
 
-Every run is in the track's PERF.md. The branch tip holds the sources that produced these results (A: parallel input release, static binary; C: fused 64-byte AVX2 structural scanner, parallel input release; B and D unchanged from their best runs). Board times vary by a few percent between runs of identical source, so the final scoring run of the tip may differ slightly from these bests.
+Historical note: an earlier board snapshot recorded **D 68.316671 points** from `6759b53eda0ced88ef30a8d0f9b77654a0c8686b` at 174.011 ms. That old best is not shown as the D best in the feed above; do not conflate the two snapshots or claim a new improvement.
+
+## Verified source selection on speed-demon
+
+The latest audited `speed-demon` branch head `c9f733bb7849269b600358483cc1c06936318bb6` contains identical scored implementation files for A/B/C compared with their best public runs:
+
+| Track | Current `main.rs` and `Dockerfile` | Source comparison |
+|---|---|---|
+| A | Matches official best `eea0f63` | track subtree identical |
+| B | Matches official best `126b408` | track subtree identical |
+| C | Matches official best `63ec07b` | identical `main.rs`, `Dockerfile`, and `Cargo.toml`; only experimental notes changed |
+| D | Matches older verified source `6759b53` | identical `main.rs` and `Dockerfile`; recent D board best commit is not retrievable as a GitHub object to compare directly |
+
+The unmerged draft PRs contain unscored or rejected experiments; **none has verified superior official score** as of this audit. Do not merge them as score improvements without independent correctness and board evidence.
+
+This documentation-only consolidation deliberately changes **no track source, build flags, runtime dependencies, or contest inputs**. The official holdout seed will ultimately determine the final scores.
