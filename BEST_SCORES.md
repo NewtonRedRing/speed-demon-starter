@@ -13,8 +13,8 @@ results.
 |---|---|---:|---:|---:|---|
 | A — Ingest | `0df911467a16a9e3f13f1192dd87ee786f69f2e2` | **84.106702** | **21.706 ms** | 15,515,648 bytes | passed |
 | B — Index | `c9f733bb7849269b600358483cc1c06936318bb6` | **72.172141** | **183.883 ms** | 46,641,152 bytes | passed |
-| C — Join | `c0053b4a77ec28817b83af2e6ee7492b10ae8c22` | **73.965629** | **37.104 ms** | 10,715,136 bytes | passed |
-| D — Traverse | `6759b53eda0ced88ef30a8d0f9b77654a0c8686b` | **68.316671** | **174.011 ms** | 76,247,040 bytes | passed |
+| C — Join | `4b4f4259eb78d55be5f835337488a05c7add6ac6` | **74.320728** | **36.405 ms** | 10,354,688 bytes | passed |
+| D — Traverse | `ae44f84fab34eada896a4276996f792949b31e83` | **68.363711** | **168.724 ms** | 76,013,568 bytes | passed |
 
 ## Verified source selection on speed-demon
 
@@ -82,3 +82,23 @@ The other Track B compressed-membership and Track C quote-free fastpath
 experiments were not promoted: their local wins were not supported by a
 credible overall score improvement. The Track D BFS locality-blob sweep
 was effectively neutral over tested widths and was also not promoted.
+
+
+## November 2, 11:38 UTC: later official-score cross-check
+
+[Public board audit run 41438445116](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41438445116)
+established higher **historical single-run** values than earlier 11:20 snapshots:
+Track C **74.320728** on `4b4f425` (36.405 ms), and Track D **68.363711**
+on `ae44f84` (168.724 ms). The Track C source blob matches the current
+`speed-demon` code, so no additional C merge is required.
+
+**Track D caveat:** That higher D run is the *integer-wheel* source (532 formatted
+lines), whereas the currently retained Track D source is the older 485-line
+radix heap. Another official wheel run (`9bb3f6a`) scored **67.732133** and
+a scored radix run (`6759b53`) scored **68.316671**. The high watermark alone
+does not establish a repeatable improvement, particularly because end-to-end
+GitHub-hosted results favored the wheel while some official runs did not.
+The coordinator therefore preserves the radix version pending stronger
+official scoring evidence. The table above records historical best individual
+runs, **not** necessarily the source in the submission branch or a single
+four-track run.
