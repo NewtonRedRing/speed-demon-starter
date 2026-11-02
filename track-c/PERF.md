@@ -13,19 +13,23 @@ git history.
 | c1e304d | run-840bad07699d | 48.498 ms | 28,590,080 B | 66.960059 | 2^18-slot name table; rejected |
 | 39502cdb | run-0b1d0e65fdba | not recorded | 17,747,968 B | 68.996326 | Zero-copy EOF mapping; reverted |
 | 3529757 | run-6d316a3b4177 | not recorded | 11,599,872 B | 70.969633 | Previous best |
-| 719f5e2 | run-3c912b013ad6 | 44.564 ms | 11,374,592 B | **72.430291** | **Submitted best**; S=572, D=1 |
+| 719f5e2 | run-3c912b013ad6 | 44.564 ms | 11,374,592 B | 72.430291 | Earlier best; S=572, D=1 |
+| 126b408 | run-df1b1d44c1d4 | 38.107 ms | 11,075,584 B | 73.442105 | Previous submitted best; S=732, D=1 |
+| 63ec07b | run-70f424aa22a8 | **37.853 ms** | **10,215,424 B** | **73.956052** | **Current best**; S=712, D=1 |
 
 Other scored runs: `run-7a3979243031` scored 70.905419, and
 `run-0917a954f355` scored 70.830007 with M=11,579,392 B. Their commits are not
 recorded in this log.
 
-## Submitted version
+## Current submitted version
 
-The submitted version is commit `719f5e2`, scored at 72.430291 points, up
-1.460658 points from `3529757`. All board gates passed. Its
-`main.rs` reads fixed input/output paths without environment overrides. The
-offline build, sandbox and official full seed-1 output hash pass locally and
-on the board.
+Commit `63ec07b` contains the FALCON-C fused structural scanner. The official
+public seed-1 board run `run-70f424aa22a8` scored **73.956052 points** with
+37.853 ms, 10,215,424 B peak memory, 712 measured source lines and no runtime
+dependencies (D=1). Build, output hash, timeout and sandbox gates all passed.
+Against the previous scored commit `126b408` (73.442105), this gains
+**0.513947 points**. The source reads only the specified /data paths and writes
+only the specified /out file.
 
 ## Rejected board experiments
 
@@ -98,3 +102,38 @@ name, BOMs, missing regions, 1-40 region files).
 - Rejected: strided chunk claim order (spreads first page faults over page-table pages), neutral;
   64 chunks per thread, 5 ms slower; 16 per thread, same; `MADV_POPULATE_READ` before each chunk, 6 ms
   slower on a read-only floor test.
+
+## November 2: FALCON-C continuous structural scanner
+
+Experiments were developed on `experiment/track-c-falcon-tile-20261102`
+and compared against unchanged `126b408`. Instead of independent 128-byte
+record windows, the scanner processes successive 64-byte AVX2 tiles, carrying
+quote parity and total quote counts across tiles. It identifies only commas and
+newlines outside quotes, decodes the required numeric fields directly, and
+uses the existing exact-name dictionary, per-country bitsets, region lookup,
+thread-local numeric aggregation, and parallel page release unchanged.
+
+Every input byte is classified at most once by the structural SIMD scanner for
+the assigned range. The quote count is requested at only the name and note
+boundary; three unnecessary quote prefix-count operations per record were
+removed in the second iteration. Names and notes are never materialized.
+Source lines decreased from 732 to 712 by replacing the window parser and its
+fallback with a compact streaming parser.
+
+GitHub Actions comparison and exactness checks:
+- First fused candidate `589cf01`: full seed-1 SHA256 matched;
+  interleaved non-PGO CI medians 215.126 ms baseline / 216.053 ms candidate
+  (neutral; run 41419843807).
+- Remove redundant quote counts `35cc42b`: full seed-1 SHA256 matched;
+  216.924 / 216.960 ms (neutral; run 41420151351).
+- Repeat with seed diversity (run 41420420506): 216.313 / 215.902 ms
+  (candidate about 0.2% faster on this different, noisy GitHub CPU).
+  The official full seed-1 hash matched. Generated official tiny seeds
+  2, 7, 42 and 2026 all matched the official Python reference byte-for-byte.
+  These CI timings are not scoring-box timings.
+
+Official board experiment `63ec07b`, run `run-70f424aa22a8`, scored
+73.956052 (37.853 ms, 10,215,424 B, S=712, D=1), improving on the
+previous best `run-df1b1d44c1d4` at 73.442105 (38.107 ms, 11,075,584 B,
+S=732, D=1). This is a verified public-dataset improvement, not a claim about
+the unobserved holdout set.
