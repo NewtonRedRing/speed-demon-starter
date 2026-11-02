@@ -1,0 +1,29 @@
+name: Read current Speed Demon official board state
+on:
+  push:
+    branches: [oracle/board-audit-wheel-20261102]
+  workflow_dispatch:
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Read public board JSON and print team state
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/board/board.json -o /tmp/board.json
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/board.json'))
+          t=next((v for v in d.get('teams',[]) if v.get('team')=='NewtonRedHeat'),None)
+          assert t, "NewtonRedHeat not present in public board JSON"
+          print('BOARD_GENERATED',d.get('generated_at'),flush=True)
+          print('SUBMISSION_WATCH_HEAD',t.get('watch',{}).get('head'),flush=True)
+          for letter in 'abcd':
+              v=t.get('tracks',{}).get(letter) or {}
+              print('TRACK',letter,flush=True)
+              for name in ('best','latest'):
+                  x=v.get(name) or {}
+                  print(' ',name,'commit=',x.get('commit'),'stage=',x.get('stage'),'points=',x.get('points'),'runtime_s=',x.get('T_s'),'rss=',x.get('M_bytes'),'run_id=',x.get('run_id'),'ok=',x.get('ok'),flush=True)
+          PY
