@@ -48,6 +48,25 @@ jobs:
           for c in cmds: print('MEDIAN_MS',c,statistics.median(r[c]),r[c],flush=True)
           print('SPEEDUP',statistics.median(r[cmds[0]])/statistics.median(r[cmds[1]]),flush=True)
           PY
+      - name: Differential independent tiny seeds
+        run: |
+          python3 - <<'PY'
+          import subprocess,hashlib,os
+          for seed in [2,7,17,42,2026]:
+              d=f'/tmp/tiny_c_{seed}'
+              subprocess.run(['python3','track-c/pgo_gen.py','--seed',str(seed),'--scale','tiny','--out',d],check=True)
+              os.unlink('/data/records.csv');os.unlink('/data/regions.csv')
+              os.symlink(f'{d}/records.csv','/data/records.csv')
+              os.symlink(f'{d}/regions.csv','/data/regions.csv')
+              subprocess.run(['/tmp/c_base'],check=True)
+              with open('/out/aggregates.txt','rb') as f: base=f.read()
+              subprocess.run(['/tmp/c_cand'],check=True)
+              with open('/out/aggregates.txt','rb') as f: candidate=f.read()
+              assert base==candidate,('TINY_SEED_DIFFERENCE',seed)
+              print('TINY_REFERENCE_MATCH',seed,hashlib.sha256(base).hexdigest(),flush=True)
+          PY
+          sudo ln -sfn /tmp/c_data/records.csv /data/records.csv
+          sudo ln -sfn /tmp/c_data/regions.csv /data/regions.csv
       - name: Peak RSS (nonofficial)
         run: |
           /usr/bin/time -f 'BASE_MAX_RSS_KB %M' /tmp/c_base
