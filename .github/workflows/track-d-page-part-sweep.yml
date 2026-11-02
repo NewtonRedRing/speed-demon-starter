@@ -1,0 +1,95 @@
+name: Track D exact sparse page and partition sweep
+on:
+  push:
+    branches: [experiment/track-d-page-part-sweep-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+jobs:
+  sweep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile nine Rust variants from identical scored source
+        run: |
+          set -euo pipefail
+          git show origin/speed-demon:track-d/main.rs > /tmp/d_base.rs
+          python3 - <<'PY'
+          import pathlib,re,subprocess
+          src=pathlib.Path('/tmp/d_base.rs').read_text()
+          assert 'const PAGE: usize = 512;' in src
+          assert 'const PART_BITS: u32 = 16;' in src
+          variants=[('base',512,16),('p128',128,16),('p256',256,16),('p1024',1024,16),('p2048',2048,16),('p4096',4096,16),('part14',512,14),('part15',512,15),('part17',512,17)]
+          pathlib.Path('/tmp/d_variants.txt').write_text('\n'.join(x[0] for x in variants)+'\n')
+          for name,page,part in variants:
+              out=src.replace('const PAGE: usize = 512;',f'const PAGE: usize = {page};').replace('const PART_BITS: u32 = 16;',f'const PART_BITS: u32 = {part};')
+              f=pathlib.Path(f'/tmp/d_{name}.rs');f.write_text(out)
+              subprocess.run(['rustc','--edition=2021','-C','opt-level=3','-C','target-cpu=haswell','-C','codegen-units=1','-C','panic=abort','-o',f'/tmp/d_{name}',str(f)],check=True)
+              print('BUILT',name,page,part,flush=True)
+          PY
+      - name: Obtain official deterministic generator
+        run: |
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/hackathon-raptors/speed-demon-2026/main/generators/d_traverse.py -o /tmp/d_gen.py
+          sudo install -d -m 777 /out
+      - name: Exact sample and full public output verification
+        run: |
+          set -euo pipefail
+          for seed in 17 103; do
+            python3 /tmp/d_gen.py --seed "$seed" --scale sample --out "/tmp/d-sample-$seed"
+            sudo ln -sfn "/tmp/d-sample-$seed" /data
+            /tmp/d_base
+            cp /out/distances.txt /tmp/d_expected
+            while read -r v; do
+              /tmp/d_"$v"
+              cmp /tmp/d_expected /out/distances.txt
+            done </tmp/d_variants.txt
+            echo "PASS sample seed=$seed all variants"
+          done
+          python3 /tmp/d_gen.py --seed 1 --scale full --out /tmp/d-full
+          sudo ln -sfn /tmp/d-full /data
+          /tmp/d_base
+          cp /out/distances.txt /tmp/d_expected
+          echo "FULL_SHA256 $(sha256sum /out/distances.txt)"
+          python3 - <<'PY'
+          import hashlib
+          expected='a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e'
+          got=hashlib.sha256(open('/out/distances.txt','rb').read()).hexdigest()
+          assert got==expected,(got,expected)
+          print('PASS official full seed-1 baseline checksum',flush=True)
+          PY
+          while read -r v; do
+            /tmp/d_"$v"
+            cmp /tmp/d_expected /out/distances.txt
+            echo "PASS full exact $v"
+          done </tmp/d_variants.txt
+      - name: Twelve randomized interleaved full-run rounds
+        run: |
+          python3 - <<'PY'
+          import random,subprocess,statistics,time
+          names=open('/tmp/d_variants.txt').read().split()
+          samples={x:[] for x in names}
+          for i in range(12):
+              seq=names.copy()
+              random.Random(20261102+i).shuffle(seq)
+              for name in seq:
+                  start=time.perf_counter()
+                  subprocess.run(['/tmp/d_'+name],check=True,stdout=subprocess.DEVNULL)
+                  samples[name].append(1000*(time.perf_counter()-start))
+          base=statistics.median(samples['base'])
+          print('BASELINE_MS',base,flush=True)
+          for name in sorted(names, key=lambda x:statistics.median(samples[x])):
+              v=samples[name]
+              med=statistics.median(v)
+              print(f'VARIANT {name} median_ms={med:.3f} ratio={med/base:.5f} mean_ms={statistics.mean(v):.3f} samples='+str([round(t,2) for t in v]),flush=True)
+          PY
+      - name: Single-process peak RSS by candidate
+        run: |
+          while read -r v; do
+            /usr/bin/time -f "RSS_KB $v %M" /tmp/d_"$v"
+          done </tmp/d_variants.txt
