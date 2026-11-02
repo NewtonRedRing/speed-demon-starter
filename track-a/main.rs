@@ -226,24 +226,12 @@ impl Parser {
     // Parses the piece and returns the lowest and highest hour in it.
     unsafe fn parse(&mut self, ids: &Interner, mut p: *const u8, end: *const u8) -> (usize, usize) {
         let (mut lo, mut hi) = (HOURS, 0);
-        // Exact date/hour fingerprint: YYYY-MM-DDTHH occupies bytes 5..12.
-        // This is only a cache; changes always recompute the original hour.
-        let mut prev_prefix = 0u64;
-        let mut prev_hour = 0usize;
         while p < end {
             _mm_prefetch::<_MM_HINT_T0>(p.add(2048).cast()); // the log is read once, in order
             // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
-            let fingerprint = p.add(5).cast::<u64>().read_unaligned();
-            let h = if fingerprint == prev_prefix {
-                prev_hour
-            } else {
-                let d = |i: usize| (*p.add(i) - b'0') as usize;
-                let day = d(8) * 10 + d(9) + if d(6) == 0 { 0 } else { 31 };
-                let h = (day - 30) * 24 + d(11) * 10 + d(12) - 18;
-                prev_prefix = fingerprint;
-                prev_hour = h;
-                h
-            };
+            let d = |i: usize| (*p.add(i) - b'0') as usize;
+            let day = d(8) * 10 + d(9) + if d(6) == 0 { 0 } else { 31 };
+            let h = (day - 30) * 24 + d(11) * 10 + d(12) - 18;
             (lo, hi) = (lo.min(h), hi.max(h));
 
             // Spaces and newlines in the 64 bytes after the timestamp. Only an
