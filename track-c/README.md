@@ -44,3 +44,7 @@ An earlier exact-source run scored 73.956052 / 37.853 ms / 10,215,424 bytes
 The later exact batch=8/chunks=64 trial passed correctness but scored only
 74.154112, so Oracle restored the above exact source in commit `ea2532f`.
 Full per-seed evidence and reasons for rejection are in `PERF.md`.
+
+## 2026-11-02 owner-mailbox research candidate (not promoted yet)
+
+Candidate port of MIT-licensed [danse-macabre Track C](https://github.com/keirsalterego/danse-macabre/tree/speed-demon/track-c), Copyright (c) 2026 Hackathon Raptors CIC and source contributors. Hash-owner sharding and 16-byte mailbox records remove most shared-table atomics, while AVX2 finds quotes and separators. Upstream reports 19.3 ms / 11.3 MB / 83.1 points, not yet our board results. **Correctness caveat:** upstream deduplicates names by a 72-bit hash identity instead of byte equality, which has a nonzero collision risk; a robust exact-equality fallback is required before treating the implementation as universally exact. The protected FALCON-C source stays at 258aaadaefd6ba5a5c2e34ac0b7128fa10ef9a6e.
