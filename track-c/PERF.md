@@ -247,3 +247,57 @@ submission was made for this change.
 All November 2 follow-on performance experiments remain off the
 speed-demon contest source. The best official board run remains
 run-70f424aa22a8: 73.956052 points, 37.853 ms, 10,215,424 B.
+
+## November 2: exact-name table placement and membership-ID sweeps
+
+Three independent experiment branches compared seven new Rust variants to
+the existing FALCON-C. The submitted Track C file remained untouched.
+Every variant passed the SHA256 of the official full seed-1 output, plus
+byte-for-byte comparison with the official Python reference on tiny seeds
+2, 7, 42, and 2026. Timings below are non-PGO GitHub Actions runner
+measurements, not official scoring-box results.
+
+**Exact first-slot / first-two-slot / four-slot probes:**
+[run 41444545241](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41444545241).
+12 randomized interleaved trials per binary:
+
+| Variant | Median elapsed | Change |
+|---|---:|---:|
+| Existing 4-slot SIMD FALCON-C | 215.711 ms | baseline |
+| First-slot scalar check before SIMD | 215.466 ms | -0.11% |
+| First-two-slot scalar check before SIMD | 215.304 ms | -0.19% |
+| Four-slot scalar lookup, no SIMD | 216.676 ms | +0.45% |
+
+The small scalar-first improvements were below measurement noise and not
+strong enough to justify changing code or increasing source length.
+
+**Dense exact-name membership IDs:**
+[run 41444955226](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41444955226).
+The candidate assigned atomic sequential IDs upon publication of exact
+name slots, preserving collision handling and the full bitmap capacity.
+This could reduce sparse membership bitmap working set but adds an extra
+atomic ID lookup per record. 16 interleaved trials:
+
+| Variant | Median elapsed | Change |
+|---|---:|---:|
+| Existing slot-indexed bitmap | 215.675 ms | baseline |
+| Dense ID mapped via atomic side array | 215.902 ms | +0.11% |
+
+**Direct home hashing vs four-way bucketized probing:**
+[run 41445273213](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41445273213).
+Instead of aligning every hash home to four slots, two variants used a
+precise one-slot home or a two-slot-aligned home and scalar lookups, then
+the same exact linear fallback. 16 interleaved trials:
+
+| Variant | Median elapsed | Change |
+|---|---:|---:|
+| Existing 4-slot SIMD bucket | 215.568 ms | baseline |
+| Direct single-slot home | 215.772 ms | +0.09% |
+| Two-slot-aligned home | 215.822 ms | +0.12% |
+
+All seven were correct, but **none demonstrated a sufficiently reliable
+speed and memory improvement** to justify an official board experiment.
+Rejected without promoting implementation changes. The source blob
+`e6782b241cd8f07bca5b114fdb05019a483f91e7` stays on
+`speed-demon`; previous best public board run is `run-70f424aa22a8`,
+73.956052 pts / 37.853 ms / 10,215,424 B. No hidden-holdout claim.
