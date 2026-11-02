@@ -24,11 +24,13 @@
 //!   run past the file-backed mapping.
 
 use std::arch::x86_64::{
-    __m256i, _mm_crc32_u64, _mm256_cmpeq_epi8, _mm256_loadu_si256,
-    _mm256_movemask_epi8, _mm256_set1_epi8,
+    __m256i, _bzhi_u64, _mm_clmulepi64_si128, _mm_crc32_u64, _mm_cvtsi128_si64, _mm_cvtsi64_si128,
+    _mm_set1_epi8, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8,
+    _mm256_set1_epi8,
 };
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::Mutex;
 
 /// Maps `path` read-only for the life of the process. The harness
 /// pre-warms `/data` into the page cache before the run, so those pages
@@ -59,65 +61,77 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
 /// Countries in first-seen order, and `region_id -> group + 1` (0 means
 /// "no such region"). Spec 2.4 bounds the full/sample dataset to 240
 /// countries and tiny to 24, always well under 254, so group+1 always
-/// fits one byte with no overflow scheme needed.
+/// fits one byte with no overflow scheme needed. Every thread fills its own
+/// slice of the file, so both tables are atomic bytes and the country
+/// list sits behind a lock that is taken once per country.
 struct Regions {
-    countries: Vec<[u8; 3]>,
-    group_of: Vec<u8>,
+    countries: Mutex<Vec<[u8; 3]>>,
+    index: Vec<AtomicU8>,
+    group_of: Vec<AtomicU8>,
 }
 
-fn parse_regions(data: &[u8]) -> Regions {
-    // Spec 2.3: a code is three bytes `A`-`Z`, so five bits each identify it.
-    let mut index = vec![0u16; 1 << 15];
-    let mut countries = Vec::new();
-    // Ids ascend, so the last line has the largest; size the table once.
-    let last = data.rsplit(|&b| b == b'\n').nth(1).unwrap_or(&[]);
-    let max_id = last
-        .iter()
-        .take_while(|d| d.is_ascii_digit())
-        .fold(0usize, |a, &d| a * 10 + (d - b'0') as usize);
-    let mut group_of = vec![0u8; max_id + 1];
-    let mut at = data
-        .iter()
-        .position(|&b| b == b'\n')
-        .map_or(data.len(), |p| p + 1);
-    while at < data.len() {
-        let mut id = 0usize;
-        if at + 8 <= data.len() {
-            // Branch-free digit run: the id's length varies, so a byte loop mispredicts.
-            let (v, n) = digits(data, at);
-            id = v as usize;
-            at += n;
+impl Regions {
+    fn new(data: &[u8]) -> Regions {
+        // Ids ascend, so the last line has the largest; size the table once.
+        let last = data.rsplit(|&b| b == b'\n').nth(1).unwrap_or(&[]);
+        let max_id = last
+            .iter()
+            .take_while(|d| d.is_ascii_digit())
+            .fold(0usize, |a, &d| a * 10 + (d - b'0') as usize);
+        Regions {
+            countries: Mutex::new(Vec::new()),
+            // Spec 2.3: a code is three bytes `A`-`Z`, so five bits each identify it.
+            index: zeroed(1 << 15),
+            group_of: zeroed(max_id + 1),
         }
-        while data[at] != b',' {
-            id = id * 10 + (data[at] - b'0') as usize;
-            at += 1;
-        }
-        let code = &data[at + 1..at + 4];
-        // Packs the three letters into 15 bits (5 per letter) to index a dense table.
-        let slot = &mut index[code.iter().fold(0usize, |a, &c| a << 5 | (c & 31) as usize)];
-        if *slot == 0 {
-            countries.push([code[0], code[1], code[2]]);
-            *slot = countries.len() as u16;
-        }
-        if id >= group_of.len() {
-            group_of.resize(id + 1, 0);
-        }
-        group_of[id] = *slot as u8;
-        at += 4;
-        // The common line ends right after the three-letter code.
-        if data[at] == b'\n' {
-            at += 1;
-        } else {
-            while data[at] != b'\n' {
+    }
+
+    /// Reads the lines that start in `data[from..to)`.
+    fn load(&self, data: &[u8], from: usize, to: usize) {
+        let mut at = from;
+        while at < to {
+            let mut id = 0usize;
+            if at + 8 <= data.len() {
+                // Branch-free digit run: the id's length varies, so a byte loop mispredicts.
+                let (v, n) = digits(data, at);
+                id = v as usize;
+                at += n;
+            }
+            while data[at] != b',' {
+                id = id * 10 + (data[at] - b'0') as usize;
                 at += 1;
             }
-            at += 1;
+            let code = &data[at + 1..at + 4];
+            // Packs the three letters into 15 bits (5 per letter) to index a dense table.
+            let slot = &self.index[code.iter().fold(0usize, |a, &c| a << 5 | (c & 31) as usize)];
+            let mut group = slot.load(Relaxed);
+            if group == 0 {
+                let mut countries = self.countries.lock().unwrap();
+                group = slot.load(Relaxed);
+                if group == 0 {
+                    countries.push([code[0], code[1], code[2]]);
+                    group = countries.len() as u8;
+                    slot.store(group, Relaxed);
+                }
+            }
+            self.group_of[id].store(group, Relaxed);
+            at += 4;
+            // The common line ends right after the three-letter code.
+            if data[at] == b'\n' {
+                at += 1;
+            } else {
+                while data[at] != b'\n' {
+                    at += 1;
+                }
+                at += 1;
+            }
         }
     }
-    Regions {
-        countries,
-        group_of,
-    }
+}
+
+/// Start of the first line that begins after `from`.
+fn next_line(data: &[u8], from: usize) -> usize {
+    data[from..].iter().position(|&b| b == b'\n').map_or(data.len(), |p| from + p + 1)
 }
 
 // --- Aggregation --------------------------------------------------------
@@ -150,126 +164,154 @@ impl Agg {
 /// word is also the publication atomic: zero=free, all-ones=being filled,
 /// high bit set=ready. Generated name bytes are printable ASCII, so that high
 /// bit cannot collide with real key data. Names up to 16 raw bytes are stored
-/// exactly in the slot. Longer names store an exact first eight bytes plus a
-/// marked second eight bytes as a candidate filter, then compare every remaining
-/// byte from the side arena before equality is accepted.
+/// exactly in the slot. Longer names store their first eight bytes in the first
+/// word and a mark, their length and an arena offset in the second; bytes eight
+/// onwards are compared from the side arena before equality is accepted.
 const NAME_SLOTS: usize = 1 << 17;
 const NAME_WORDS: usize = NAME_SLOTS / 64;
+// One row per country plus `_UNMATCHED`; unused rows are never touched.
+const MAX_GROUPS: usize = 256;
 const NAME_ARENA: usize = 1 << 20;
 const OCCUPIED: u64 = 1 << 63;
 const BUSY: u64 = u64::MAX;
 const LONG: u64 = 1 << 63; // Long-name tag distinguishes a 16-byte prefix.
 
 #[repr(C, align(16))]
+#[derive(Default)]
 struct NameSlot {
     lo: AtomicU64,
     hi: UnsafeCell<u64>,
 }
 unsafe impl Sync for NameSlot {}
 
-struct MetaCell(UnsafeCell<u64>);
-unsafe impl Sync for MetaCell {}
+/// Four slots on one cache line, probed together.
+#[repr(C, align(64))]
+#[derive(Default)]
+struct Bucket([NameSlot; 4]);
 
 struct ByteArena(UnsafeCell<Vec<u8>>);
 unsafe impl Sync for ByteArena {}
 
 struct Names {
-    slots: Vec<NameSlot>,
-    meta: Vec<MetaCell>, // long only: raw_len << 32 | tail_offset
+    buckets: Vec<Bucket>,
     arena: ByteArena,
     used: AtomicU32,
     bits: Vec<AtomicU64>,
 }
 
-fn zeroed(n: usize) -> Vec<AtomicU64> {
-    let mut v = std::mem::ManuallyDrop::new(vec![0u64; n]);
-    unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast(), v.len(), v.capacity()) }
+fn zeroed<T>(n: usize) -> Vec<T> {
+    // Zeroed pages are only charged once they are touched. T is an atomic integer.
+    let layout = std::alloc::Layout::array::<T>(n).unwrap();
+    unsafe { Vec::from_raw_parts(std::alloc::alloc_zeroed(layout).cast(), n, n) }
 }
 
 #[inline(always)]
 fn byte_mask(n: usize) -> u64 {
-    if n >= 8 { !0 } else if n == 0 { 0 } else { (1u64 << (n * 8)) - 1 }
+    // The low n bytes (all of them from 8 up); BZHI keeps every bit for an index above 63.
+    unsafe { _bzhi_u64(!0, 8 * n.min(8) as u32) }
 }
 
 #[inline(always)]
-unsafe fn name_words(p: usize, len: usize) -> (u64, u64) {
+unsafe fn name_words(p: usize, len: usize) -> (u64, u64, u64) {
     let q = p as *const u8;
     let lo = q.cast::<u64>().read_unaligned() & byte_mask(len);
-    let hi = if len <= 8 {
-        0
-    } else if len <= 16 {
-        q.add(8).cast::<u64>().read_unaligned() & byte_mask(len - 8)
-    } else {
-        // Exact bytes 8..16; the arena compares bytes 16..len.
-        q.add(8).cast::<u64>().read_unaligned() | LONG
-    };
-    (lo, hi)
+    let hi = q.add(8).cast::<u64>().read_unaligned() & byte_mask(len.saturating_sub(8));
+    // The slot's second word matches under the mask; a long name leaves its offset out.
+    if len > 16 { (lo, LONG | (len as u64) << 32, !0 << 32) } else { (lo, hi, !0) }
 }
 
 impl Names {
-    fn new(groups: usize) -> Self {
+    fn new() -> Self {
         Self {
-            slots: (0..NAME_SLOTS).map(|_| NameSlot {
-                lo: AtomicU64::new(0),
-                hi: UnsafeCell::new(0),
-            }).collect(),
-            meta: (0..NAME_SLOTS).map(|_| MetaCell(UnsafeCell::new(0))).collect(),
+            buckets: (0..NAME_SLOTS / 4).map(|_| Bucket::default()).collect(),
             arena: ByteArena(UnsafeCell::new(vec![0u8; NAME_ARENA])),
             used: AtomicU32::new(0),
-            bits: zeroed(groups * NAME_WORDS),
+            bits: zeroed(MAX_GROUPS * NAME_WORDS),
         }
     }
 
     #[inline(always)]
-    fn long_same(&self, slot: usize, p: usize, len: usize) -> bool {
-        let m = unsafe { *self.meta[slot].0.get() };
-        if (m >> 32) as usize != len { return false; }
-        let off = m as u32 as usize;
-        let tail = len - 16;
+    fn long_same(&self, off: u64, p: usize, len: usize) -> bool {
+        let off = off as u32 as usize;
+        let tail = len - 8;
         let arena = unsafe { &*self.arena.0.get() };
         &arena[off..off + tail]
-            == unsafe { std::slice::from_raw_parts((p as *const u8).add(16), tail) }
+            == unsafe { std::slice::from_raw_parts((p as *const u8).add(8), tail) }
+    }
+
+    #[inline(always)]
+    fn slot(&self, i: usize) -> &NameSlot {
+        &self.buckets[i / 4].0[i % 4]
+    }
+
+    /// The slot already holding this name, if it is in the home bucket (`home` is
+    /// the bucket's first slot): two vector compares of the whole bucket, no branch
+    /// per slot. A slot matches when both of its words do. A slot another thread is
+    /// still filling can only fail to match, which sends the caller to the slow path.
+    #[inline(always)]
+    fn probe(&self, home: usize, ready_lo: u64, key_hi: u64, mask: u64) -> Option<usize> {
+        use std::arch::x86_64::{
+            _mm256_and_si256, _mm256_castsi256_pd, _mm256_cmpeq_epi64, _mm256_movemask_pd,
+            _mm256_set_epi64x,
+        };
+        unsafe {
+            let at = self.slot(home) as *const NameSlot as *const __m256i;
+            let key = _mm256_set_epi64x(key_hi as i64, ready_lo as i64, key_hi as i64, ready_lo as i64);
+            let keep = _mm256_set_epi64x(mask as i64, -1, mask as i64, -1);
+            let eq = |v: __m256i| {
+                let hit = _mm256_cmpeq_epi64(_mm256_and_si256(v, keep), key);
+                _mm256_movemask_pd(_mm256_castsi256_pd(hit)) as usize
+            };
+            let m = eq(_mm256_loadu_si256(at)) | eq(_mm256_loadu_si256(at.add(1))) << 4;
+            let hit = m & m >> 1 & 0b0101_0101;
+            (hit != 0).then(|| home + hit.trailing_zeros() as usize / 2)
+        }
     }
 
     #[inline(always)]
     fn number(&self, h: u64, p: usize, len: usize) -> usize {
-        let (raw_lo, key_hi) = unsafe { name_words(p, len) };
+        let (raw_lo, key_hi, mask) = unsafe { name_words(p, len) };
         let ready_lo = raw_lo | OCCUPIED;
-        let mut i = h as usize & (NAME_SLOTS - 1);
+        let home = h as usize & (NAME_SLOTS - 1) & !3;
+        if let Some(i) = self.probe(home, ready_lo, key_hi, mask) {
+            if len <= 16 || self.long_same(unsafe { *self.slot(i).hi.get() }, p, len) {
+                return i;
+            }
+        }
+        let mut i = home;
         loop {
-            let mut lo = self.slots[i].lo.load(Acquire);
+            let mut lo = self.slot(i).lo.load(Acquire);
             while lo == BUSY {
                 std::hint::spin_loop();
-                lo = self.slots[i].lo.load(Acquire);
+                lo = self.slot(i).lo.load(Acquire);
             }
             if lo == 0 {
-                if self.slots[i].lo.compare_exchange(0, BUSY, Acquire, Acquire).is_ok() {
+                if self.slot(i).lo.compare_exchange(0, BUSY, Acquire, Acquire).is_ok() {
+                    let mut hi = key_hi;
                     if len > 16 {
-                        let tail = len - 16;
+                        let tail = len - 8;
                         let off = self.used.fetch_add(tail as u32, Relaxed) as usize;
                         assert!(off + tail <= NAME_ARENA, "name arena exhausted");
+                        hi |= off as u64;
                         unsafe {
                             std::ptr::copy_nonoverlapping(
-                                (p as *const u8).add(16),
+                                (p as *const u8).add(8),
                                 (&mut *self.arena.0.get()).as_mut_ptr().add(off),
                                 tail,
                             );
-                            *self.meta[i].0.get() = (len as u64) << 32 | off as u64;
-                            *self.slots[i].hi.get() = key_hi;
                         }
-                    } else {
-                        unsafe { *self.slots[i].hi.get() = key_hi; }
                     }
-                    self.slots[i].lo.store(ready_lo, Release);
+                    unsafe { *self.slot(i).hi.get() = hi };
+                    self.slot(i).lo.store(ready_lo, Release);
                     return i;
                 }
                 continue;
             }
-            if (lo & !OCCUPIED) == raw_lo
-                && unsafe { *self.slots[i].hi.get() } == key_hi
-                && (len <= 16 || self.long_same(i, p, len))
-            {
-                return i;
+            if (lo & !OCCUPIED) == raw_lo {
+                let hi = unsafe { *self.slot(i).hi.get() };
+                if hi & mask == key_hi && (len <= 16 || self.long_same(hi, p, len)) {
+                    return i;
+                }
             }
             i = (i + 1) & (NAME_SLOTS - 1);
         }
@@ -305,7 +347,7 @@ impl<'a> Sightings<'a> {
     #[inline]
     fn push(&mut self, group: usize, h: u64, p: usize, len: usize) {
         let home = h as usize & (NAME_SLOTS - 1);
-        prefetch_read(&self.names.slots[home] as *const NameSlot);
+        prefetch_read(&self.names.buckets[home / 4] as *const Bucket);
         self.seen[self.seen_len] = (group, h, p, len);
         self.seen_len += 1;
         if self.seen_len == BATCH {
@@ -366,7 +408,7 @@ fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
     unsafe {
         let word = |p: usize| data.as_ptr().add(p).cast::<u64>().read_unaligned();
         let first = word(from) & byte_mask(len);
-        let last = if len >= 8 { word(to - 8) } else { 0 };
+        let last = word(to - 8) * (len >= 8) as u64;
         let h = _mm_crc32_u64(_mm_crc32_u64(len as u64, first), last);
         h.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ h.rotate_left(29)
     }
@@ -416,10 +458,7 @@ fn digits(data: &[u8], at: usize) -> (u64, usize) {
     // Digit bytes have high nibble 3, so a nonzero byte here is a non-digit. The first one ends the run.
     let not_digit = (w & 0xF0F0_F0F0_F0F0_F0F0) ^ 0x3030_3030_3030_3030;
     let mut n = not_digit.trailing_zeros() as usize / 8;
-    // SWAR: shift the digits to the top bytes, then fold pairs, quads and octets with multiplies.
-    let w = (w << (64 - 8 * n.max(1)) & 0x0F0F_0F0F_0F0F_0F0F).wrapping_mul(2561) >> 8;
-    let w = ((w & 0x00FF_00FF_00FF_00FF).wrapping_mul(6_553_601)) >> 16;
-    let mut v = ((w & 0x0000_FFFF_0000_FFFF).wrapping_mul(42_949_672_960_001)) >> 32;
+    let mut v = fold8(w << (64 - 8 * n.max(1)));
     while n >= 8 && data[at + n].is_ascii_digit() {
         v = v * 10 + (data[at + n] - b'0') as u64;
         n += 1;
@@ -427,7 +466,120 @@ fn digits(data: &[u8], at: usize) -> (u64, usize) {
     (v, n)
 }
 
-/// Parses record-aligned data[start..end] with 64 readable lookahead bytes.
+/// Eight digit bytes, most significant first, as a number. SWAR: fold pairs,
+/// quads and octets with multiplies.
+#[inline(always)]
+fn fold8(w: u64) -> u64 {
+    let w = (w & 0x0F0F_0F0F_0F0F_0F0F).wrapping_mul(2561) >> 8;
+    let w = ((w & 0x00FF_00FF_00FF_00FF).wrapping_mul(6_553_601)) >> 16;
+    ((w & 0x0000_FFFF_0000_FFFF).wrapping_mul(42_949_672_960_001)) >> 32
+}
+
+/// A parsed record: id, decoded name and note lengths, region id, cents,
+/// the raw name's start and end, and where the next record starts.
+type Rec = (u64, usize, usize, usize, i64, usize, usize, usize);
+
+/// Positions of byte `c` in a 128-byte window.
+#[inline(always)]
+fn class(v: &[__m256i; 4], c: u8) -> u128 {
+    unsafe {
+        let k = _mm256_set1_epi8(c as i8);
+        let m = |x: __m256i| _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, k)) as u32 as u64;
+        ((m(v[0]) | m(v[1]) << 32) as u128) | ((m(v[2]) | m(v[3]) << 32) as u128) << 64
+    }
+}
+
+/// Bit i is the parity of the set bits at or below i.
+#[inline(always)]
+fn prefix_xor(q: u64) -> u64 {
+    unsafe {
+        let p = _mm_clmulepi64_si128::<0>(_mm_cvtsi64_si128(q as i64), _mm_set1_epi8(-1));
+        _mm_cvtsi128_si64(p) as u64
+    }
+}
+
+/// The n-digit number that ends just before `p[end]`, 1 <= n <= 8.
+#[inline(always)]
+fn run(p: *const u8, end: usize, n: usize) -> u64 {
+    let w = unsafe { p.wrapping_add(end).wrapping_sub(8).cast::<u64>().read_unaligned() };
+    fold8(w & (!0 << (64 - 8 * n)))
+}
+
+/// A whole record from one 128-byte window: the quote parity (a carry-less
+/// prefix xor of the quote bits; `""` toggles twice) says which commas and
+/// LFs are outside quotes, and those are the field ends. None when the record
+/// does not end inside the window or a number is longer than expected.
+#[inline(always)]
+fn window_record(data: &[u8], i: usize) -> Option<Rec> {
+    let p = data.as_ptr().wrapping_add(i);
+    let v = unsafe { [0, 32, 64, 96].map(|o| _mm256_loadu_si256(p.add(o).cast::<__m256i>())) };
+    let q = class(&v, b'"');
+    let inq_lo = prefix_xor(q as u64);
+    let inq_hi = prefix_xor((q >> 64) as u64) ^ (inq_lo >> 63).wrapping_neg();
+    let outside = !((inq_lo as u128) | (inq_hi as u128) << 64);
+    let lf = class(&v, b'\n') & outside;
+    if lf == 0 {
+        return None;
+    }
+    let l = lf.trailing_zeros() as usize;
+    let mut d = (class(&v, b',') & outside) | lf;
+    let mut next = || {
+        let at = d.trailing_zeros() as usize;
+        d &= d - 1;
+        at
+    };
+    let (d0, d1, d2, d3) = (next(), next(), next(), next());
+    let at = |o: usize| unsafe { *p.add(o) };
+    let b = 3 * (at(0) == 0xEF) as usize;
+    let (n0, n3) = (d0 - b, d3 - d2 - 1);
+    let cr = (at(l - 1) == b'\r') as usize;
+    let e = l - cr;
+    let neg = (at(d3 + 1) == b'-') as usize;
+    let k = e - 3 - d3 - 1 - neg;
+    if (n0.wrapping_sub(1) | n3.wrapping_sub(1)) >= 8 || k.wrapping_sub(1) >= 5 {
+        return None;
+    }
+    let (id, region) = (run(p, d0, n0), run(p, d3, n3) as usize);
+    // The amount ends `.dd`; move the fraction next to the whole digits.
+    let w = unsafe { p.wrapping_add(e).wrapping_sub(8).cast::<u64>().read_unaligned() };
+    let w = ((w & 0xFF_FFFF_FFFF) & (!0 << (8 * (5 - k)))) | (w >> 8 & 0xFFFF << 40);
+    let cents = fold8(w << 8) as i64;
+    let cents = if neg == 1 { -cents } else { cents };
+    // Quotes before window offset x: _bzhi_u64 keeps the low x bits (all of them from 64 up).
+    let below = |x: usize| unsafe {
+        _bzhi_u64(q as u64, x.min(64) as u32).count_ones()
+            + _bzhi_u64((q >> 64) as u64, (x.max(64) - 64) as u32).count_ones()
+    } as usize;
+    let (qn, qt) = (below(d1), below(d2) - below(d1));
+    let decoded = |raw: usize, quotes: usize| raw - quotes / 2 - (quotes != 0) as usize;
+    let (ns, ne) = (i + d0 + 1 + (qn != 0) as usize, i + d1 - (qn != 0) as usize);
+    Some((id, decoded(d1 - d0 - 1, qn), decoded(d2 - d1 - 1, qt), region, cents, ns, ne, i + l + 1))
+}
+
+/// The same record, field by field: any length, any record shape.
+#[inline(always)]
+fn field_record(data: &[u8], mut i: usize) -> Rec {
+    // 0xEF opens the 3-byte UTF-8 BOM at a line start; skip it.
+    i += 3 * (data[i] == 0xEF) as usize;
+    let (id, id_len) = digits(data, i);
+    let (ns, ne, name_bytes, note_at) = text_field(data, i + id_len + 1);
+    let (_, _, note_bytes, region_at) = text_field(data, note_at);
+    let (region, region_len) = digits(data, region_at);
+
+    let mut a = region_at + region_len + 1;
+    let neg = data[a] == b'-';
+    a += neg as usize;
+    let (whole, n) = digits(data, a);
+    let frac = a + n + 1;
+    let cents = (whole * 100
+        + (data[frac] - b'0') as u64 * 10
+        + (data[frac + 1] - b'0') as u64) as i64;
+    let cents = if neg { -cents } else { cents };
+    let next = frac + 2 + (data[frac + 2] == b'\r') as usize + 1;
+    (id, name_bytes, note_bytes, region as usize, cents, ns, ne, next)
+}
+
+/// Parses record-aligned data[start..end] with 128 readable lookahead bytes.
 /// Name lookups remain batched.
 fn parse_records(
     data: &[u8],
@@ -437,31 +589,16 @@ fn parse_records(
     sightings: &mut Sightings,
     groups: &mut [Agg],
 ) {
-    let unmatched = regions.countries.len();
+    let unmatched = groups.len() - 1;
     let mut i = start;
     while i < end {
         prefetch_read(data.as_ptr().wrapping_add(i + 1536));
-        // 0xEF opens the 3-byte UTF-8 BOM at a line start; skip it.
-        i += 3 * (data[i] == 0xEF) as usize;
+        let (id, name_bytes, note_bytes, region, cents, ns, ne, next) =
+            window_record(data, i).unwrap_or_else(|| field_record(data, i));
+        i = next;
 
-        let (id, id_len) = digits(data, i);
-        let (ns, ne, name_bytes, note_at) = text_field(data, i + id_len + 1);
-        let (_, _, note_bytes, region_at) = text_field(data, note_at);
-        let (region, region_len) = digits(data, region_at);
-
-        let mut a = region_at + region_len + 1;
-        let neg = data[a] == b'-';
-        a += neg as usize;
-        let (whole, n) = digits(data, a);
-        let frac = a + n + 1;
-        let cents = (whole * 100
-            + (data[frac] - b'0') as u64 * 10
-            + (data[frac + 1] - b'0') as u64) as i64;
-        let cents = if neg { -cents } else { cents };
-
-        let region = region as usize;
         let g = if region < regions.group_of.len() {
-            let x = unsafe { *regions.group_of.get_unchecked(region) };
+            let x = unsafe { regions.group_of.get_unchecked(region) }.load(Relaxed);
             if x != 0 { x as usize - 1 } else { unmatched }
         } else {
             unmatched
@@ -475,8 +612,6 @@ fn parse_records(
         agg.name_bytes += name_bytes as u64;
         agg.note_bytes += note_bytes as u64;
         sightings.push(g, hash_name(data, ns, ne), data.as_ptr().wrapping_add(ns) as usize, ne - ns);
-        i = frac + 2;
-        i += (data[i] == b'\r') as usize + 1;
     }
 }
 
@@ -499,8 +634,14 @@ fn cut(data: &[u8], from: usize) -> usize {
 const TAIL: usize = 8192;
 const CHUNKS_PER_THREAD: usize = 32;
 
-fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Names) -> Vec<Agg> {
-    let n_groups = regions.countries.len() + 1;
+fn scan(
+    data: &[u8],
+    body: usize,
+    region_data: &[u8],
+    regions: &Regions,
+    threads: usize,
+    names: &Names,
+) -> Vec<Agg> {
     let tail_at = if data.len() - body > 2 * TAIL {
         cut(data, data.len() - TAIL)
     } else {
@@ -512,50 +653,69 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
         k if k == chunks => tail_at,
         k => cut(data, body + (tail_at - body) * k / chunks).min(tail_at),
     };
+    // Every thread, the main one included, loads a slice of regions.csv first.
+    let first = next_line(region_data, 0);
+    let line_bound = |k: usize| match k {
+        0 => first,
+        k if k > threads => region_data.len(),
+        k => next_line(region_data, first + (region_data.len() - first) * k / (threads + 1)),
+    };
     let next = AtomicUsize::new(0);
-    let mut parts: Vec<Vec<Agg>> = std::thread::scope(|s| {
+    // Everyone meets here once the regions are loaded, and again once every name is
+    // in the table, when the workers count the matrix rows (a serial popcount of it
+    // took ~2.5 ms).
+    let barrier = std::sync::Barrier::new(threads + 1);
+    let n_groups = || regions.countries.lock().unwrap().len() + 1;
+    let parts: Vec<Vec<Agg>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
-            .map(|_| {
-                s.spawn(|| {
+            .map(|t| {
+                let (next, barrier) = (&next, &barrier);
+                s.spawn(move || {
+                    regions.load(region_data, line_bound(t), line_bound(t + 1));
+                    barrier.wait();
+                    let n_groups = n_groups();
                     let mut groups = vec![Agg::new(); n_groups];
                     let mut sightings = Sightings::new(names);
                     loop {
                         let k = next.fetch_add(1, Relaxed);
                         if k >= chunks {
-                            sightings.finish();
-                            return groups;
+                            break;
                         }
                         let (from, to) = (bound(k), bound(k + 1));
                         parse_records(data, from, to, regions, &mut sightings, &mut groups);
                         release(&data[from..to]);
                     }
+                    sightings.finish();
+                    barrier.wait();
+                    for g in (t..n_groups).step_by(threads) {
+                        groups[g].names_distinct = names.distinct(g);
+                    }
+                    groups
                 })
             })
             .collect();
-        handles
+        regions.load(region_data, line_bound(threads), line_bound(threads + 1));
+        let mut tail = vec![0u8; 16];
+        tail.extend_from_slice(&data[tail_at..]);
+        tail.resize(tail.len() + 128, 0);
+        barrier.wait();
+        let mut groups = vec![Agg::new(); n_groups()];
+        let mut sightings = Sightings::new(names);
+        parse_records(&tail, 16, 16 + data.len() - tail_at, regions, &mut sightings, &mut groups);
+        sightings.finish();
+        barrier.wait();
+        let mut parts: Vec<Vec<Agg>> = handles
             .into_iter()
             .map(|h| h.join().expect("parse worker panicked"))
-            .collect()
+            .collect();
+        parts.push(groups);
+        parts
     });
 
-    let mut tail = data[tail_at..].to_vec();
-    tail.resize(tail.len() + 64, 0);
-    let mut groups = vec![Agg::new(); n_groups];
-    let mut sightings = Sightings::new(names);
-    parse_records(
-        &tail,
-        0,
-        data.len() - tail_at,
-        regions,
-        &mut sightings,
-        &mut groups,
-    );
-    sightings.finish();
-    parts.push(groups);
-
-    let mut out = vec![Agg::new(); n_groups];
+    let mut out = vec![Agg::new(); n_groups()];
     for part in &parts {
         for (dst, src) in out.iter_mut().zip(part) {
+            dst.names_distinct += src.names_distinct;
             if src.count == 0 {
                 continue;
             }
@@ -571,14 +731,11 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
     out
 }
 
-fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
-    let n_groups = regions.countries.len() + 1;
-    let body = data.iter().position(|&b| b == b'\n').map_or(data.len(), |p| p + 1);
-    if body >= data.len() { return vec![Agg::new(); n_groups]; }
-    let names = Names::new(n_groups);
-    let mut out = scan(data, body, regions, threads.max(1), &names);
-    out.iter_mut().enumerate()
-        .for_each(|(g, a)| a.names_distinct = names.distinct(g));
+fn aggregate(data: &[u8], region_data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
+    let body = next_line(data, 0);
+    if body >= data.len() { return vec![Agg::new()]; }
+    let names = Names::new();
+    let out = scan(data, body, region_data, regions, threads.max(1), &names);
     std::mem::forget(names);
     out
 }
@@ -609,17 +766,17 @@ fn write_line(out: &mut Vec<u8>, key: &[u8], a: &Agg) {
     out.extend_from_slice(rest.as_bytes());
 }
 
-fn render(regions: &Regions, groups: &[Agg]) -> Vec<u8> {
-    let mut order: Vec<usize> = (0..regions.countries.len()).collect();
-    order.sort_unstable_by_key(|&g| regions.countries[g]);
+fn render(countries: &[[u8; 3]], groups: &[Agg]) -> Vec<u8> {
+    let mut order: Vec<usize> = (0..countries.len()).collect();
+    order.sort_unstable_by_key(|&g| countries[g]);
     let mut out = Vec::new();
     for g in order {
         if groups[g].count > 0 {
-            write_line(&mut out, &regions.countries[g], &groups[g]);
+            write_line(&mut out, &countries[g], &groups[g]);
         }
     }
     // `_` (0x5F) sorts after every `[A-Z]{3}` code, so it is always last.
-    let unmatched = &groups[regions.countries.len()];
+    let unmatched = &groups[countries.len()];
     if unmatched.count > 0 {
         write_line(&mut out, b"_UNMATCHED", unmatched);
     }
@@ -632,10 +789,10 @@ fn main() {
     unsafe { prctl(41, 1, 0, 0, 0) }; // PR_SET_THP_DISABLE
     let (records, regions, output) = ("/data/records.csv", "/data/regions.csv", "/out/aggregates.txt");
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let result = map_file(regions).and_then(|regions_data| {
-        let regions = parse_regions(regions_data);
-        let groups = aggregate(map_file(records)?, &regions, threads);
-        std::fs::write(output, render(&regions, &groups))
+    let result = map_file(regions).and_then(|region_data| {
+        let regions = Regions::new(region_data);
+        let groups = aggregate(map_file(records)?, region_data, &regions, threads);
+        std::fs::write(output, render(&regions.countries.into_inner().unwrap(), &groups))
     });
     if let Err(e) = result {
         eprintln!("track-c: failed: {e}");

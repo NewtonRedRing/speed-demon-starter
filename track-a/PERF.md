@@ -592,3 +592,27 @@ process from the last worker to finish, and a position-independent code model,
 made no measurable difference (24.09-24.16 ms) and were not kept.
 
 A static non-PIE binary (-C target-feature=+crt-static -C relocation-model=static) together with a teammate's change that reuses the percentile scatter cursors per worker measured 23.93 ms and 19.99 MB on the board (82.656 points; 82.763 on the run before it), about 0.2-0.3 ms below the previous 24.1 ms, and is kept.
+
+
+## November 2: overlapping the hours with parsing, and a smaller footprint (not yet on the board)
+
+Local paired runs only (12 workers, `--cpuset-cpus=0-11`, 30 to 40 interleaved runs per image on a shared host whose
+noise was about 5 ms, so time differences below 2 ms are not resolved). All images produced the reference hash.
+
+| Change | Local result |
+|---|---|
+| Hours taken as soon as the log's arrival order says they are complete; record chunks reused | Peak memory 20.4 to 19.1 MB; time not distinguishable (-0.3 ms, noise 5 ms) |
+| Endpoint names copied once into a 125-bytes-per-name arena | The old table pointed into released pieces of the log: re-faulted pages, RssFile 7 MB to 1.6 MB at the output |
+| Group lines in page-aligned 12-page slots, released after each hour is written | Peak memory 19.1 to 15.5 MB (the lines no longer sit beside the filling output; no Vec growth slack) |
+| One thread restarts on out-of-order input; panics restart too | Correctness hardening only; shuffled, reversed and late-hour logs give the reference hash |
+| Names ranked by the first idle thread while the last hours finish | The serial step after the barrier was 0.6 to 1.2 ms, mostly this sort; time not resolved locally |
+| Piece bounds found when a piece is claimed | Removes 95 serial page touches before the threads start |
+
+Measured and rejected locally: sizing the output file and mapping it before the parse (with one final
+`ftruncate`): -0.5 ms to +0.6 ms, within noise. Idle spinning with `pause` bursts and 192 instead of 96 pieces: no
+difference in 30 runs each (idle time in quiet runs was only about 0.1 ms per thread).
+
+The hours may only be taken early because the generator's log cannot be more than one hour out of order: the
+largest `cummax(hour) - hour` over the full seed 1, the full seed 23 and the samples is 1. The spec promises no bound,
+so every piece checks on finishing that it holds no hour already taken; if one does, or a thread panics reading an
+hour that is still being filled, the process re-executes itself with all hours held back until the log is parsed.

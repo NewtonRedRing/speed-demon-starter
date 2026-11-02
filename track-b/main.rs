@@ -21,14 +21,15 @@ extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn mallopt(param: i32, value: i32) -> i32;
     fn prctl(option: i32, ...) -> i32;
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
 }
 
 const THREADS: usize = 12;
 const NONE: u32 = u32::MAX;
 const BUCKETS: usize = 32; // scan output streams per thread; term i goes to bucket i % BUCKETS
 const GAP: u32 = 15; // a unit's 4-bit doc gap; GAP means the whole gap follows in the next unit
+const CHUNK: usize = 1 << 16; // bytes of one scan output chunk
 const DOC_BITS: u32 = 15; // a thread's share holds under 2^15 documents
-const ID_MASK: u32 = (1 << 18) - 1;
 
 /// The file, mapped over a spare zero page so loads of 32 bytes past any of
 /// its bytes stay inside the mapping.
@@ -83,67 +84,116 @@ unsafe fn key(p: *const u8, len: usize) -> __m256i {
     _mm256_and_si256(v, _mm256_loadu_si256(KEEP.as_ptr().add(32 - len).cast()))
 }
 
-fn hash(k: __m256i) -> usize {
-    let w: [u64; 4] = unsafe { std::mem::transmute(k) };
-    unsafe {
-        _mm_crc32_u64(
-            _mm_crc32_u64(_mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[1]), w[2]),
-            w[3],
-        ) as usize
-    }
+/// The hash of a key of at most 12 bytes.
+fn hash(k: __m128i) -> usize {
+    let w: [u64; 2] = unsafe { std::mem::transmute(k) };
+    unsafe { _mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[1]) as usize }
 }
 
 fn same(a: __m256i, b: __m256i) -> bool {
     unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, b)) == -1 }
 }
 
-/// Query terms to dense ids: each 32-bit slot packs a 14-bit hash tag above
-/// an 18-bit id + 1 (0 if free). Matching tags still require exact equality.
-/// A token that is no term gets the id one past the last term.
+/// Tokens of up to SHORT bytes are looked up in a hash table of 16-byte
+/// entries: the key's 12 bytes and the id + 1 (0 if free), so a hit reads
+/// one cache line. The few longer terms are searched linearly.
+const SHORT: usize = 12;
+
+/// Query terms to dense ids. A token that is no term gets the id one past
+/// the last term.
 struct Terms {
-    slot: Vec<u32>,
-    keys: Vec<__m256i>,
+    tab: Vec<__m128i>,
+    long: Vec<(__m256i, u32)>,
+    n: u32,
+    ring: [(__m128i, usize, usize); 8], // short terms waiting for their slot: key, hash, place in the ids
+    fed: usize,
 }
 
 impl Terms {
-    fn find(&self, k: __m256i, h: usize) -> u32 {
-        let mask = self.slot.len() - 1;
+    fn id(e: __m128i) -> u32 {
+        unsafe { _mm_extract_epi32::<3>(e) as u32 }
+    }
+
+    /// Appends the id of term to ids; a short one's place is filled 8 terms
+    /// later, once its slot has been prefetched, and by finish at the latest.
+    fn push(&mut self, term: &[u8], ids: &mut Vec<u32>) {
+        ids.push(0);
+        let k = unsafe { key(term.as_ptr(), term.len()) };
+        if term.len() > SHORT {
+            *ids.last_mut().unwrap() = self.insert(k);
+            return;
+        }
+        let k = unsafe { _mm256_castsi256_si128(k) };
+        let h = hash(k);
+        unsafe { _mm_prefetch::<_MM_HINT_T0>(self.tab.as_ptr().add(h & (self.tab.len() - 1)).cast()) };
+        let oldest = std::mem::replace(&mut self.ring[self.fed % 8], (k, h, ids.len() - 1));
+        if self.fed >= 8 {
+            ids[oldest.2] = self.add(oldest.0, oldest.1);
+        }
+        self.fed += 1;
+    }
+
+    fn finish(&mut self, ids: &mut [u32]) {
+        for i in self.fed.saturating_sub(8)..self.fed {
+            let r = self.ring[i % 8];
+            ids[r.2] = self.add(r.0, r.1);
+        }
+    }
+
+    /// The place of the short key k: its entry, or the free entry it belongs in.
+    fn probe(&self, k: __m128i, h: usize) -> usize {
+        let mask = self.tab.len() - 1;
         let mut i = h & mask;
         loop {
-            match self.slot[i] {
-                0 => return self.keys.len() as u32,
-                s if (s ^ (h as u32 & !ID_MASK)) & !ID_MASK == 0 && same(self.keys[(s & ID_MASK) as usize - 1], k) => return (s & ID_MASK) - 1,
-                _ => i = (i + 1) & mask,
+            let e = self.tab[i];
+            if unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(e, k)) & 0xFFF == 0xFFF } || Self::id(e) == 0 {
+                return i;
             }
+            i = (i + 1) & mask;
         }
+    }
+
+    fn find(&self, k: __m128i, h: usize) -> u32 {
+        Self::id(self.tab[self.probe(k, h)]).wrapping_sub(1).min(self.n)
+    }
+
+    fn find_long(&self, k: __m256i) -> u32 {
+        self.long.iter().find(|l| same(l.0, k)).map_or(self.n, |l| l.1)
+    }
+
+    /// The id of the token of len (at most 32) bytes at p.
+    unsafe fn lookup(&self, p: *const u8, len: usize) -> u32 {
+        let k = key(p, len);
+        let k128 = _mm256_castsi256_si128(k);
+        if len > SHORT { self.find_long(k) } else { self.find(k128, hash(k128)) }
     }
 
     /// Term i becomes new[i].
     fn renumber(&mut self, new: &[u32]) {
-        let mut keys = self.keys.clone();
-        for (&n, &k) in new.iter().zip(&self.keys) {
-            keys[n as usize] = k;
+        for e in &mut self.tab {
+            let w: &mut [u32; 4] = unsafe { std::mem::transmute(e) };
+            w[3] = if w[3] == 0 { 0 } else { new[w[3] as usize - 1] + 1 };
         }
-        self.keys = keys;
-        for s in self.slot.iter_mut().filter(|s| **s != 0) {
-            *s = *s & !ID_MASK | new[(*s & ID_MASK) as usize - 1] + 1;
-        }
+        self.long.iter_mut().for_each(|l| l.1 = new[l.1 as usize]);
     }
 
-    fn insert(&mut self, term: &[u8]) -> u32 {
-        let k = unsafe { key(term.as_ptr(), term.len()) };
-        let (h, mask) = (hash(k), self.slot.len() - 1);
-        let mut i = h & mask;
-        while self.slot[i] != 0 {
-            let s = self.slot[i];
-            if (s ^ (h as u32 & !ID_MASK)) & !ID_MASK == 0 && same(self.keys[(s & ID_MASK) as usize - 1], k) {
-                return (s & ID_MASK) - 1;
-            }
-            i = (i + 1) & mask;
+    fn insert(&mut self, k: __m256i) -> u32 {
+        if let Some(l) = self.long.iter().find(|l| same(l.0, k)) {
+            return l.1;
         }
-        self.keys.push(k);
-        self.slot[i] = h as u32 & !ID_MASK | self.keys.len() as u32;
-        self.keys.len() as u32 - 1
+        self.long.push((k, self.n));
+        self.n += 1;
+        self.n - 1
+    }
+
+    fn add(&mut self, k: __m128i, h: usize) -> u32 {
+        let i = self.probe(k, h);
+        if Self::id(self.tab[i]) != 0 {
+            return Self::id(self.tab[i]) - 1;
+        }
+        self.tab[i] = unsafe { _mm_insert_epi32::<3>(k, self.n as i32 + 1) };
+        self.n += 1;
+        self.n - 1
     }
 }
 
@@ -169,8 +219,8 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 /// looked up LAG tokens later, so the misses overlap.
 unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, usize)) -> *const u8 {
     const LAG: usize = 8;
-    let mut ring = [(_mm256_setzero_si256(), 0, p, 0); LAG];
-    let mut look = |r: &(__m256i, usize, *const u8, usize)| f(t.find(r.0, r.1), r.2, r.3);
+    let mut ring = [(_mm_setzero_si128(), 0u32, 0u32, p); LAG];
+    let mut look = |r: &(__m128i, u32, u32, *const u8)| f(if r.2 as usize > SHORT { t.lookup(r.3, r.2 as usize) } else { t.find(r.0, r.1 as usize) }, r.3, r.2 as usize);
     let mut n = 0usize;
     loop {
         let (word, nl) = classes(p);
@@ -191,14 +241,14 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
             }
             m &= !0u64 << (s + len); // here the token ends inside the window
             if len <= 32 {
-                let k = key(p.add(s as usize), len as usize);
+                let k = _mm256_castsi256_si128(key(p.add(s as usize), len as usize));
                 let h = hash(k);
-                let slot = t.slot.as_ptr().add(h & (t.slot.len() - 1));
+                let slot = t.tab.as_ptr().add(h & (t.tab.len() - 1));
                 _mm_prefetch::<_MM_HINT_T0>(slot.cast());
                 if n >= LAG {
                     look(&ring[n % LAG]);
                 }
-                (ring[n % LAG], n) = ((k, h, p.add(s as usize), len as usize), n + 1);
+                (ring[n % LAG], n) = ((k, h as u32, len, p.add(s as usize)), n + 1);
             }
         }
         if nl != 0 {
@@ -215,7 +265,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
 unsafe fn around(terms: &Terms, s: *const u8, len: usize, phrase: &[u32], j: usize) -> bool {
     let is = |p: *const u8, q: *const u8, id: u32| {
         let n = q.offset_from(p) as usize;
-        n <= 32 && same(key(p, n), terms.keys[id as usize])
+        n <= 32 && terms.lookup(p, n) == id
     };
     let mut q = s;
     for &id in phrase[..j].iter().rev() {
@@ -264,7 +314,7 @@ fn has(bits: &[u64], d: u32) -> bool {
 }
 
 /// cur op term, strictly left to right; a list OR a bitmap becomes a bitmap.
-fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
+fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, scratch: &mut [u64]) -> Docs<'a> {
     use Docs::*;
     let bit = |d: u32| (d as usize / 64, 1u64 << (d % 64));
     match (cur, op, term) {
@@ -299,7 +349,7 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
             List(v)
         }
         // AND or NOT: a binary search per document when b is far longer.
-        (List(mut a), _, List(b)) if a.len() * 16 < b.len() => {
+        (List(mut a), _, List(b)) if a.len() * 8 < b.len() => {
             let mut j = 0;
             a.retain(|&d| {
                 j += b[j..].partition_point(|&x| x < d);
@@ -307,19 +357,16 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>) -> Docs<'a> {
             });
             List(a)
         }
-        // Otherwise a merge without branches: x stays when it is in b (AND)
-        // or below b's next document (NOT), and a's rest stays for NOT.
+        // Otherwise b's documents are marked in a scratch bitmap, which a's
+        // documents are tested against; the bitmap is zeroed again at the end.
         (List(mut a), _, List(b)) => {
-            let (mut i, mut j, mut k) = (0, 0, 0);
-            while i < a.len() && j < b.len() {
-                let (x, y) = (a[i], b[j]);
-                a[k] = x;
-                k += if op == b'A' { x == y } else { x < y } as usize;
-                (i, j) = (i + (x <= y) as usize, j + (y <= x) as usize);
+            for &d in &b {
+                scratch[d as usize / 64] |= 1 << (d % 64);
             }
-            let rest = if op == b'A' { 0 } else { a.len() - i };
-            a.copy_within(i..i + rest, k);
-            a.truncate(k + rest);
+            a.retain(|&d| has(scratch, d) == (op == b'A'));
+            for &d in &b {
+                scratch[d as usize / 64] = 0;
+            }
             List(a)
         }
     }
@@ -375,7 +422,7 @@ fn walk(text: &[u8], first: u32, t: &Terms, mut f: impl FnMut(u32, u32, *const u
 /// documents in order, so the gaps are small.
 #[derive(Default)]
 struct Units {
-    chunks: Vec<Vec<u16>>,
+    chunks: Vec<usize>, // addresses of the mapped chunks
     at: usize, // the address of the next unit's place in the last chunk, up to end
     end: usize,
     prev: u32,
@@ -393,10 +440,18 @@ impl Units {
     #[cold]
     #[inline(never)]
     fn grow(&mut self) {
-        self.finish();
-        let c = Vec::<u16>::with_capacity(1 << 15);
-        (self.at, self.end) = (c.as_ptr() as usize, c.as_ptr() as usize + 2 * c.capacity());
-        self.chunks.push(c);
+        // Chunks are cut from a mapping made per thread, so that the threads
+        // rarely take the mapping lock; unused pages of it cost nothing.
+        thread_local!(static ARENA: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) });
+        let (mut p, mut end) = ARENA.get();
+        if p == end {
+            // PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS
+            p = unsafe { mmap(std::ptr::null_mut(), 64 * CHUNK, 3, 0x22, -1, 0) } as usize;
+            end = p + 64 * CHUNK;
+        }
+        ARENA.set((p + CHUNK, end));
+        (self.at, self.end) = (p, p + CHUNK);
+        self.chunks.push(p);
     }
 
     fn add(&mut self, offset: u32, doc: u32) {
@@ -407,13 +462,6 @@ impl Units {
             self.put(gap as u16);
         }
     }
-
-    /// Sets the last chunk's length to the units written.
-    fn finish(&mut self) {
-        if let Some(c) = self.chunks.last_mut() {
-            unsafe { c.set_len((self.at - c.as_ptr() as usize) / 2) };
-        }
-    }
 }
 
 
@@ -422,8 +470,8 @@ fn main() {
     // PR_SET_THP_DISABLE: the box backs part-written regions with whole 2 MB pages.
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) };
     let qtext = map("/data/queries.txt");
-    let slots = vec![0; (qtext.len() / 8).next_power_of_two()];
-    let mut terms = Terms { slot: slots, keys: Vec::with_capacity(qtext.len() / 16) };
+    let tab: Vec<__m128i> = unsafe { std::mem::transmute(vec![0u128; (qtext.len() / 8).next_power_of_two()]) };
+    let mut terms = Terms { tab, long: vec![], n: 0, ring: [(unsafe { _mm_setzero_si128() }, 0, 0); 8], fed: 0 };
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
@@ -433,12 +481,13 @@ fn main() {
         for (k, word) in body.split(|&b| b == b' ').enumerate() {
             match !phrase && k % 2 == 1 {
                 true => *ops.last_mut().unwrap() = word[0],
-                false => (ids.push(terms.insert(word)), ops.push(0)).1,
+                false => (terms.push(word, &mut ids), ops.push(0)).1,
             }
         }
         spans.push((phrase, from, ids.len() as u32));
     }
-    let nterms = terms.keys.len();
+    terms.finish(&mut ids);
+    let nterms = terms.n as usize;
     assert!(nterms <= BUCKETS << 12, "too many terms"); // a unit's index has 12 bits
     let mut in_bool = vec![false; nterms];
     for &(phrase, from, to) in spans.iter().filter(|s| !s.0) {
@@ -460,10 +509,10 @@ fn main() {
     let first_doc = |c: usize| text.get(c).map_or(ndocs as u32, |_| number(text, c));
     let firsts: Vec<u32> = cut[..THREADS].iter().map(|&c| first_doc(c)).collect();
 
-    // The sample: documents per term in the first 1/32 of each share.
+    // The sample: documents per term in the first 1/64 of each share.
     let samples = on_threads(|t| {
         let (mut df, mut last) = (vec![0u32; nterms + 1], vec![NONE; nterms + 1]);
-        let sample = &text[cut[t]..cut[t] + (cut[t + 1] - cut[t]) / 32];
+        let sample = &text[cut[t]..cut[t] + (cut[t + 1] - cut[t]) / 64];
         let n = walk(sample, firsts[t], &terms, |doc, id, _, _| {
             if std::mem::replace(&mut last[id as usize], doc) != doc {
                 df[id as usize] += 1;
@@ -493,26 +542,36 @@ fn main() {
         (false, true) => 3,
         (false, false) => 4,
     };
-    let mut order: Vec<usize> = (0..nterms).collect();
-    order.sort_by_key(|&i| (class(i), std::cmp::Reverse(df[i])));
-    let [nbits, a0, lists, nkeep] = [0, 1, 2, 3].map(|c| order.partition_point(|&i| class(i) <= c));
+    // Sorted by class, then by falling frequency, as the term's id in the low bits.
+    let mut order: Vec<u64> = (0..nterms).map(|i| (class(i) as u64) << 56 | (!df[i] as u64) << 24 | i as u64).collect();
+    order.sort_unstable();
+    let [nbits, a0, lists, nkeep] = [0, 1, 2, 3].map(|c| order.partition_point(|&k| k >> 56 <= c));
     let mut new = vec![0; nterms];
-    for (r, &i) in order.iter().enumerate() {
-        new[i] = r as u32;
+    for (r, &k) in order.iter().enumerate() {
+        new[k as usize & 0xFF_FFFF] = r as u32;
     }
     terms.renumber(&new);
     ids.iter_mut().for_each(|id| *id = new[*id as usize]);
     anchored.iter_mut().for_each(|a| a.0 = new[a.0 as usize]);
     anchored.sort_unstable();
-    // Where the phrases of anchor a0 + k start in anchored.
-    let astart: Vec<usize> = (a0..=nkeep).map(|i| anchored.partition_point(|a| (a.0 as usize) < i)).collect();
+    // The phrases of anchor a0 + k lie at recs[astart[k]..astart[k + 1]], each as
+    // its query, the anchor's position, its length and its terms.
+    let (mut recs, mut astart) = (vec![], vec![]);
+    for &(a, q, j) in &anchored {
+        astart.resize(a as usize - a0 + 1, recs.len());
+        let span = spans[q as usize];
+        recs.extend([q, j, span.2 - span.1]);
+        recs.extend_from_slice(&ids[span.1 as usize..span.2 as usize]);
+    }
+    astart.resize(nkeep - a0 + 1, recs.len());
+    drop((df, order, new, in_bool, anchor, anchored));
     let words = ndocs.div_ceil(64);
     // Zero pages from the kernel, written only where a bit is set.
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
 
     // The scan: phrase matches, bitmap bits, and list postings by bucket.
     let found = Mutex::new(vec![]); // (query, document) phrase matches
-    let scans: Vec<(Vec<u16>, Mutex<Vec<Units>>)> = on_threads(|t| {
+    let mut scans: Vec<(Vec<u16>, Mutex<Vec<Units>>)> = on_threads(|t| {
         // Per term (and one id for every token that needs nothing): documents
         // in this share, and the last one's offset + 1.
         let (mut count, mut last, mut mine) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1], vec![]);
@@ -535,12 +594,13 @@ fn main() {
             }
             if i.wrapping_sub(a0) < nkeep - a0 {
                 let k = i - a0;
-                for &(_, q, j) in &anchored[astart[k]..astart[k + 1]] {
-                    let span = spans[q as usize];
-                    let phrase = &ids[span.1 as usize..span.2 as usize];
-                    if unsafe { around(&terms, s, len, phrase, j as usize) } {
-                        mine.push((q, doc));
+                let mut at = &recs[astart[k]..astart[k + 1]];
+                while let [q, j, n, rest @ ..] = at {
+                    let (phrase, after) = rest.split_at(*n as usize);
+                    if unsafe { around(&terms, s, len, phrase, *j as usize) } {
+                        mine.push((*q, doc));
                     }
+                    at = after;
                 }
             }
             if i < nbits {
@@ -562,11 +622,11 @@ fn main() {
             }
         });
         flush(&mut pending, block);
-        buckets.iter_mut().for_each(Units::finish);
         assert!(n < 1 << DOC_BITS, "too many documents per thread");
         found.lock().unwrap().extend(mine);
         (count, Mutex::new(buckets))
     });
+    drop((terms, recs, astart));
     // Each term's postings lie in one stretch, thread by thread: the segment
     // from thread t holds seg[i * THREADS + t] offsets from firsts[t]. The
     // stretches go bucket by bucket, so a bucket's scatter writes one region,
@@ -577,6 +637,7 @@ fn main() {
         s.iter_mut().zip(&scans).for_each(|(n, scan)| *n = scan.0[i]);
         (start[i], end) = (end, end + s.iter().map(|&n| n as u32).sum::<u32>());
     }
+    scans.iter_mut().for_each(|s| s.0 = vec![]);
     // Written by every thread at its own positions; relaxed stores are plain stores.
     let post: Vec<AtomicU16> = unsafe { std::mem::transmute(vec![0u16; end as usize]) };
     on_threads(|t| {
@@ -587,18 +648,22 @@ fn main() {
                 *c = start[i] + seg[i * THREADS..][..t].iter().map(|&n| n as u32).sum::<u32>();
             }
             let (mut doc, mut term) = (0u32, NONE);
-            for x in units.chunks.into_iter().flatten() {
-                if term == NONE {
-                    term = (x >> 4) as u32;
-                    if x as u32 & GAP == GAP {
-                        continue; // the whole gap follows
+            for (k, &p) in units.chunks.iter().enumerate() {
+                let used = if k + 1 == units.chunks.len() { units.at - p } else { CHUNK };
+                for &x in unsafe { std::slice::from_raw_parts(p as *const u16, used / 2) } {
+                    if term == NONE {
+                        term = (x >> 4) as u32;
+                        if x as u32 & GAP == GAP {
+                            continue; // the whole gap follows
+                        }
+                        doc += x as u32 & GAP;
+                    } else {
+                        doc += x as u32;
                     }
-                    doc += x as u32 & GAP;
-                } else {
-                    doc += x as u32;
+                    let c = &mut cursor[std::mem::replace(&mut term, NONE) as usize];
+                    (post[*c as usize].store(doc as u16, Relaxed), *c += 1);
                 }
-                let c = &mut cursor[std::mem::replace(&mut term, NONE) as usize];
-                (post[*c as usize].store(doc as u16, Relaxed), *c += 1);
+                unsafe { madvise(p as *mut u8, CHUNK, 4) }; // MADV_DONTNEED: no unmapping while the other threads fault
             }
         }
     });
@@ -627,26 +692,30 @@ fn main() {
     };
     let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
-    on_threads(|_| loop {
-        let k = next.fetch_add(1, Relaxed);
-        let Some(chunk) = chunks.get(k) else { return };
-        let mut out = String::new();
-        for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
-            let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
-            let set = if phrase {
-                let at = found.partition_point(|m| m.0 < q as u32);
-                Docs::List(found[at..].iter().take_while(|m| m.0 == q as u32).map(|m| m.1).collect())
-            } else {
-                let cur = docs(tids[0]);
-                ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| match &cur {
-                    Docs::List(v) if v.is_empty() && op != b'O' => cur, // nothing left to narrow
-                    _ => apply(cur, op, docs(id)),
-                })
-            };
-            line(&mut out, &set);
+    on_threads(|_| {
+        let mut scratch = vec![0u64; words]; // zero between uses
+        loop {
+            let k = next.fetch_add(1, Relaxed);
+            let Some(chunk) = chunks.get(k) else { return };
+            let mut out = String::new();
+            for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
+                let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
+                let set = if phrase {
+                    let at = found.partition_point(|m| m.0 < q as u32);
+                    Docs::List(found[at..].iter().take_while(|m| m.0 == q as u32).map(|m| m.1).collect())
+                } else {
+                    let cur = docs(tids[0]);
+                    ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| match &cur {
+                        Docs::List(v) if v.is_empty() && op != b'O' => cur, // nothing left to narrow
+                        _ => apply(cur, op, docs(id), &mut scratch),
+                    })
+                };
+                line(&mut out, &set);
+            }
+            *chunk.lock().unwrap() = out;
         }
-        *chunk.lock().unwrap() = out;
     });
     let out: String = chunks.into_iter().map(|c| c.into_inner().unwrap()).collect();
     std::fs::write("/out/results.txt", out).expect("/out/results.txt");
+    std::process::exit(0); // the big buffers go with the process, not one unmapping at a time
 }

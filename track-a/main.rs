@@ -1,7 +1,7 @@
 // Speed Demon 2026, Track A (Ingest).
 //
-// One pool of threads does everything in three phases, with a barrier between
-// them; at each barrier one thread does a short serial step.
+// One pool of threads parses and summarises; then, after a barrier and a short
+// serial step, every thread formats.
 //
 // Parse. The log is memory-mapped and cut into line-aligned pieces that the
 // threads claim in turn. The timestamp is always 27 bytes and the 72-hour span
@@ -9,25 +9,29 @@
 // One 64-byte scan after the timestamp finds the method's end, the endpoint's
 // end and the line's end. All threads intern endpoints in one shared table
 // and file a 4-byte record (latency, endpoint id, 5xx flag) under the hour.
-// Serial step: sort the names, so lines can be printed in output order.
 //
-// Hours. Threads claim hours in order. An hour's ~43k latencies are
-// counting-sorted by endpoint into per-thread scratch and three selections
-// per group give the percentiles. Each group's numbers are kept
-// along with the exact size the hour's text will take, since a number's width
-// is known without formatting it. Serial step: turn the sizes into offsets,
-// size the output file and map it.
+// Hours. A thread takes the next hour as soon as it can be complete, and
+// otherwise parses: the log is the shards' chunks in arrival order, so once the
+// finished pieces from the front of the file reach a line of hour h + 2, the
+// shards have shipped all of hour h. An hour's ~43k latencies are counting-sorted
+// by endpoint id into per-thread scratch and three selections per group give
+// the percentiles. Each group's numbers are kept along with the exact size the
+// hour's text will take, since a number's width is known without formatting
+// it. The hour's record chunks are then reused for later parsing. No bound on
+// disorder is promised, so every piece checks on finishing that it holds no
+// hour already taken; if one does, the program starts over without overlap.
 //
-// Text. Every thread formats its hours straight into the mapped file, so no
-// hour waits for another and the output's pages fill only after the records
-// have been released.
+// Text. Once every hour is taken, one thread ranks the names. Serial step: turn
+// the sizes into offsets, size the output file and map it. Every thread then
+// formats its hours straight into the mapped file, so no hour waits for another.
 use std::arch::x86_64::*;
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::ptr::null_mut;
-use std::slice::from_raw_parts;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering::*};
-use std::sync::Barrier;
+use std::slice::{from_raw_parts, from_raw_parts_mut};
+use std::os::unix::process::CommandExt;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering::*};
+use std::sync::{Barrier, Mutex};
 
 extern "C" {
     fn open(path: *const i8, flags: i32, ...) -> i32;
@@ -113,11 +117,15 @@ unsafe fn decode(end: *const u8, len: usize) -> u32 {
 // Endpoint names to dense ids in first-seen order, shared by every thread.
 // Open addressing on a CRC of the name's first and last eight bytes (masked
 // when the name is shorter; the rest of the line keeps both loads in bounds).
-// Names point into the log. A free slot is claimed with BUSY, filled in, then
-// published with its id + 1; a thread that finds a name only reads.
+// The first sight of a name copies it to a small shared arena, so later
+// lookups do not touch old pieces of the log (which are already released). A
+// free slot is claimed with BUSY, filled in, then published with its id + 1; a
+// thread that finds a name only reads.
 struct Interner {
     slot: Vec<AtomicU16>,
     name: Vec<AtomicU64>, // by id: the name's address with its length above bit 48
+    arena: usize,         // 125 bytes at most per name, and 32 spare at the end
+    used: AtomicUsize,
     count: AtomicUsize,
 }
 
@@ -127,7 +135,14 @@ impl Interner {
 
     fn new() -> Self {
         let slot = (0..Self::SLOTS).map(|_| AtomicU16::new(0)).collect();
-        Interner { slot, name: (0..Self::SLOTS / 2).map(|_| AtomicU64::new(0)).collect(), count: AtomicUsize::new(0) }
+        let arena = unsafe { map(Self::SLOTS / 2 * 125 + 32, READ_WRITE, ANONYMOUS, -1) } as usize;
+        Interner {
+            slot,
+            name: (0..Self::SLOTS / 2).map(|_| AtomicU64::new(0)).collect(),
+            arena,
+            used: AtomicUsize::new(0),
+            count: AtomicUsize::new(0),
+        }
     }
 
     fn name(&self, id: usize) -> &'static [u8] {
@@ -147,7 +162,9 @@ impl Interner {
             if id == 0 && at.compare_exchange(0, Self::BUSY, Acquire, Acquire).is_ok() {
                 let new = self.count.fetch_add(1, Relaxed);
                 assert!(new < Self::SLOTS / 2, "too many endpoints"); // 11 bits
-                self.name[new].store(s.as_ptr() as u64 | (n as u64) << 48, Relaxed);
+                let copy = self.arena + self.used.fetch_add(n, Relaxed);
+                unsafe { (copy as *mut u8).copy_from_nonoverlapping(s.as_ptr(), n) };
+                self.name[new].store(copy as u64 | (n as u64) << 48, Relaxed);
                 at.store(new as u16 + 1, Release);
                 id = new as u16 + 1;
             }
@@ -162,8 +179,8 @@ impl Interner {
         }
     }
 }
-// Both names point into the log, where 32 bytes can always be read (the rest
-// of the line and the spare page follow), so a name of up to 32 bytes is
+// 32 bytes can always be read from either name (the rest of the line and the
+// spare page follow one, the arena the other), so a name of up to 32 bytes is
 // compared in one step.
 fn same(x: &[u8], s: &[u8]) -> bool {
     if x.len() != s.len() || s.len() > 32 {
@@ -176,24 +193,24 @@ fn same(x: &[u8], s: &[u8]) -> bool {
     }
 }
 
-// One hour's records from one thread, in a chain of 16 KB chunks carved in
-// order from a region the thread maps up front. The output file's pages count
-// toward peak memory as it is written, so chunks are handed back while it
-// grows: see Parser::release.
+// One hour's records from one thread, in a chain of 16 KB chunks. A chunk is
+// reused from the free list, or else carved in order from a region the thread
+// maps up front.
 const CAP: usize = (16384 - 16) / 4;
 #[repr(C)]
 struct Chunk {
     prev: *mut Chunk,
     n: u32,
-    hour: u32,
     rec: [u32; CAP],
 }
+
+static FREE: Mutex<Vec<usize>> = Mutex::new(Vec::new()); // chunks to reuse
 
 struct Parser {
     last: [*mut Chunk; HOURS],
     wide: Vec<Vec<(u32, u32)>>, // (latency, key) of the long ones
     next: *mut Chunk,           // where the next chunk is carved
-    kept: *mut Chunk,           // the first chunk not yet released
+    base: *mut Chunk,           // where the carving began
 }
 
 impl Parser {
@@ -203,16 +220,19 @@ impl Parser {
         let bytes = (len / 40 / CAP + 1 + HOURS) * size_of::<Chunk>();
         let next = unsafe { map(bytes, READ_WRITE, ANONYMOUS, -1).cast() };
         let wide = vec![vec![]; HOURS];
-        Parser { last: [null_mut(); HOURS], wide, next, kept: next }
+        Parser { last: [null_mut(); HOURS], wide, next, base: next }
     }
 
-    unsafe fn parse(&mut self, ids: &Interner, mut p: *const u8, end: *const u8) {
+    // Parses the piece and returns the lowest and highest hour in it.
+    unsafe fn parse(&mut self, ids: &Interner, mut p: *const u8, end: *const u8) -> (usize, usize) {
+        let (mut lo, mut hi) = (HOURS, 0);
         while p < end {
             _mm_prefetch::<_MM_HINT_T0>(p.add(2048).cast()); // the log is read once, in order
             // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
             let d = |i: usize| (*p.add(i) - b'0') as usize;
             let day = d(8) * 10 + d(9) + if d(6) == 0 { 0 } else { 31 };
             let h = (day - 30) * 24 + d(11) * 10 + d(12) - 18;
+            (lo, hi) = (lo.min(h), hi.max(h));
 
             // Spaces and newlines in the 64 bytes after the timestamp. Only an
             // endpoint near its 125-byte maximum pushes past the window.
@@ -234,30 +254,31 @@ impl Parser {
             }
             let c = &mut self.last[h];
             if c.is_null() || (**c).n as usize == CAP {
-                let fresh = self.next;
-                ((*fresh).prev, (*fresh).n, (*fresh).hour) = (*c, 0, h as u32);
+                let fresh = match FREE.lock().unwrap().pop() {
+                    Some(a) => a as *mut Chunk,
+                    None => {
+                        self.next = self.next.add(1);
+                        self.next.sub(1)
+                    }
+                };
+                ((*fresh).prev, (*fresh).n) = (*c, 0);
                 *c = fresh;
-                self.next = fresh.add(1);
             }
             (**c).rec[(**c).n as usize] = latency << KEY_BITS | key;
             (**c).n += 1;
         }
+        (lo, hi)
     }
 
-    // The log is in arrival order, so chunks are carved roughly hour by hour
-    // and hours finish in the same order: the run of chunks at the front whose
-    // hours are all finished grows steadily. Hand it back once it reaches 256
-    // KB, in one madvise, instead of one call (and TLB shootdown) per chunk.
-    unsafe fn release(&mut self, finished: &[AtomicBool]) {
-        let mut c = self.kept;
-        while c < self.next && finished[(*c).hour as usize].load(Acquire) {
-            c = c.add(1);
+    // Hands hour h's chunks to the free list, once they are read.
+    unsafe fn recycle(&mut self, h: usize) {
+        let mut c = std::mem::replace(&mut self.last[h], null_mut());
+        let mut free = FREE.lock().unwrap();
+        while !c.is_null() {
+            free.push(c as usize);
+            c = (*c).prev; // still ours: the lock is held
         }
-        if c.offset_from(self.kept) >= 16 || (c == self.next && c > self.kept) {
-            let len = c.offset_from(self.kept) as usize * size_of::<Chunk>();
-            madvise(self.kept.cast(), len, 4); // MADV_DONTNEED
-            self.kept = c;
-        }
+        self.wide[h].clear(); // not freed: a thread filling the hour too late may still use it
     }
 
     // Calls f(id, 5xx, latency) for every record of hour h.
@@ -288,6 +309,19 @@ unsafe fn put(o: *mut u8, mut x: u32) -> *mut u8 {
     }
 }
 
+// Runs the program again, without overlap, in this process's place. One thread
+// does it; any other waits to be replaced.
+fn restart() -> ! {
+    static ONCE: AtomicBool = AtomicBool::new(false);
+    if !ONCE.swap(true, Relaxed) {
+        let _ = std::process::Command::new("/proc/self/exe").arg("x").exec();
+        std::process::exit(1);
+    }
+    loop {
+        std::thread::park();
+    }
+}
+
 fn main() {
     // With transparent huge pages, a chunk region written only in part could
     // be backed by whole 2 MB pages and count against peak memory.
@@ -305,108 +339,150 @@ fn main() {
         }
         from_raw_parts(p, size)
     };
-    let mut cut = vec![size; PARTS + 1];
-    cut[0] = 0;
-    for t in 1..PARTS {
-        cut[t] = cut[t - 1].max(size * t / PARTS);
-        while cut[t] > 0 && cut[t] < size && log[cut[t] - 1] != b'\n' {
-            cut[t] += 1;
+    // Where piece k starts: the first line start at or after its share of the bytes.
+    let cut = |k: usize| {
+        let mut at = size * k / PARTS;
+        while at > 0 && at < size && log[at - 1] != b'\n' {
+            at += 1;
         }
-    }
+        at
+    };
 
     let parsers: Vec<_> = (0..THREADS).map(|_| Shared::new(Parser::new(size))).collect();
     let claim_parse = AtomicUsize::new(0);
     let ids = Interner::new();
-    let names = Shared::new((Vec::<&[u8]>::new(), Vec::<u32>::new())); // by id, and the ids by name
-    let finished: Vec<AtomicBool> = (0..HOURS).map(|_| AtomicBool::new(false)).collect();
-    let releasing = AtomicBool::new(false);
+    let rank = Shared::new(Vec::<u32>::new()); // by id: the place of its name in byte order
+    // Per piece: 0 until it is parsed, then its highest hour + 1.
+    let top: Vec<AtomicU8> = (0..PARTS).map(|_| AtomicU8::new(0)).collect();
+    let ranked = AtomicBool::new(false);
     let (claim, claim_text) = (AtomicUsize::new(0), AtomicUsize::new(0));
-    // Per hour: its groups as (endpoint, count, p50, p95, p99, errors, error ppm).
-    let lines: Vec<Shared<Vec<[u32; 7]>>> = (0..HOURS).map(|_| Shared::new(vec![])).collect();
+    // The restart keeps hours back until the whole log is parsed.
+    // The restart keeps hours back until the whole log is parsed. Before it, an
+    // hour taken too early can be read while a thread still fills it, which may
+    // panic; that too only ends in the restart.
+    let again = std::env::args_os().len() > 1;
+    if !again {
+        std::panic::set_hook(Box::new(|_| restart()));
+    }
+    let margin = if again { HOURS } else { 2 };
+    // Per hour, in 12 pages of its own: its groups as (endpoint, count, p50, p95, p99, errors),
+    // ended by a zero count. The pages go back to the kernel once the hour is written.
+    const SLOT: usize = Interner::SLOTS / 2 * size_of::<[u32; 6]>();
+    let lines = unsafe { map(HOURS * SLOT, READ_WRITE, ANONYMOUS, -1) } as usize;
     let at: Vec<AtomicU64> = (0..HOURS).map(|_| AtomicU64::new(0)).collect(); // size, then offset
     let text = Shared::new(null_mut::<u8>());
     let barrier = Barrier::new(THREADS);
 
-    let work = |t: usize| unsafe {
-        while let k @ 0..PARTS = claim_parse.fetch_add(1, Relaxed) {
-            parsers[t].get().parse(&ids, log.as_ptr().add(cut[k]), log.as_ptr().add(cut[k + 1]));
-            // Unmap the piece's whole pages now, in parallel, instead of all at exit.
-            let (from, to) = ((cut[k] + 4095) & !4095, cut[k + 1] & !4095);
-            if to > from {
-                madvise(log.as_ptr().add(from) as *mut c_void, to - from, 4); // MADV_DONTNEED
+    // Whether hour h is complete: the pieces finished from the front of the
+    // file hold a line of hour h + margin, or are all of it.
+    let ready = |h: usize| {
+        let mut m = 0;
+        for x in &top {
+            match x.load(Acquire) {
+                0 => return false,
+                v => m = m.max(v as usize - 1),
+            }
+            if m >= h + margin {
+                return true;
             }
         }
+        true
+    };
 
-        // Lines are printed in unsigned byte order of the name within an hour
-        // (a proper prefix first), so the ids are put in that order.
-        if barrier.wait().is_leader() {
-            let all: Vec<_> = (0..ids.count.load(Relaxed)).map(|e| ids.name(e)).collect();
-            let mut order: Vec<u32> = (0..all.len() as u32).collect();
-            order.sort_unstable_by_key(|&e| all[e as usize]);
-            *names.get() = (all, order);
-        }
-        barrier.wait();
-
-        let (names, order) = &*names.get();
-        let ne = names.len();
+    let work = |t: usize| unsafe {
+        const N: usize = Interner::SLOTS / 2; // endpoint ids
         // Reuse a worker-local cursor across all hours: no per-hour allocations.
         let (mut start, mut errors, mut cursor, mut latency) =
-            (vec![0u32; ne + 1], vec![0u32; ne], vec![0u32; ne], vec![]);
-        while let h @ 0..HOURS = claim.fetch_add(1, Relaxed) {
-            // Counting sort of the hour's latencies by endpoint rank: count into
-            // start[e + 1], prefix, then place each latency at its group's cursor.
-            start.fill(0);
-            errors.fill(0);
-            for ps in &parsers {
-                ps.get().each(h, |e, err, _| (start[e + 1], errors[e]) = (start[e + 1] + 1, errors[e] + err as u32));
-            }
-            for e in 0..ne {
-                start[e + 1] += start[e];
-            }
-            latency.resize(start[ne] as usize, 0);
-            cursor.copy_from_slice(&start[..ne]);
-            for ps in &parsers {
-                ps.get().each(h, |e, _, l| (latency[cursor[e] as usize], cursor[e]) = (l, cursor[e] + 1));
-            }
-            // An hour is finished once its records are copied out; one thread
-            // at a time then releases whatever chunks that frees.
-            finished[h].store(true, Release);
-            if !releasing.swap(true, Acquire) {
-                parsers.iter().for_each(|ps| ps.get().release(&finished));
-                releasing.store(false, Release);
-            }
-
-            let mut size = 0;
-            for &e in order {
-                let e = e as usize;
-                let a = &mut latency[start[e] as usize..start[e + 1] as usize];
-                let n = a.len();
-                if n == 0 {
+            (vec![0u32; N + 1], vec![0u32; N], vec![0u32; N], vec![]);
+        loop {
+            let h = claim.load(Relaxed);
+            if h < HOURS && ready(h) {
+                if claim.compare_exchange(h, h + 1, AcqRel, Relaxed).is_err() {
                     continue;
                 }
-                // Nearest rank p is index ceil(p * n / 100) - 1. Selecting the
-                // highest rank first leaves everything below it in front, so
-                // each later selection only needs the front part.
-                let r = [50, 95, 99].map(|p| (p * n + 99) / 100 - 1);
-                if n <= 64 {
-                    a.sort_unstable(); // most groups; cheaper than three selections
-                } else {
-                    a.select_nth_unstable(r[2]);
-                    a[..r[2]].select_nth_unstable(r[1]);
-                    a[..r[1]].select_nth_unstable(r[0]);
+                // Counting sort of the hour's latencies by endpoint id: count into
+                // start[e + 1], prefix, then place each latency at its group's cursor.
+                start.fill(0);
+                errors.fill(0);
+                for ps in &parsers {
+                    ps.get().each(h, |e, err, _| {
+                        (start[e + 1], errors[e]) = (start[e + 1] + 1, errors[e] + err as u32)
+                    });
                 }
-                let (p, err) = (r.map(|i| a[i]), errors[e]);
-                let ppm = (err as u64 * 1_000_000 / n as u64) as u32;
-                let line = [e as u32, n as u32, p[0], p[1], p[2], err, ppm];
-                // Label, name, six numbers each after a space, newline.
-                let digits: usize = line[1..].iter().map(|&x| width(x)).sum();
-                size += 21 + names[e].len() + 7 + digits;
-                lines[h].get().push(line);
-            }
-            at[h].store(size as u64, Relaxed);
-        }
+                for e in 0..N {
+                    start[e + 1] += start[e];
+                }
+                latency.resize(start[N] as usize, 0);
+                cursor.copy_from_slice(&start[..N]);
+                for ps in &parsers {
+                    ps.get().each(h, |e, _, l| (latency[cursor[e] as usize], cursor[e]) = (l, cursor[e] + 1));
+                }
+                parsers.iter().for_each(|ps| ps.get().recycle(h));
 
+                let mut size = 0;
+                let (slot, mut groups) = ((lines + h * SLOT) as *mut [u32; 6], 0);
+                for e in 0..N {
+                    let a = &mut latency[start[e] as usize..start[e + 1] as usize];
+                    let n = a.len();
+                    if n == 0 {
+                        continue;
+                    }
+                    // Nearest rank p is index ceil(p * n / 100) - 1. Selecting the
+                    // highest rank first leaves everything below it in front, so
+                    // each later selection only needs the front part.
+                    let r = [50, 95, 99].map(|p| (p * n + 99) / 100 - 1);
+                    if n <= 64 {
+                        a.sort_unstable(); // most groups; cheaper than three selections
+                    } else {
+                        a.select_nth_unstable(r[2]);
+                        a[..r[2]].select_nth_unstable(r[1]);
+                        a[..r[1]].select_nth_unstable(r[0]);
+                    }
+                    let (p, err) = (r.map(|i| a[i]), errors[e]);
+                    let ppm = (err as u64 * 1_000_000 / n as u64) as u32;
+                    let line = [e as u32, n as u32, p[0], p[1], p[2], err];
+                    // Label, name, six numbers each after a space, newline.
+                    let digits: usize = line[1..].iter().chain(&[ppm]).map(|&x| width(x)).sum();
+                    size += 21 + ids.name(e).len() + 7 + digits;
+                    slot.add(groups).write(line);
+                    groups += 1;
+                }
+                at[h].store(size as u64, Relaxed);
+            } else if let k @ 0..PARTS = claim_parse.fetch_add(1, Relaxed) {
+                let (from, to) = (cut(k), cut(k + 1));
+                let (lo, hi) = parsers[t].get().parse(&ids, log.as_ptr().add(from), log.as_ptr().add(to));
+                // A line of an hour already taken: the arrival order failed, so
+                // start over. Reading the counter with an exchange also makes
+                // this piece's records visible to whoever takes an hour later.
+                if lo < claim.fetch_add(0, AcqRel) {
+                    restart();
+                }
+                top[k].store(hi as u8 + 1, Release);
+                // Unmap the piece's whole pages now, in parallel, instead of all at exit.
+                let (from, to) = ((from + 4095) & !4095, to & !4095);
+                if to > from {
+                    madvise(log.as_ptr().add(from) as *mut c_void, to - from, 4); // MADV_DONTNEED
+                }
+            } else if h >= HOURS {
+                // Every piece is parsed, so the names are complete. Lines are printed
+                // in unsigned byte order of the name within an hour (a proper prefix
+                // first); one thread puts the ids in that order while the rest finish.
+                if !ranked.swap(true, Relaxed) {
+                    let all: Vec<_> = (0..ids.count.load(Relaxed)).map(|e| ids.name(e)).collect();
+                    let mut order: Vec<u32> = (0..all.len() as u32).collect();
+                    order.sort_unstable_by_key(|&e| all[e as usize]);
+                    *rank.get() = vec![0; all.len()];
+                    for (r, &e) in order.iter().enumerate() {
+                        rank.get()[e as usize] = r as u32;
+                    }
+                }
+                break;
+            } else {
+                std::hint::spin_loop();
+            }
+        }
         drop((start, errors, cursor, latency));
+
         if barrier.wait().is_leader() {
             let mut total = 0;
             for size in &at {
@@ -417,26 +493,37 @@ fn main() {
                 *text.get() = map(total as usize, READ_WRITE, 1, out); // MAP_SHARED
             }
         }
+        // The output's pages are about to fill; give the chunks back first.
+        let ps = parsers[t].get();
+        madvise(ps.base.cast(), ps.next.byte_offset_from(ps.base) as usize, 4); // MADV_DONTNEED
         barrier.wait();
 
         while let h @ 0..HOURS = claim_text.fetch_add(1, Relaxed) {
             let date = ["10-30", "10-31", "11-01", "11-02"][(h + 18) / 24];
             let label = format!("2026-{date}T{:02}:00:00Z ", (h + 18) % 24);
             let mut o = (*text.get()).add(at[h].load(Relaxed) as usize);
-            for line in std::mem::take(lines[h].get()) {
-                for part in [label.as_bytes(), names[line[0] as usize]] {
+            let base = (lines + h * SLOT) as *mut [u32; 6];
+            let groups = (0..SLOT / size_of::<[u32; 6]>()).take_while(|&k| (*base.add(k))[1] != 0).count();
+            let hour = from_raw_parts_mut(base, groups);
+            hour.sort_unstable_by_key(|l| rank.get()[l[0] as usize]);
+            for &[e, n, p50, p95, p99, err] in &*hour {
+                for part in [label.as_bytes(), ids.name(e as usize)] {
                     o.copy_from_nonoverlapping(part.as_ptr(), part.len());
                     o = o.add(part.len());
                 }
-                for &x in &line[1..] {
+                for x in [n, p50, p95, p99, err, (err as u64 * 1_000_000 / n as u64) as u32] {
                     *o = b' ';
                     o = put(o.add(1), x);
                 }
                 *o = b'\n';
                 o = o.add(1);
             }
+            madvise(base.cast(), SLOT, 4); // MADV_DONTNEED
         }
     };
-    std::thread::scope(|s| (0..THREADS).for_each(|t| _ = s.spawn(move || work(t))));
+    // A failed spawn is ignored: it can only be the restart replacing the process.
+    std::thread::scope(|s| {
+        (0..THREADS).for_each(|t| _ = std::thread::Builder::new().spawn_scoped(s, move || work(t)))
+    });
     std::process::exit(0); // skip the destructors
 }

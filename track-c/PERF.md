@@ -81,3 +81,20 @@ exiting process alone. The board measured 42.15 and 42.35 ms (72.847 points)
 against 44.2-45.0 ms for the same source without it. Longer read-ahead (2 KB and
 4 KB, against 1.5 KB) scored lower, as did aligning the per-country counters and
 zero-allocating the name tables.
+
+## November 2: window parser, bucket probe (local measurements only)
+
+Local numbers are paired, interleaved Docker runs on a noisy shared machine (cores 0-11, official
+timer); they rank candidates but are not board numbers. All kept changes match the official full
+seed-1 hash, the official tiny/sample references, and an adversarial generator (quotes, `"""x"`
+names, CR/LF inside quotes, 17/24/32/33-byte names, shared 8- and 16-byte prefixes, a 65,541-byte
+name, BOMs, missing regions, 1-40 region files).
+
+- Kept: one 128-byte window per record (quote parity by carry-less prefix xor), about 3-5% faster.
+- Kept: drop the 1 MB `meta` array by keeping a long name's length in its slot, 1 MB less memory.
+- Kept: probe a 4-slot, 64-byte bucket with two vector compares, about 6% faster.
+- Kept: regions.csv loaded by all threads in parallel, about 3% faster (the serial load was ~2 ms).
+- Kept: unchecked window reads and a BZHI quote count; branch-free name masks.
+- Rejected: strided chunk claim order (spreads first page faults over page-table pages), neutral;
+  64 chunks per thread, 5 ms slower; 16 per thread, same; `MADV_POPULATE_READ` before each chunk, 6 ms
+  slower on a read-only floor test.
