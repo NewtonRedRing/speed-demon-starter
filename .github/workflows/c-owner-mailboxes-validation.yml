@@ -1,0 +1,54 @@
+name: C owner mailboxes full-seed comparison
+on:
+  pull_request:
+    branches: [speed-demon]
+    paths:
+      - 'track-c/**'
+      - '.github/workflows/c-owner-mailboxes-validation.yml'
+permissions:
+  contents: read
+jobs:
+  validate:
+    if: github.head_ref == 'experiment/track-c-owner-mailboxes-20261102'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compile original and mailbox candidate
+        run: |
+          git show origin/speed-demon:track-c/main.rs > /tmp/c_base.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=native -C panic=abort -C codegen-units=1 -o /tmp/c_base /tmp/c_base.rs
+          rustc --edition=2024 -C opt-level=3 -C target-cpu=alderlake -C panic=abort -C codegen-units=1 -o /tmp/c_cand track-c/main.rs
+      - name: Generate full official seed 1
+        run: |
+          python3 track-c/pgo_gen.py --seed 1 --scale full --out /tmp/c_data
+          sudo mkdir -p /data /out
+          sudo ln -sf /tmp/c_data/records.csv /data/records.csv
+          sudo ln -sf /tmp/c_data/regions.csv /data/regions.csv
+          sudo chmod 777 /out
+      - name: Exact output checksum and randomized paired timings
+        run: |
+          python3 - <<'PY'
+          import hashlib,subprocess,random,statistics,time
+          cmds=['/tmp/c_base','/tmp/c_cand']
+          expected='d8088b1cd42ba1338b1345b107b55db7b96ef1f5066f3ff64fd26a8912a0f536'
+          for cmd in cmds:
+              subprocess.run([cmd],check=True)
+              with open('/out/aggregates.txt','rb') as f: got=hashlib.file_digest(f,'sha256').hexdigest()
+              assert got==expected,(cmd,got,expected)
+              print('FULL_SHA_PASS',cmd,got,flush=True)
+          r={c:[] for c in cmds};rng=random.Random(20261102)
+          for i in range(10):
+              pair=cmds[:];rng.shuffle(pair)
+              for cmd in pair:
+                  t=time.perf_counter();subprocess.run([cmd],check=True)
+                  r[cmd].append(1000*(time.perf_counter()-t))
+          for c in cmds: print('MEDIAN_MS',c,statistics.median(r[c]),r[c],flush=True)
+          print('SPEEDUP',statistics.median(r[cmds[0]])/statistics.median(r[cmds[1]]),flush=True)
+          PY
+      - name: Peak RSS (nonofficial)
+        run: |
+          /usr/bin/time -f 'BASE_MAX_RSS_KB %M' /tmp/c_base
+          /usr/bin/time -f 'CAND_MAX_RSS_KB %M' /tmp/c_cand
