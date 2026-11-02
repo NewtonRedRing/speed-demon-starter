@@ -1,0 +1,93 @@
+name: Track C exact Rust name-hash and batching sweep
+on:
+  push:
+    branches: [experiment/track-c-name-batch-sweep-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+jobs:
+  sweep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build nine Rust name-table, batch and shard variants
+        run: |
+          set -euo pipefail
+          git show origin/speed-demon:track-c/main.rs >/tmp/c_base.rs
+          python3 - <<'PY'
+          import pathlib,subprocess
+          src=pathlib.Path('/tmp/c_base.rs').read_text()
+          assert 'const NAME_SLOTS: usize = 1 << 17;' in src
+          assert 'const BATCH: usize = 16;' in src
+          assert 'const CHUNKS_PER_THREAD: usize = 32;' in src
+          variants=[('base',17,16,32),('names18',18,16,32),('names19',19,16,32),('batch8',17,8,32),('batch24',17,24,32),('batch32',17,32,32),('chunks16',17,16,16),('chunks64',17,16,64),('chunks128',17,16,128)]
+          pathlib.Path('/tmp/c_variants.txt').write_text('\n'.join(x[0] for x in variants)+'\n')
+          for name,slots,batch,chunks in variants:
+              t=src.replace('const NAME_SLOTS: usize = 1 << 17;',f'const NAME_SLOTS: usize = 1 << {slots};').replace('const BATCH: usize = 16;',f'const BATCH: usize = {batch};').replace('const CHUNKS_PER_THREAD: usize = 32;',f'const CHUNKS_PER_THREAD: usize = {chunks};')
+              p=pathlib.Path('/tmp/c_'+name+'.rs');p.write_text(t)
+              subprocess.run(['rustc','--edition=2021','-C','opt-level=3','-C','target-cpu=haswell','-C','codegen-units=1','-C','panic=abort','-o','/tmp/c_'+name,str(p)],check=True)
+              print('BUILT',name,'slots',2**slots,'batch',batch,'chunks per thread',chunks,flush=True)
+          PY
+      - name: Verify exact outputs on generated tiny, sample and full corpus
+        run: |
+          set -euo pipefail
+          sudo install -d -m 777 /out
+          for seed in 2 7 42; do
+            python3 track-c/pgo_gen.py --seed "$seed" --scale tiny --out "/tmp/c-tiny-$seed"
+            sudo ln -sfn "/tmp/c-tiny-$seed" /data
+            /tmp/c_base
+            cp /out/aggregates.txt /tmp/c_expected
+            while read -r name; do
+              /tmp/c_"$name"
+              cmp /tmp/c_expected /out/aggregates.txt
+            done </tmp/c_variants.txt
+            echo "PASS tiny seed=$seed"
+          done
+          python3 track-c/pgo_gen.py --seed 103 --scale sample --out /tmp/c-sample
+          sudo ln -sfn /tmp/c-sample /data
+          /tmp/c_base
+          cp /out/aggregates.txt /tmp/c_expected
+          while read -r name; do
+            /tmp/c_"$name"
+            cmp /tmp/c_expected /out/aggregates.txt
+          done </tmp/c_variants.txt
+          echo "PASS sample seed=103"
+          python3 track-c/pgo_gen.py --seed 1 --scale full --out /tmp/c-full
+          sudo ln -sfn /tmp/c-full /data
+          /tmp/c_base
+          cp /out/aggregates.txt /tmp/c_expected
+          echo "FULL_BASELINE_SHA256 $(sha256sum /out/aggregates.txt)"
+          while read -r name; do
+            /tmp/c_"$name"
+            cmp /tmp/c_expected /out/aggregates.txt
+            echo "PASS full exact $name"
+          done </tmp/c_variants.txt
+      - name: Twenty-four randomized full-run rounds
+        run: |
+          python3 - <<'PY'
+          import random,subprocess,statistics,time
+          names=open('/tmp/c_variants.txt').read().split()
+          xs={n:[] for n in names}
+          for trial in range(24):
+              seq=names.copy()
+              random.Random(20261102+trial*113).shuffle(seq)
+              for name in seq:
+                  t=time.perf_counter()
+                  subprocess.run(['/tmp/c_'+name],check=True,stdout=subprocess.DEVNULL)
+                  xs[name].append(1000*(time.perf_counter()-t))
+          base=statistics.median(xs['base'])
+          for name in sorted(names,key=lambda k:statistics.median(xs[k])):
+              med=statistics.median(xs[name])
+              print(f'VARIANT {name} median_ms={med:.3f} ratio={med/base:.5f} samples='+str([round(t,3) for t in xs[name]]),flush=True)
+          PY
+      - name: Peak RSS for each variant
+        run: |
+          while read -r name; do
+            /usr/bin/time -f "RSS_KB $name %M" /tmp/c_"$name"
+          done </tmp/c_variants.txt
