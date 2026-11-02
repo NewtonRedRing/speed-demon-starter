@@ -5,6 +5,50 @@ branch. Every track is implemented in Rust with **zero runtime dependencies**.
 Each `track-a/` to `track-d/` is an independent, offline, digest-pinned
 Docker submission. Dataset files are **never embedded** in submission images.
 
+## Evidence-based submission selection
+
+The **official public practice board** scores performance and efficiency; the
+final championship additionally includes independent human review. The
+organizer records `speed-demon` at the November 2, 2026 **15:00 UTC**
+freeze and scores a previously unseen holdout. No holdout result is
+available at submission time.
+
+Historical *best* public practice runs recorded through the
+[12:50 UTC Oracle audit](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41447919837):
+
+| Track | Public best | K | Wall time | Verified run |
+|---|---:|---:|---:|---|
+| A | **84.279208** | 48.482406 | 21.662 ms | `run-d45aa4ea3d05` |
+| B | **72.172141** | 27.761494 | 183.883 ms | `run-f979478c0277` |
+| C | **74.320728** | 30.648876 | 36.405 ms | `run-6dcd8ad2012f` |
+| D | **68.363711** | 23.295618 | 168.724 ms | `run-f0a2ded6fcfd` |
+
+Those historical results **are not all from the same commit**. The D high
+watermark used an experimental two-level wheel queue, but another
+official wheel run regressed significantly. The submission therefore
+retains the more stable exact **radix heap**; do not infer that D's
+historical best used the current radix source.
+
+The selected Rust source is verified against previously scored,
+all-gates-passing files:
+
+| Track | Selected `main.rs` Git blob | Algorithm |
+|---|---|---|
+| A | `4559a57b037785452dcf64f4e098456440f96cd8` | Fused HARP parser, 8K exact interner, 12 workers |
+| B | `c7dc80d3413beb6d0303bc376fe95e816a2b7b1c` | Exact query-conditioned inverted index, sparse posting lists + bitmaps |
+| C | `e6782b241cd8f07bca5b114fdb05019a483f91e7` | Quote-correct SIMD FALCON-C join + aggregation |
+| D | `46bfcda6d77a5bfb6a72a4baf108de4d71c81a1c` | CSR, BFS locality renumbering, exact radix-heap Dijkstra |
+
+Every track's `PERF.md` distinguishes reproducible local experiments from
+official practice-board scores, provides real run IDs, and explains
+rejected alternatives. A/B/C retained implementations match their
+historical best-scored source blobs; D retains the verified radix
+implementation rather than its variable wheel alternative.
+The externally conducted *build, correctness, sandbox and timeout*
+gates passed for these recorded candidate sources. No submitted
+container uses precomputed answers, hidden data, or runtime network
+access. All images use digest-pinned build/runtime bases.
+
 ## Local verification
 
 Inputs are the organizer's published full seed-1 datasets, kept in `data/`
@@ -42,8 +86,11 @@ trains and uses PGO inside the offline build, using a generator permitted
 by the official rules. Do not confuse local test data with build-time PGO
 training data.
 
-The final machine score is the geometric mean of the best three eligible
-track totals; each track's correctness and sandbox gates must pass.
+The final **championship score** is the geometric mean of the team's best
+three track **totals**, combining 65% machine performance and 35% human
+judging for each track. All tracks must independently pass the correctness
+and sandbox gates. The public board displays machine performance, not
+final championship points.
 
 
 
