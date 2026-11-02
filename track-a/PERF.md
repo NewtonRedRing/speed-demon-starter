@@ -687,3 +687,53 @@ from non-scoring hardware; **retain the 12-worker HARP parser**.
 
 The code freeze and holdout are separate from the public board: these
 are documented observations, not predicted final results.
+
+## November 2: percentile crossover sweep and rejected regression
+
+**Hypothesis:** Change the per-(endpoint,hour) crossover between an exact full
+sort and three exact nested nearest-rank selections. The scored HARP code
+sorts groups with `n <= 64`; larger groups use `select_nth_unstable`.
+This choice affects small-group CPU work but never changes the percentile
+definition. This was an **isolated experiment**, not a production change.
+
+**Correctness precondition discovered.** Trying crossover 16 or 32 with
+the existing nested selection sequence crashed during the full-seed gate:
+`partition_at_index index 17 greater than length of slice 17`.
+For some small `n`, the p95 and p99 nearest-rank indices coincide;
+selecting index p95 inside the shorter prefix ending at index p99 is
+invalid. Keeping the lower limit at **64** avoids the unsafe rank overlap.
+Changing the nested selection algorithm would require an independent
+correctness proof and new validation before smaller cutoffs could be tried.
+
+**Broad CI sweep:** [Actions 41450808935](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41450808935)
+compiled Rust/Haswell variants from the same scored source with cutoff
+64/80/96/112/128/160/192/256 and identical optimization flags. All
+**256 full organizer seed-1 executions** matched official SHA256
+`495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`;
+tiny generator seeds 2/7/42/2026 and sample seed 103 matched the
+unaltered baseline byte-for-byte. The 32 randomized interleaved full-run
+rounds measured these runner-specific medians, in ms:
+
+| cutoff | 64 | 80 | 96 | 112 | 128 | 160 | 192 | 256 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| median | 86.403 | 86.525 | 84.754 | 86.196 | 86.218 | 85.375 | 85.946 | 85.698 |
+
+The best-looking 96 cutoff had paired baseline/candidate median speed
+ratio **1.019674**, but bootstrap 95% interval **[0.996301, 1.026205]**
+included no benefit (19/30 wins). This is not a verified speedup.
+
+**Independent confirmation:** [Actions 41451120356](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41451120356)
+passed **144 more exact full-input outputs** in 72 randomized paired
+rounds. After three warmups, median process times were **106.655381 ms
+for the 64 baseline** and **107.454086 ms for 96**. Median memory was
+28,548 versus 29,048 KB. The paired speed ratio was **0.998315**,
+bootstrap 95% **[0.985290, 1.005412]**, with 32/69 wins.
+The small putative advantage did **not** reproduce. The measurement
+machine was GitHub Actions, not the official i5-13500 scoring environment.
+
+**Decision: REJECT crossover 96 and all other unproven cutoffs.**
+Keep 64 and the verified 12-worker HARP source with exact blob
+`4559a57b037785452dcf64f4e098456440f96cd8`. Do not report
+a performance gain or schedule an official score trial. The
+unpromoted experiments remain on branch
+`experiment/track-a-percentile-crossover-20261102`.
