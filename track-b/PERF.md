@@ -306,3 +306,43 @@ source remains the officially scored, protected submission**. The public
 best remains run `run-f979478c0277`: 72.172141 points, 183.883 ms,
 46,641,152 bytes, S=717 and D=1. Competing hypotheses are not promoted
 from GitHub-hosted benchmarks alone.
+
+
+## November 2 — Nine-worker independent full-seed disconfirmation
+
+**Objective.** Test whether the promising 9-worker source from the
+original 8–12 worker sweep retained its small apparent speed/memory
+gain on a fresh GitHub-hosted benchmark. Preserve exact 15-bit
+per-shard document-offset safety checks, unmodified query/phrase
+semantics, same Rust code generation and zero new dependencies.
+
+**Hypothesis and test source:** isolated research
+[PR #68](https://github.com/NewtonRedRing/speed-demon-starter/pull/68),
+code commit `98e06ba54e6c06872ef59b38ab5ca6b31a73697d`,
+changes `const THREADS: usize = 12` to `9` only.
+[Actions run 41450937508](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41450937508)
+passed compiled Rust, organizer-format tiny seeds 7/23/42,
+sample seed 103, and independently generated **full seeds 1/23/42**,
+matching the approved twelve-worker output byte-for-byte.
+Full seed1 SHA256 exactly matched the published digest
+`f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927`.
+This confirms representative generated-input correctness, not every
+possible hidden input.
+
+**Repeatability result:** 36 randomized interleaved complete full
+seed1 runs per binary on another GitHub-hosted runner gave
+baseline twelve-worker median **773.135 ms** versus nine-worker
+**783.953 ms**, **1.40% slower** (only **1/36** paired wins).
+Eight independent RSS observations: 12-worker median **294,638 KB**,
+9-worker **296,236 KB** (**0.54% higher**).
+The former 20-run 9-worker apparent win (638.239 ms vs 654.079 ms)
+did not reproduce, highlighting run-machine and contention variance.
+
+**Decision: REJECT and do not score/promote.** Both observable
+time and memory regressed in the independent confirmation.
+Keep the official best, **twelve-worker** Rust source
+`c7dc80d3413beb6d0303bc376fe95e816a2b7b1c`,
+and reserve 8/9/10-worker ideas for future reproducible
+score-equivalent profiling. No changes to the scored algorithm,
+Dockerfile or other tracks were made. The exact experiment branch
+and CI log remain available for review.
