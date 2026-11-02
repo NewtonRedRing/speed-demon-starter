@@ -226,3 +226,24 @@ source-only cosmetic contest change was made.
 Next research: CPU profiling of the name-table probe and
 RMW cache-to-cache traffic, then benchmark a genuinely different
 exact-name data layout, not marginal SIMD-width or prefetch tweaks.
+
+## November 2: exact BMI2 PEXT 17-byte key experiment
+
+Experiment branch: experiment/track-c-pext17-20261102; validation
+[run 41432699497](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41432699497).
+A reversible 119-bit representation of exactly 17 raw ASCII name bytes uses
+BMI2 PEXT on two 8-byte words, plus the final byte, with a separate tag
+in the 128-bit name slot. Unlike a hash fingerprint, this is injective
+for the supported 7-bit ASCII input. Other lengths retain the existing
+byte-for-byte arena path. The aim was to avoid long-name arena traffic
+on 17-byte keys. The official full seed-1 hash and tiny seeds
+2, 7, 42 and 2026 all passed against the official Python reference.
+
+Paired non-PGO GitHub Actions medians: baseline 215.247 ms,
+PEXT17 216.295 ms (candidate 0.5% slower). Rejected, since the
+candidate also adds measured source lines. No official leaderboard
+submission was made for this change.
+
+All November 2 follow-on performance experiments remain off the
+speed-demon contest source. The best official board run remains
+run-70f424aa22a8: 73.956052 points, 37.853 ms, 10,215,424 B.
