@@ -262,42 +262,33 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
 /// With phrase[j] at text [s, s + len), do the tokens before and after it
 /// spell the rest of the phrase? The document's TAB and LF bound the search.
 #[inline(never)] // rare (anchor tokens only); inlined it keeps the per-token code out of line
-unsafe fn around(terms: &Terms, s: *const u8, len: usize, phrase: &[u32], j: usize) -> bool {
-    let is = |p: *const u8, q: *const u8, id: u32| {
+unsafe fn around(qtext: *const u8, s: *const u8, len: usize, phrase: &[u32], j: usize) -> bool {
+    // Exact (query byte offset, length) pairs avoid a hash table probe for
+    // each neighbor of an anchor. Case folding remains byte-identical.
+    let is = |p: *const u8, q: *const u8, i: usize| {
         let n = q.offset_from(p) as usize;
-        n <= 32 && terms.lookup(p, n) == id
+        n == phrase[2 * i + 1] as usize && n <= 32 &&
+            same(key(p, n), key(qtext.add(phrase[2 * i] as usize), n))
     };
     let mut q = s;
-    for &id in phrase[..j].iter().rev() {
+    for i in (0..j).rev() {
         while !WORD[*q.sub(1) as usize] {
-            if *q.sub(1) == b'\t' {
-                return false;
-            }
+            if *q.sub(1) == b'\t' { return false; }
             q = q.sub(1);
         }
         let end = q;
-        while WORD[*q.sub(1) as usize] {
-            q = q.sub(1);
-        }
-        if !is(q, end, id) {
-            return false;
-        }
+        while WORD[*q.sub(1) as usize] { q = q.sub(1); }
+        if !is(q, end, i) { return false; }
     }
     q = s.add(len);
-    for &id in &phrase[j + 1..] {
+    for i in j + 1..phrase.len() / 2 {
         while !WORD[*q as usize] {
-            if *q == b'\n' {
-                return false;
-            }
+            if *q == b'\n' { return false; }
             q = q.add(1);
         }
         let start = q;
-        while WORD[*q as usize] {
-            q = q.add(1);
-        }
-        if !is(start, q, id) {
-            return false;
-        }
+        while WORD[*q as usize] { q = q.add(1); }
+        if !is(start, q, i) { return false; }
     }
     true
 }
@@ -474,14 +465,19 @@ fn main() {
     let mut terms = Terms { tab, long: vec![], n: 0, ring: [(unsafe { _mm_setzero_si128() }, 0, 0); 8], fed: 0 };
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
-    let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
+    let (mut spans, mut ids, mut ops, mut qoffsets, mut qlens) = (vec![], vec![], vec![], vec![], vec![]);
     for q in qtext.split(|&b| b == b'\n').filter(|q| !q.is_empty()) {
         let (phrase, from) = (q[0] == b'P', ids.len() as u32);
         let body = &q[if phrase { 8 } else { 5 }..q.len() - phrase as usize];
         for (k, word) in body.split(|&b| b == b' ').enumerate() {
             match !phrase && k % 2 == 1 {
                 true => *ops.last_mut().unwrap() = word[0],
-                false => (terms.push(word, &mut ids), ops.push(0)).1,
+                false => {
+                    terms.push(word, &mut ids);
+                    qoffsets.push((word.as_ptr() as usize - qtext.as_ptr() as usize) as u32);
+                    qlens.push(word.len() as u32);
+                    ops.push(0);
+                },
             }
         }
         spans.push((phrase, from, ids.len() as u32));
@@ -561,7 +557,9 @@ fn main() {
         astart.resize(a as usize - a0 + 1, recs.len());
         let span = spans[q as usize];
         recs.extend([q, j, span.2 - span.1]);
-        recs.extend_from_slice(&ids[span.1 as usize..span.2 as usize]);
+        for i in span.1 as usize..span.2 as usize {
+            recs.extend([qoffsets[i], qlens[i]]);
+        }
     }
     astart.resize(nkeep - a0 + 1, recs.len());
     drop((df, order, new, in_bool, anchor, anchored));
@@ -596,8 +594,8 @@ fn main() {
                 let k = i - a0;
                 let mut at = &recs[astart[k]..astart[k + 1]];
                 while let [q, j, n, rest @ ..] = at {
-                    let (phrase, after) = rest.split_at(*n as usize);
-                    if unsafe { around(&terms, s, len, phrase, *j as usize) } {
+                    let (phrase, after) = rest.split_at(*n as usize * 2);
+                    if unsafe { around(qtext.as_ptr(), s, len, phrase, *j as usize) } {
                         mine.push((*q, doc));
                     }
                     at = after;
