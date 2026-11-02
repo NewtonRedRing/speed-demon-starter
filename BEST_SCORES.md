@@ -1,9 +1,9 @@
 # Speed Demon 2026 — verified best public scores
 
 Team: `NewtonRedHeat`. These are the historical **best per-track** official board
-runs as confirmed by the live board feed on **2026-11-02 11:05:52 UTC**,
+runs as confirmed by the live board feed on **2026-11-02 11:20:19 UTC**,
 independently recorded in
-[the board audit CI run](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41433888424).
+[the board audit CI run](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41436015800).
 The current submission source for each track was separately compared against
 the corresponding source in GitHub. Runs on the merged branch can score
 differently due to timing/memory variance. The final holdout determines final
@@ -11,23 +11,25 @@ results.
 
 | Track | Best public-board commit | Points | Runtime | Peak memory | Official gates |
 |---|---|---:|---:|---:|---|
-| A — Ingest | `c0053b4a77ec28817b83af2e6ee7492b10ae8c22` | **83.717827** | **22.451 ms** | 15,622,144 bytes | passed |
+| A — Ingest | `9bb3f6a76188cd39fefd95b769f53135f1341b0f` | **84.036874** | **22.229 ms** | 14,880,768 bytes | passed |
 | B — Index | `c9f733bb7849269b600358483cc1c06936318bb6` | **72.172141** | **183.883 ms** | 46,641,152 bytes | passed |
-| C — Join | `63ec07b1d10a6cd7fd9a169f9b9a80d684a03dd8` | **73.956052** | **37.853 ms** | 10,215,424 bytes | passed |
+| C — Join | `c0053b4a77ec28817b83af2e6ee7492b10ae8c22` | **73.965629** | **37.104 ms** | 10,715,136 bytes | passed |
 | D — Traverse | `6759b53eda0ced88ef30a8d0f9b77654a0c8686b` | **68.316671** | **174.011 ms** | 76,247,040 bytes | passed |
 
 ## Verified source selection on speed-demon
 
-At the 2026-11-02 11:05 UTC audit, `speed-demon` was at
-`c0053b4a77ec28817b83af2e6ee7492b10ae8c22`. The exact
+After the 2026-11-02 11:21 UTC D regression rollback, `speed-demon`
+was at `635c41cbfa8a7144e76f5fcdf2356cd73865cade`. The official
+best-score feed below reflects individual historical runs, not a single
+four-track run. The exact
 `main.rs` blob SHA-1s for that branch were checked against GitHub refs:
 
 | Track | Submission main.rs blob | Identical to scored reference |
 |---|---|---|
-| A | `da36728dd32ec3c0449fc23966d6e5cb6604d6ea` | `c0053b4` — HARP exact-hour cache |
+| A | `da36728dd32ec3c0449fc23966d6e5cb6604d6ea` | `9bb3f6a` — same HARP exact-hour cache |
 | B | `c7dc80d3413beb6d0303bc376fe95e816a2b7b1c` | `c9f733b` and `126b408` |
-| C | `e6782b241cd8f07bca5b114fdb05019a483f91e7` | `63ec07b` — FALCON-C |
-| D | `46bfcda6d77a5bfb6a72a4baf108de4d71c81a1c` | `6759b53` — historical verified best |
+| C | `e6782b241cd8f07bca5b114fdb05019a483f91e7` | `c0053b4` and `63ec07b` — FALCON-C |
+| D | `46bfcda6d77a5bfb6a72a4baf108de4d71c81a1c` | `6759b53` — restored historical verified best |
 
 Track A's newly promoted HARP hour-prefix cache passed the full official
 correctness and sandbox gates at board run `run-1c2bb20981c8`. Its previous
@@ -46,3 +48,11 @@ PEXT and CRC variants did not outperform the retained FALCON-C version.
 No holdout results are claimed. Source and scoring context:
 [official board](https://speeddemon.dev/board/) and
 [public board feed](https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/board/board.json).
+
+## November 2, 11:20 UTC verified-machine-score update
+
+The official public board feed recheck at [GitHub Actions run 41436015800](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41436015800) recorded the latest best A run as **84.036874** on commit `9bb3f6a`, and the best C as **73.965629** on commit `c0053b4`. Their source files match the retained implementations; these are timing variance across identical source versions, not claimed new changes. Best B remained **72.172141**.
+
+**D regression and correction:** A novel two-level exact wheel queue was locally about 7.25% faster, but the official board run of `9bb3f6a` scored **67.732133**, **177.210 ms**, 77,762,560 B and 532 source lines, versus historical `6759b53` at **68.316671**, **174.011 ms**, 76,247,040 B and 485 source lines. All gates passed, but the candidate was worse on every measured score axis on that board test. Its Track D source was therefore replaced with the exact officially verified radix-heap source in commit `635c41c`. No cross-track code was changed.
+
+A new code candidate should not be promoted solely because local GitHub Actions timing improves: require the full official K / points outcome, plus correctness and source scope review.
