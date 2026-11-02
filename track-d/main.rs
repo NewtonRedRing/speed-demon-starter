@@ -124,11 +124,12 @@ struct RadixHeap {
     b: Vec<Vec<(u64, u32)>>,
     len: usize,
     last: u64,
+    nonempty: u64, // bucket i >= 1 is bit i-1; bucket zero uses its Vec
 }
 
 impl RadixHeap {
     fn new() -> Self {
-        RadixHeap { b: (0..65).map(|_| Vec::new()).collect(), len: 0, last: 0 }
+        RadixHeap { b: (0..65).map(|_| Vec::new()).collect(), len: 0, last: 0, nonempty: 0 }
     }
     fn slot(&self, k: u64) -> usize {
         (64 - (k ^ self.last).leading_zeros()) as usize
@@ -136,17 +137,21 @@ impl RadixHeap {
     fn push(&mut self, k: u64, u: u32) {
         let s = self.slot(k);
         unsafe { self.b.get_unchecked_mut(s) }.push((k, u));
+        if s != 0 { self.nonempty |= 1u64 << (s - 1); }
         self.len += 1;
     }
     /// The smallest key (the heap must not be empty).
     fn top(&mut self) -> u64 {
         if self.b[0].is_empty() {
-            let i = (1..65).find(|&i| !self.b[i].is_empty()).unwrap();
+            // A constant-time bit-scan replaces a linear search over 64 buckets.
+            let i = self.nonempty.trailing_zeros() as usize + 1;
+            self.nonempty &= !(1u64 << (i - 1));
             let mut v = std::mem::take(&mut self.b[i]);
             self.last = v.iter().map(|e| e.0).min().unwrap();
             for &(k, u) in &v {
                 let s = self.slot(k);
                 self.b[s].push((k, u));
+                if s != 0 { self.nonempty |= 1u64 << (s - 1); }
             }
             v.clear();
             self.b[i] = v;
@@ -160,7 +165,7 @@ impl RadixHeap {
     }
     fn clear(&mut self) {
         self.b.iter_mut().for_each(Vec::clear);
-        (self.len, self.last) = (0, 0);
+        (self.len, self.last, self.nonempty) = (0, 0, 0);
     }
 }
 
