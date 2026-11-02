@@ -1,0 +1,86 @@
+name: Track A exact AVX2 streaming prefetch distance experiment
+on:
+  push:
+    branches: [experiment/track-a-prefetch-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+jobs:
+  sweep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile baseline and six independent Rust instruction variants
+        run: |
+          set -euo pipefail
+          git show origin/speed-demon:track-a/main.rs >/tmp/a_baseline.rs
+          python3 - <<'PY'
+          import pathlib,subprocess
+          source=pathlib.Path('/tmp/a_baseline.rs').read_text()
+          line='_mm_prefetch::<_MM_HINT_T0>(p.add(2048).cast());'
+          assert source.count(line)==1
+          choices=[('base',2048),('off',0),('p512',512),('p1024',1024),('p4096',4096),('p8192',8192)]
+          pathlib.Path('/tmp/a_variants').write_text('\n'.join(n for n,_ in choices)+'\n')
+          for name,dist in choices:
+              replacement='{}' if dist==0 else f'_mm_prefetch::<_MM_HINT_T0>(p.add({dist}).cast());'
+              path=pathlib.Path(f'/tmp/a_{name}.rs')
+              path.write_text(source.replace(line,replacement))
+              subprocess.run(['rustc','--edition=2021','-C','opt-level=3','-C','target-cpu=haswell','-C','codegen-units=1','-C','panic=abort','-o','/tmp/a_'+name,str(path)],check=True)
+              print('BUILT',name,dist,flush=True)
+          PY
+      - name: Exact output across multi-seed generated inputs
+        run: |
+          set -euo pipefail
+          sudo install -d -m 777 /out
+          for spec in 'tiny 2' 'tiny 7' 'tiny 42' 'sample 103' 'full 1'; do
+            set -- $spec
+            python3 track-a/pgo_gen.py --seed "$2" --scale "$1" --out "/tmp/a-$1-$2"
+            sudo ln -sfn "/tmp/a-$1-$2" /data
+            /tmp/a_base
+            cp /out/summary.txt /tmp/a_expected
+            while read -r variant; do
+              /tmp/a_"$variant"
+              cmp /tmp/a_expected /out/summary.txt
+            done </tmp/a_variants
+            echo "PASS exact $1 seed=$2"
+          done
+          sha256sum /tmp/a_expected
+          python3 - <<'PY'
+          import hashlib
+          want='495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
+          got=hashlib.sha256(open('/tmp/a_expected','rb').read()).hexdigest()
+          assert got==want,(want,got)
+          print('PASS official full seed1 SHA256',flush=True)
+          PY
+      - name: 36 randomized complete-dataset repetitions per variant
+        run: |
+          python3 - <<'PY'
+          import subprocess,random,time,statistics
+          names=open('/tmp/a_variants').read().split()
+          times={n:[] for n in names}
+          for trial in range(36):
+              order=names.copy()
+              random.Random(trial*743+20261102).shuffle(order)
+              for name in order:
+                  start=time.perf_counter()
+                  subprocess.run(['/tmp/a_'+name],check=True,stdout=subprocess.DEVNULL)
+                  times[name].append((time.perf_counter()-start)*1000)
+          b=statistics.median(times['base'])
+          for name in sorted(names,key=lambda n:statistics.median(times[n])):
+              v=times[name]
+              m=statistics.median(v)
+              print(f'VARIANT {name} median_ms={m:.4f} ratio={m/b:.5f} paired_better_than_base={sum(x>y for x,y in zip(times["base"],v))} values='+str([round(x,2) for x in v]),flush=True)
+          PY
+      - name: Repeat peak RSS samples
+        run: |
+          for rep in 1 2 3 4 5 6; do
+            while read -r name; do
+              /usr/bin/time -f "RSS_KB rep=$rep name=$name kb=%M" /tmp/a_"$name"
+            done </tmp/a_variants
+          done
