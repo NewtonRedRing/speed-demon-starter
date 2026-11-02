@@ -197,3 +197,103 @@ Do not assume speculative prefetch, huge pages, or BOLT will help.
 - Track D source: track-d/main.rs
 - Verified scores: BEST_SCORES.md
 - Oracle guidance: ORACLE.md
+
+## Later November 2: new score-gated A improvement and 2026 hash research
+
+### A: load-factor-sensitive exact endpoint table wins official score
+
+The exact HARP endpoint interner now uses 8192 hash slots for the same
+2048-entry dense-id/arena capacity (old table 4096 slots). Local
+[paired official-full benchmark run 41436499988](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41436499988)
+showed median baseline/candidate **1.02546**, with 25/38 faster pairs;
+full public and generated tiny/sample correctness passed.
+
+The [independent scoreboard audit run 41437999219](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41437999219)
+confirmed the actual contest score improved from **84.036874** to
+**84.106702**, runtime **22.229 -> 21.706 ms**, memory
+**14,880,768 -> 15,515,648 bytes**, source-size **450 -> 451**.
+Production source commit: **0df9114**. This is a verified positive
+optimization despite the memory/source penalty and stays in
+`speed-demon`.
+
+The experiment reinforces the principle that **shorter probe chains
+matter more than tiny table memory differences** on some workloads.
+A 16,384-slot version and changes to chunk size were not convincingly
+faster in paired CI, so the approved source keeps 8192 slots.
+
+### D: BFS blob size does not change the result
+
+[Official-full SHA-gated CI run 41438100339](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41438100339)
+benchmarked 10 randomized trials each with 128/256/512/1024/2048/4096
+vertex BFS locality blobs. Medians, in ms on the GitHub runner:
+
+| Blob | 128 | 256 | 512 retained | 1024 | 2048 | 4096 |
+|---|---:|---:|---:|---:|---:|---:|
+| Median | 466.970 | 470.259 | **466.654** | 492.310 | 467.450 | 467.315 |
+
+Peak RSS was essentially unchanged. Combined with the earlier 2.89x
+regression when removing renumbering entirely, further tuning blob
+size is low priority. Focus on reducing memory accesses and queue
+operations inside exact shortest-path queries.
+
+### Cutting-edge CPU hash research: what is actionable
+
+1. **Flattened tiny-pointer tables:** Tang, Mai, Kuszmaul and Conway,
+   *Succinct and Fast Tiny Pointer Hash Tables* (July 2026,
+   https://arxiv.org/abs/2607.28892). Flattened-TPHT reports
+   high performance with a common-case one-cache-miss lookup and
+   compact one-byte pointers, with up to 89.3% higher microbenchmark
+   throughput than strong baselines. For Tracks A/C, measure a
+   control-byte + compact slot index that preserves exact full-key
+   comparison and never decodes a fingerprint as the name itself.
+   Build and memory cost are counted; no expected contest speedup
+   is claimed from their figures.
+
+2. **Swiss-style cache groups:** Elasticsearch's January 2026
+   engineering study
+   (https://www.elastic.co/search-labs/blog/esql-swiss-hash-stats)
+   demonstrates SIMD-readable metadata and cache-line-group probing.
+   The reported 2–3x improvements depend on particular
+   high-cardinality ingestion workloads. Track C already probes
+   a full 64-byte bucket with AVX2; experiment must prove that extra
+   metadata reduces misses/atomic contention rather than adding
+   overhead. All comparisons remain byte-for-byte exact.
+
+3. **PtrHash** (SEA 2025,
+   https://drops.dagstuhl.de/storage/00lipics/lipics-vol338-sea2025/html/LIPIcs.SEA.2025.21/LIPIcs.SEA.2025.21.html)
+   is a fast minimal-perfect hash construction and query design.
+   Its performance advantage amortizes over many queries on a
+   static key set. Track B knows the query term set up front, so
+   build-time-per-run MPHF is a possible alternative to its
+   current CRC-based dictionary; Track C receives names online
+   and would likely pay too much to build an MPHF up front.
+   Exact key comparison is still necessary unless an injective
+   map is proven.
+
+4. **Road-network exact heuristics:** recent (2026)
+   bidirectional-A* road-network work (https://doi.org/10.1016/j.iswa.2026.200641)
+   emphasizes admissible lower bounds, but this synthetic track
+   includes zero-weight edges, random original node IDs and no
+   supplied geometric coordinates. Any proposed A* heuristic
+   must be mathematically admissible on every generator seed.
+   A non-exact shortcut loses all correctness points.
+   Query-preprocessing time must also be included.
+
+### Recommended next experiments
+
+- **A:** look for cache-line/group SIMD index reduction without
+  increasing dense-id capacity; any change must beat the 8192-slot
+  officially scored code, not an obsolete 4096-slot baseline.
+- **B:** compile the six-term strict-left-to-right Boolean expressions
+  into exact truth tables; reuse postlists/bitmaps across grouped
+  queries and measure whether build and memory costs amortize.
+- **C:** collect exact hash-table probe histograms and cache-stall
+  data, then test a control-byte metadata layer without dropping
+  key comparisons or damaging the current FALCON-C score.
+- **D:** profile `Dist::get`, `Dist::at`, and `RadixHeap` by
+  query size; investigate exact stale-entry suppression, compact
+  queue storage and locality-preserving CSR construction.
+  Reject blob-width and unsafe heuristic shortcuts.
+
+No proposed architecture above is promoted without verified full
+correctness and an improved official leaderboard score.
