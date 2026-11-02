@@ -1,0 +1,96 @@
+name: D radix bucket-bitmask exact differential and performance
+on:
+  push:
+    branches: [experiment/track-d-radix-bitset-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build existing Rust and bitmask candidate with identical CPU flags
+        run: |
+          set -euo pipefail
+          git show origin/speed-demon:track-d/main.rs >/tmp/d_baseline.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=haswell -C codegen-units=1 -C panic=abort -o /tmp/d_base /tmp/d_baseline.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=haswell -C codegen-units=1 -C panic=abort -o /tmp/d_mask track-d/main.rs
+          echo "COMPILED both Rust Dijkstra implementations"
+      - name: Download unmodified organizers deterministic generator and reference
+        run: |
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/hackathon-raptors/speed-demon-2026/main/generators/d_traverse.py -o /tmp/d_gen.py
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/hackathon-raptors/speed-demon-2026/main/reference/d_traverse.py -o /tmp/d_ref.py
+          sudo install -d -m 777 /out
+      - name: Validate generated tiny and sample data exactly
+        run: |
+          set -euo pipefail
+          for seed in 2 7 23 42 2026; do
+            python3 /tmp/d_gen.py --seed "$seed" --scale tiny --out "/tmp/d-tiny-$seed"
+            sudo ln -sfn "/tmp/d-tiny-$seed" /data
+            python3 /tmp/d_ref.py --data /data --out /out
+            cp /out/distances.txt /tmp/d_expected
+            /tmp/d_base
+            cmp /tmp/d_expected /out/distances.txt
+            /tmp/d_mask
+            cmp /tmp/d_expected /out/distances.txt
+            echo "PASS tiny seed=$seed official reference, baseline, candidate"
+          done
+          for seed in 17 103; do
+            python3 /tmp/d_gen.py --seed "$seed" --scale sample --out "/tmp/d-sample-$seed"
+            sudo ln -sfn "/tmp/d-sample-$seed" /data
+            /tmp/d_base
+            cp /out/distances.txt /tmp/d_expected
+            /tmp/d_mask
+            cmp /tmp/d_expected /out/distances.txt
+            echo "PASS sample seed=$seed baseline=candidate"
+          done
+      - name: Validate full public seed-1 dataset and output checksum
+        run: |
+          set -euo pipefail
+          python3 /tmp/d_gen.py --seed 1 --scale full --out /tmp/d-full
+          sudo ln -sfn /tmp/d-full /data
+          /tmp/d_base
+          cp /out/distances.txt /tmp/d_expected
+          echo "BASELINE_FULL_SHA256 $(sha256sum /out/distances.txt)"
+          python3 - <<'PY'
+          import hashlib
+          want="a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e"
+          got=hashlib.sha256(open('/out/distances.txt','rb').read()).hexdigest()
+          assert got == want, (got, want)
+          print("PASS published full output SHA256",flush=True)
+          PY
+          /tmp/d_mask
+          cmp /tmp/d_expected /out/distances.txt
+          echo 'PASS full seed=1 baseline=candidate=official hash'
+      - name: 12 interleaved full-data pair timings
+        run: |
+          python3 - <<'PY'
+          import subprocess,time,statistics,random
+          variants={'baseline':'/tmp/d_base','bitmask':'/tmp/d_mask'}
+          samples={k:[] for k in variants}
+          for i in range(12):
+              names=list(variants)
+              random.Random(i*7907+3).shuffle(names)
+              for name in names:
+                  start=time.perf_counter()
+                  subprocess.run([variants[name]],check=True,stdout=subprocess.DEVNULL)
+                  samples[name].append((time.perf_counter()-start)*1000)
+          b=statistics.median(samples['baseline']); a=statistics.median(samples['bitmask'])
+          print(f"FULL baseline_median_ms={b:.3f} candidate_median_ms={a:.3f} ratio={a/b:.5f}",flush=True)
+          print('SAMPLES baseline=',[round(x,3) for x in samples['baseline']],flush=True)
+          print('SAMPLES candidate=',[round(x,3) for x in samples['bitmask']],flush=True)
+          print('BITMASK Faster pairs=',sum(y<x for x,y in zip(samples['baseline'],samples['bitmask'])),flush=True)
+          PY
+      - name: Show RSS and source size differences (not official score)
+        run: |
+          /usr/bin/time -f 'PEAK_RSS_baseline_KB=%M' /tmp/d_base
+          /usr/bin/time -f 'PEAK_RSS_candidate_KB=%M' /tmp/d_mask
+          wc -l /tmp/d_baseline.rs track-d/main.rs
