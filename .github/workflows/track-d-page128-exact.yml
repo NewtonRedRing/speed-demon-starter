@@ -1,0 +1,97 @@
+name: Track D sparse 128-page exact benchmark
+on:
+  push:
+    branches: [experiment/track-d-radix-page128-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build Rust baseline and 128-page candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show origin/speed-demon:track-d/main.rs >/tmp/d_base.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=haswell -C codegen-units=1 -C panic=abort -o /tmp/d_base /tmp/d_base.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=haswell -C codegen-units=1 -C panic=abort -o /tmp/d_page128 track-d/main.rs
+          rustc --version
+      - name: Download official deterministic generator and reference
+        run: |
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/hackathon-raptors/speed-demon-2026/main/generators/d_traverse.py -o /tmp/d_gen.py
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/hackathon-raptors/speed-demon-2026/main/reference/d_traverse.py -o /tmp/d_ref.py
+          sudo install -d -m 777 /out
+      - name: Exact tiny and sample differential tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for seed in 2 7 23 42 2026; do
+            python3 /tmp/d_gen.py --seed "$seed" --scale tiny --out "/tmp/d-tiny-$seed"
+            sudo ln -sfn "/tmp/d-tiny-$seed" /data
+            python3 /tmp/d_ref.py --data /data --out /out
+            cp /out/distances.txt /tmp/d_expected
+            /tmp/d_base
+            cmp /tmp/d_expected /out/distances.txt
+            /tmp/d_page128
+            cmp /tmp/d_expected /out/distances.txt
+            echo "PASS tiny seed=$seed official reference, baseline, candidate"
+          done
+          for seed in 17 103; do
+            python3 /tmp/d_gen.py --seed "$seed" --scale sample --out "/tmp/d-sample-$seed"
+            sudo ln -sfn "/tmp/d-sample-$seed" /data
+            /tmp/d_base
+            cp /out/distances.txt /tmp/d_expected
+            /tmp/d_page128
+            cmp /tmp/d_expected /out/distances.txt
+            echo "PASS sample seed=$seed"
+          done
+      - name: Exact full public seed one digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 /tmp/d_gen.py --seed 1 --scale full --out /tmp/d-full
+          sudo ln -sfn /tmp/d-full /data
+          /tmp/d_base
+          cp /out/distances.txt /tmp/d_expected
+          python3 - <<'PY'
+          import hashlib
+          expected="a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e"
+          got=hashlib.sha256(open('/out/distances.txt','rb').read()).hexdigest()
+          assert got==expected,(got,expected)
+          print("PASS baseline published full official SHA256",flush=True)
+          PY
+          /tmp/d_page128
+          cmp /tmp/d_expected /out/distances.txt
+          echo "PASS candidate full seed=1 exact"
+      - name: Twelve interleaved complete full-data timings
+        run: |
+          python3 - <<'PY'
+          import subprocess, time, statistics, random
+          execs={"baseline":"/tmp/d_base","page128":"/tmp/d_page128"}
+          xs={k:[] for k in execs}
+          for i in range(12):
+              order=list(execs)
+              random.Random(i*7907+3).shuffle(order)
+              for name in order:
+                  t=time.perf_counter()
+                  subprocess.run([execs[name]],check=True,stdout=subprocess.DEVNULL)
+                  xs[name].append(1000*(time.perf_counter()-t))
+          b=statistics.median(xs["baseline"]); c=statistics.median(xs["page128"])
+          print(f"FULL baseline_median_ms={b:.3f} candidate_median_ms={c:.3f} ratio={c/b:.5f}",flush=True)
+          print("SAMPLES baseline=",[round(x,3) for x in xs["baseline"]],flush=True)
+          print("SAMPLES page128=",[round(x,3) for x in xs["page128"]],flush=True)
+          print("FASTER_PAIRED=",sum(y<x for x,y in zip(xs["baseline"],xs["page128"])),flush=True)
+          PY
+      - name: Peak RSS and Rust source lines
+        run: |
+          /usr/bin/time -f 'RSS_base_KB=%M' /tmp/d_base
+          /usr/bin/time -f 'RSS_page128_KB=%M' /tmp/d_page128
+          wc -l /tmp/d_base.rs track-d/main.rs
