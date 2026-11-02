@@ -39,3 +39,11 @@ jobs:
           cp /out/results.txt /tmp/baseline-sample
           /usr/bin/time -f 'Q-FUSE sample: %e sec %M KB' /tmp/track_b_qfuse
           cmp /tmp/baseline-sample /out/results.txt
+          # Full-size correctness comparison and rough runtime/RSS indication.
+          # These GitHub-hosted timings are NOT Speed Demon board timings.
+          python3 track-b/pgo_gen.py --seed 1 --scale full --out /tmp/b-full
+          sudo ln -sfn /tmp/b-full /data
+          /usr/bin/time -f 'baseline full: %e sec %M KB' /tmp/track_b_baseline
+          cp /out/results.txt /tmp/baseline-full
+          /usr/bin/time -f 'Q-FUSE full: %e sec %M KB' /tmp/track_b_qfuse
+          cmp /tmp/baseline-full /out/results.txt
