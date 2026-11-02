@@ -236,3 +236,64 @@ scratch-bitset path appears preferable to the added branch/merge walk,
 even though the alternative is exact and can reduce theoretical memory
 writes. The publication of Tantivy's cardinality-aware `DocSet::cost()`
 is a research motivation, not evidence that this application wins.
+
+
+## November 2: Exact worker-count sweep and encoded-capacity constraints
+
+**Baseline:** The verified-best 12-worker Rust query-conditioned index, `main.rs`
+blob `c7dc80d3413beb6d0303bc376fe95e816a2b7b1c`, with `LAG=8`,
+`BUCKETS=32`, original 1/32 bitmap cutoff and zero added dependencies.
+
+**Hypothesis:** On the contest's six P-cores / twelve logical threads, 8–11
+independent worker shards can reduce thread scheduling, per-shard allocations
+and peak RSS while keeping the exact same indexing/data structures and
+document-order semantics. Changing `THREADS` is the **only** source change.
+
+**Correctness:** [Research Actions 41448732278](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41448732278)
+compiled worker counts 8, 9, 10, 11 and 12 under identical Rust optimization
+settings. All matched the independent organizer Python reference on tiny
+seeds 7 and 23, and all 20 paired public full-seed-1 runs per variant matched
+SHA-256 `f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927`.
+Formatting did not change the measured nonblank/noncomment Rust line count
+(702 in this research proxy for every worker count); no dependency change.
+
+| Workers | GitHub-hosted full median ms (20) | Paired wins vs 12 | One-run peak RSS KB | Local estimated K gain |
+|---|---:|---:|---:|---:|
+| 12 | 654.079 | baseline | 301,632 | reference |
+| 11 | 648.803 | 11/20 | 301,816 | +0.394% |
+| 10 | 641.997 | 16/20 | 298,920 | +1.119% |
+| 9 | 638.239 | 16/20 | 300,884 | +1.284% |
+| 8 | 642.169 | 15/20 | 292,900 | +1.518% |
+
+**These are not scoring-box timings.** The K deltas apply the official
+exponents 0.50 to median T and 0.20 to the single RSS observations;
+source/dependency factors were held constant and only proxy-measured.
+Memory is from one run, not the official highest-of-five cgroup peak.
+The 8-worker option had the best estimated joint cost, despite 9 being
+faster in raw wall time. Different runs and hardware can change this order.
+
+**Invalid candidate exclusions:** An earlier [combined df64/lag4 sweep
+41447822910](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41447822910)
+proved 16 posting buckets fail the full input term-ID capacity assertion
+(`BUCKETS << 12`); [worker 6 rejection 41448531018](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41448531018)
+proved that six workers exceed `DOC_BITS=15` document offsets on the full
+input. Both correctly panic rather than silently produce wrong answers.
+Do not remove these safety assertions to chase six-core scheduling.
+
+**Integration and preservation:** One-line [PR #66](https://github.com/NewtonRedRing/speed-demon-starter/pull/66)
+provisionally merged `THREADS=8` as commit `2e9a28f8e2ccf88038c883b12c80704970d9bce2`
+for a possible *official* score gate. **No official eight-worker result was
+available at time of the decision.** The concurrent central Oracle
+immediately restored the verified best twelve-worker source in
+`db9beefd100efb990cd7a2c9578e1c52d10ce8c1`; that restoration is
+deliberate, safe and takes precedence. Do not claim +1.518% as a board win
+or reintegrate without a new central-Oracle decision supported by official
+points and gates. A second differential test of full seeds 23/42 was
+launched as [Actions 41449611901](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41449611901);
+only cite its result after the workflow completes successfully.
+
+**Decision:** Research-only 8/9/10-worker leads are recorded; **12-worker
+source remains the officially scored, protected submission**. The public
+best remains run `run-f979478c0277`: 72.172141 points, 183.883 ms,
+46,641,152 bytes, S=717 and D=1. Competing hypotheses are not promoted
+from GitHub-hosted benchmarks alone.
