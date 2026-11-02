@@ -1,0 +1,77 @@
+name: Track C exact combined batch and chunk confirmation
+on:
+  push:
+    branches: [experiment/track-c-combined-batch-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile six C join candidates in Rust
+        run: |
+          set -euo pipefail
+          git show origin/speed-demon:track-c/main.rs >/tmp/c_base.rs
+          python3 - <<'PY'
+          import pathlib,subprocess
+          src=pathlib.Path('/tmp/c_base.rs').read_text()
+          assert 'const BATCH: usize = 16;' in src and 'const CHUNKS_PER_THREAD: usize = 32;' in src
+          variants=[('base',16,32),('batch8',8,32),('chunks64',16,64),('batch8_chunks64',8,64),('chunks16',16,16),('batch8_chunks16',8,16)]
+          pathlib.Path('/tmp/c_names').write_text('\n'.join(x[0] for x in variants)+'\n')
+          for name,batch,chunks in variants:
+              s=src.replace('const BATCH: usize = 16;',f'const BATCH: usize = {batch};').replace('const CHUNKS_PER_THREAD: usize = 32;',f'const CHUNKS_PER_THREAD: usize = {chunks};')
+              p=pathlib.Path('/tmp/c_'+name+'.rs');p.write_text(s)
+              subprocess.run(['rustc','--edition=2021','-C','opt-level=3','-C','target-cpu=haswell','-C','codegen-units=1','-C','panic=abort','-o','/tmp/c_'+name,str(p)],check=True)
+              print('BUILD',name,batch,chunks,flush=True)
+          PY
+      - name: Validate independent generated seeds and full official-format corpus
+        run: |
+          set -euo pipefail
+          sudo install -d -m 777 /out
+          for spec in 'tiny 2' 'tiny 17' 'tiny 42' 'sample 103' 'full 1'; do
+            set -- $spec
+            python3 track-c/pgo_gen.py --scale "$1" --seed "$2" --out "/tmp/c-test-$1-$2"
+            sudo ln -sfn "/tmp/c-test-$1-$2" /data
+            /tmp/c_base
+            cp /out/aggregates.txt /tmp/c_expected
+            while read -r name; do
+              /tmp/c_"$name"
+              cmp /tmp/c_expected /out/aggregates.txt
+            done </tmp/c_names
+            echo "PASS exact $1 seed=$2"
+          done
+          echo "FULL_BASELINE_SHA256 $(sha256sum /tmp/c_expected)"
+      - name: 48 interleaved complete full-data rounds
+        run: |
+          python3 - <<'PY'
+          import random,statistics,subprocess,time
+          names=open('/tmp/c_names').read().split()
+          times={n:[] for n in names}
+          for trial in range(48):
+              order=names.copy()
+              random.Random(1910+trial*211).shuffle(order)
+              for name in order:
+                  t=time.perf_counter()
+                  subprocess.run(['/tmp/c_'+name],check=True,stdout=subprocess.DEVNULL)
+                  times[name].append(1000*(time.perf_counter()-t))
+          base=statistics.median(times['base'])
+          for name in sorted(names,key=lambda x:statistics.median(times[x])):
+              v=times[name]
+              med=statistics.median(v)
+              print(f'RESULT {name} median_ms={med:.4f} ratio={med/base:.6f} paired_better_than_base='+str(sum(y<x for x,y in zip(times['base'],v)))+' samples='+str([round(x,3) for x in v]),flush=True)
+          PY
+      - name: Repeated RSS measurements
+        run: |
+          for rep in 1 2 3 4 5 6 7 8; do
+            while read -r name; do
+              /usr/bin/time -f "RSS_KB rep=$rep name=$name kb=%M" /tmp/c_"$name"
+            done </tmp/c_names
+          done
