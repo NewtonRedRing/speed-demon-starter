@@ -778,7 +778,7 @@ fn byte_mask(bytes: &[u8; 64], byte: u8) -> u64 {
 /// names one byte apart, such as `Betts` and `Betts `, differ in all four bytes of a column
 /// after the first round that takes the byte through its S-box, since `MixColumns` spreads one
 /// byte over its column, then in all 16 bytes after the next round, and so in every column of
-/// the hash, including the two of its low word, the key. Other names agree in a given 72 bits of
+/// the hash, including the two of its low word, the key. Other names agree in a given 120 bits of
 /// their hashes with odds of about 2^-72, as for a random function. With `b` as a round key, the
 /// hash takes three instructions, where `aesenc(aesenc(aesenc(a ^ K0, K1) ^ b, K2), K3)`, which
 /// passes `a` and `b` through as many rounds, took five (PERF.md, step 41). A name over 32 bytes
@@ -830,7 +830,7 @@ unsafe fn long_letter(data: &[u8], start: usize, end: usize) -> [u64; 2] {
 /// 255 countries and `_UNMATCHED` fill the 256 bits. A key and the word of its bit mostly share a
 /// cache line: as two dense arrays, keys and bits, the marking took 21% more L1 misses and the
 /// runs 0.6% longer (PERF.md, step 41).
-struct Entry(u64, [u64; 4]);
+struct Entry(u64, u64, [u64; 4]);
 
 /// One worker's share of the distinct names, with the countries each name occurs in.
 ///
@@ -843,7 +843,7 @@ struct Entry(u64, [u64; 4]);
 ///
 /// A name is known by its hash alone (see [`name_letter`]). The letter's low word is the key, whose
 /// low bits give the slot, byte 14 is the tag, and bytes 8 to 11 picked the owner, so each comes
-/// from other bits. Two names are taken for one only if their tags and keys agree, 72 bits. At
+/// from other bits. Two names are taken for one only if their tags and keys agree, 120 bits. At
 /// full scale each of 12 workers owns about 8,400 of the 100,000 names, 35 M pairs of names, so
 /// a run merges two names with odds of about 12 × 35 M / 2^72, 1 in 10^13. A single worker would
 /// own them all, 5 × 10^9 pairs, 1 in 10^12.
@@ -871,7 +871,7 @@ impl NameSet {
         // holds no name, so a slot holds its entry's index with no `- 1` in the probe.
         let slots = vec![0; (4 * names / 3).next_power_of_two().max(16) + 1];
         let mut entries = Vec::with_capacity(2 * names);
-        entries.push(Entry(0, [0; 4]));
+        entries.push(Entry(0, 0, [0; 4]));
         Self { slots, entries }
     }
 
@@ -899,11 +899,14 @@ impl NameSet {
             let pair = unsafe { slots.as_ptr().add(slot).cast::<u64>().read_unaligned() };
             let found = std::hint::select_unpredictable(pair as u8 == tag, pair, pair >> 32) as u32;
             // An empty slot leads to entry 0, whose key 0 a name with tag 0 matches only as any
-            // two names match, by 72 bits of hash (see [`NameSet`]).
+            // two names match, by 120 bits of hash (see [`NameSet`]).
             // Whether entry `e`, from a slot with tag `t`, is the name's.
             // SAFETY: a slot holds the number of an entry pushed before it (see `insert`), or 0,
             // the number of the set's first entry, and no entry is removed.
-            let hit = |e: usize, t: u8| t == tag && unsafe { entries.get_unchecked(e) }.0 == key;
+            let hit = |e: usize, t: u8| {
+                let entry = unsafe { entries.get_unchecked(e) };
+                t == tag && entry.0 == key && entry.1 == (high & 0x00ff_ffff_ffff_ffff)
+            };
             let mut e = (found >> 8) as usize;
             if !hit(e, found as u8) {
                 e = loop {
@@ -919,7 +922,7 @@ impl NameSet {
             }
             // SAFETY: as for `hit`.
             let entry = unsafe { entries.get_unchecked_mut(e) };
-            let (word, bit) = (&mut entry.1[usize::from(group / 64)], 1 << (group % 64));
+            let (word, bit) = (&mut entry.2[usize::from(group / 64)], 1 << (group % 64));
             groups[usize::from(group)][5] += i64::from(*word & bit == 0);
             (*word, letters) = (*word | bit, &letters[1..]);
         }
@@ -937,7 +940,7 @@ impl NameSet {
         let [key, high] = letters[0].each_ref().map(|word| word.load(Relaxed));
         assert!(self.entries.len() < 1 << 24, "over 2^24 names");
         self.slots[slot] = (self.entries.len() as u32) << 8 | u32::from((high >> 48) as u8);
-        self.entries.push(Entry(key, [0; 4]));
+        self.entries.push(Entry(key, high & 0x00ff_ffff_ffff_ffff, [0; 4]));
         if 4 * self.entries.len() > 3 * self.slots.len() {
             let mask = 2 * self.slots.len() - 3;
             let old = std::mem::replace(&mut self.slots, vec![0; mask + 2]);
