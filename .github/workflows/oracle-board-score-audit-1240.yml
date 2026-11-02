@@ -1,4 +1,5 @@
 name: Official board score gate audit
+# Third read after B trial and C rollback
 # Second timestamped read after C trial
 on:
   push:
