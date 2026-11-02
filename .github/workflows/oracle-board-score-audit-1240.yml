@@ -1,0 +1,29 @@
+name: Official board score gate audit
+on:
+  push:
+    branches: [oracle/score-audit-20261102-1240]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Print current official NewtonRedHeat scoring history
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --retry 4 https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/board/board.json -o /tmp/board.json
+          python3 - <<'PY'
+          import json
+          b=json.load(open('/tmp/board.json'))
+          t=next(x for x in b['teams'] if x['team']=='NewtonRedHeat')
+          print('AUDIT_TIME',b['generated_at'],flush=True)
+          print('CURRENT_BOARD_HEAD',t['watch']['head'],flush=True)
+          print('QUEUE',b.get('queue'),flush=True)
+          for a in 'abcd':
+              d=t['tracks'][a]
+              for key in ('best','latest'):
+                  x=d.get(key) or {}
+                  print('TRACK',a,key,'RUN',x.get('run_id'),'COMMIT',x.get('commit'),'POINTS',x.get('points'),'T_s',x.get('T_s'),'M_bytes',x.get('M_bytes'),'S',x.get('S'),'D',x.get('D'),'K',x.get('K'),'GATES',x.get('gates'),'STAGE',x.get('stage'),flush=True)
+          PY
