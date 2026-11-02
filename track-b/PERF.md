@@ -288,9 +288,18 @@ immediately restored the verified best twelve-worker source in
 `db9beefd100efb990cd7a2c9578e1c52d10ce8c1`; that restoration is
 deliberate, safe and takes precedence. Do not claim +1.518% as a board win
 or reintegrate without a new central-Oracle decision supported by official
-points and gates. A second differential test of full seeds 23/42 was
-launched as [Actions 41449611901](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41449611901);
-only cite its result after the workflow completes successfully.
+points and gates. An independent [full-scale differential check
+41449611901](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41449611901)
+**passed** on both separately generated 250,000-document / 50,000-query
+full datasets: seed 23 output SHA-256
+`04d24c2ba3a42cd257deb8f8b3d1589868bb91187d1c0dfcfe0c9946caa6c37f`,
+seed 42 output SHA-256
+`f853a72cd18c2535183170a22482f363a251ac88fec1ed419791e1572dbfdffd`.
+The eight-worker candidate was bit-for-bit identical to the historically
+verified twelve-worker source on each newly generated full input. Both
+seeds passed without the 15-bit offset assertion firing. This establishes
+seed-variation correctness on these instances, **not** any hidden holdout
+guarantee or official score uplift.
 
 **Decision:** Research-only 8/9/10-worker leads are recorded; **12-worker
 source remains the officially scored, protected submission**. The public
