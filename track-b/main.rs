@@ -103,6 +103,7 @@ const SHORT: usize = 12;
 /// the last term.
 struct Terms {
     tab: Vec<__m128i>,
+    ctrl: Vec<u8>, // L2-resident 7-bit hash tags, zero = never occupied
     long: Vec<(__m256i, u32)>,
     n: u32,
     ring: [(__m128i, usize, usize); 8], // short terms waiting for their slot: key, hash, place in the ids
@@ -112,6 +113,11 @@ struct Terms {
 impl Terms {
     fn id(e: __m128i) -> u32 {
         unsafe { _mm_extract_epi32::<3>(e) as u32 }
+    }
+
+    #[inline(always)]
+    fn tag(h: usize) -> u8 {
+        ((h >> 18) as u8 & 0x7f) + 1 // nonzero, 7-bit CRC tag
     }
 
     /// Appends the id of term to ids; a short one's place is filled 8 terms
@@ -125,7 +131,7 @@ impl Terms {
         }
         let k = unsafe { _mm256_castsi256_si128(k) };
         let h = hash(k);
-        unsafe { _mm_prefetch::<_MM_HINT_T0>(self.tab.as_ptr().add(h & (self.tab.len() - 1)).cast()) };
+        unsafe { _mm_prefetch::<_MM_HINT_T0>(self.ctrl.as_ptr().add(h & (self.tab.len() - 1)).cast()) };
         let oldest = std::mem::replace(&mut self.ring[self.fed % 8], (k, h, ids.len() - 1));
         if self.fed >= 8 {
             ids[oldest.2] = self.add(oldest.0, oldest.1);
@@ -145,16 +151,36 @@ impl Terms {
         let mask = self.tab.len() - 1;
         let mut i = h & mask;
         loop {
-            let e = self.tab[i];
-            if unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(e, k)) & 0xFFF == 0xFFF } || Self::id(e) == 0 {
+            let c = self.ctrl[i];
+            if c == 0 {
                 return i;
+            }
+            if c == Self::tag(h) {
+                let e = self.tab[i];
+                if unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(e, k)) & 0xFFF == 0xFFF } {
+                    return i;
+                }
             }
             i = (i + 1) & mask;
         }
     }
 
     fn find(&self, k: __m128i, h: usize) -> u32 {
-        Self::id(self.tab[self.probe(k, h)]).wrapping_sub(1).min(self.n)
+        // A miss only touches the compact tag array; full 16-byte keys are
+        // fetched for the ~1/128 matching tags, with exact 12-byte equality.
+        let mask = self.tab.len() - 1;
+        let (mut i, tag) = (h & mask, Self::tag(h));
+        loop {
+            let c = unsafe { *self.ctrl.get_unchecked(i) };
+            if c == 0 { return self.n; }
+            if c == tag {
+                let e = unsafe { *self.tab.get_unchecked(i) };
+                if unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(e, k)) & 0xFFF == 0xFFF } {
+                    return Self::id(e) - 1;
+                }
+            }
+            i = (i + 1) & mask;
+        }
     }
 
     fn find_long(&self, k: __m256i) -> u32 {
@@ -192,6 +218,7 @@ impl Terms {
             return Self::id(self.tab[i]) - 1;
         }
         self.tab[i] = unsafe { _mm_insert_epi32::<3>(k, self.n as i32 + 1) };
+        self.ctrl[i] = Self::tag(h);
         self.n += 1;
         self.n - 1
     }
@@ -243,7 +270,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
             if len <= 32 {
                 let k = _mm256_castsi256_si128(key(p.add(s as usize), len as usize));
                 let h = hash(k);
-                let slot = t.tab.as_ptr().add(h & (t.tab.len() - 1));
+                let slot = t.ctrl.as_ptr().add(h & (t.tab.len() - 1));
                 _mm_prefetch::<_MM_HINT_T0>(slot.cast());
                 if n >= LAG {
                     look(&ring[n % LAG]);
@@ -471,7 +498,8 @@ fn main() {
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) };
     let qtext = map("/data/queries.txt");
     let tab: Vec<__m128i> = unsafe { std::mem::transmute(vec![0u128; (qtext.len() / 8).next_power_of_two()]) };
-    let mut terms = Terms { tab, long: vec![], n: 0, ring: [(unsafe { _mm_setzero_si128() }, 0, 0); 8], fed: 0 };
+    let ctrl = vec![0u8; tab.len()];
+    let mut terms = Terms { tab, ctrl, long: vec![], n: 0, ring: [(unsafe { _mm_setzero_si128() }, 0, 0); 8], fed: 0 };
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
