@@ -1,0 +1,78 @@
+name: Track B strict exact bitmap threshold confirmation
+on:
+  push:
+    branches: [experiment/track-b-density-confirm-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile eight Rust bitmap threshold and lookup lag candidates
+        run: |
+          set -euo pipefail
+          git show origin/speed-demon:track-b/main.rs >/tmp/b_base.rs
+          python3 - <<'PY'
+          import pathlib,subprocess
+          src=pathlib.Path('/tmp/b_base.rs').read_text()
+          assert 'const LAG: usize = 8;' in src
+          assert 'df[i] as usize * 32 <= sampled' in src
+          variants=[('base',32,8),('df48',48,8),('df64',64,8),('df96',96,8),('df128',128,8),('df256',256,8),('df64_lag4',64,4),('df96_lag4',96,4)]
+          pathlib.Path('/tmp/b_names').write_text('\n'.join(x[0] for x in variants)+'\n')
+          for name,df,lag in variants:
+              s=src.replace('df[i] as usize * 32 <= sampled',f'df[i] as usize * {df} <= sampled').replace('const LAG: usize = 8;',f'const LAG: usize = {lag};')
+              p=pathlib.Path('/tmp/b_'+name+'.rs');p.write_text(s)
+              subprocess.run(['rustc','--edition=2021','-C','opt-level=3','-C','target-cpu=haswell','-C','codegen-units=1','-C','panic=abort','-o','/tmp/b_'+name,str(p)],check=True)
+              print('BUILT',name,'df cutoff',df,'lag',lag,flush=True)
+          PY
+      - name: Validate byte-for-byte generated tiny sample and full seed one
+        run: |
+          set -euo pipefail
+          sudo install -d -m 777 /out
+          for spec in 'tiny 7' 'tiny 42' 'sample 103' 'full 1'; do
+            set -- $spec
+            python3 track-b/pgo_gen.py --seed "$2" --scale "$1" --out "/tmp/b-test-$1-$2"
+            sudo ln -sfn "/tmp/b-test-$1-$2" /data
+            /tmp/b_base
+            cp /out/results.txt /tmp/b_expected
+            while read -r name; do
+              /tmp/b_"$name"
+              cmp /tmp/b_expected /out/results.txt
+            done </tmp/b_names
+            echo "PASS exact $1 seed=$2"
+          done
+          echo "FULL_BASELINE_SHA256 $(sha256sum /tmp/b_expected)"
+      - name: Twenty-four shuffled full-data rounds
+        run: |
+          python3 - <<'PY'
+          import subprocess,statistics,random,time
+          names=open('/tmp/b_names').read().split()
+          samples={x:[] for x in names}
+          for trial in range(24):
+              order=names.copy()
+              random.Random(20261102+trial*431).shuffle(order)
+              for name in order:
+                  t=time.perf_counter()
+                  subprocess.run(['/tmp/b_'+name],check=True,stdout=subprocess.DEVNULL)
+                  samples[name].append(1000*(time.perf_counter()-t))
+          baseline=statistics.median(samples['base'])
+          for name in sorted(names,key=lambda x:statistics.median(samples[x])):
+              v=samples[name]
+              med=statistics.median(v)
+              print(f'RESULT {name} median_ms={med:.3f} ratio={med/baseline:.5f} paired_better_than_base='+str(sum(y<x for x,y in zip(samples['base'],v)))+' samples='+str([round(x,3) for x in v]),flush=True)
+          PY
+      - name: Eight independent peak-RSS readings per candidate
+        run: |
+          for rep in 1 2 3 4 5 6 7 8; do
+            while read -r name; do
+              /usr/bin/time -f "RSS_KB rep=$rep name=$name kb=%M" /tmp/b_"$name"
+            done </tmp/b_names
+          done
