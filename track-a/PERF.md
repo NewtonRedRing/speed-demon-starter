@@ -737,3 +737,63 @@ Keep 64 and the verified 12-worker HARP source with exact blob
 a performance gain or schedule an official score trial. The
 unpromoted experiments remain on branch
 `experiment/track-a-percentile-crossover-20261102`.
+
+
+## November 2, 13:12–13:23 UTC — Prefetch-off exact official scoring gate
+
+**Hypothesis.** The HARP parser's unconditional 2 KiB L1 T0 software
+prefetch can generate avoidable cache fills while twelve workers stream
+a 239 MB log. Removing that instruction leaves every byte scan, record
+parse, endpoint hash comparison, percentile and output operation
+unchanged, and removes one formatted source-code line.
+
+**Research sweep:** six-way exact Rust experiment in
+[PR #69](https://github.com/NewtonRedRing/speed-demon-starter/pull/69),
+[Actions run 41451195870](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41451195870).
+Compared prefetch lead distances 512, 1024, 2048 (approved),
+4096, 8192 bytes, and disabled. All matched independent generated
+tiny seeds 2/7/42, sample 103, and full seed 1 official SHA256
+`495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`.
+36 randomized interleaved full-corpus runs on a **GitHub-hosted CPU**:
+baseline 2048-byte prefetch median **110.1991 ms**;
+disabled **107.8748 ms** (**2.11% lower**), 24/36 paired wins;
+single runner had a noisy ~922 ms outlier. Six RSS samples had medians
+**29,314 KB** vs **27,166 KB**.
+
+**Independent confirmation:** a separate 96-pair comparison in
+[PR #72](https://github.com/NewtonRedRing/speed-demon-starter/pull/72),
+[Actions 41452234327](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41452234327)
+reconstructed the original best-scored Rust source directly from
+`d660d7e` and removed only the exact prefetch line. Tiny seeds 7/42,
+sample 103, and independently generated full seeds 1 and 23 matched
+byte-for-byte; full seed1 SHA256 passed. Median wall time
+**109.2255 ms** best-scored prefetch versus **108.0410 ms**
+no-prefetch (**1.08% lower**); 57/96 paired wins. A 2,000-resample
+paired bootstrap 95% interval for candidate/baseline median runtime
+ratio was **[0.98262, 0.99840]**, after dropping >250ms runner
+outliers. Twelve RSS readings were essentially equal (medians
+29,052 and 29,036 KB). These are valid non-scoring comparisons,
+not proof of a hardware-portable improvement.
+
+**Official score gate and outcome:** Clean single-track
+[PR #71](https://github.com/NewtonRedRing/speed-demon-starter/pull/71)
+passed the Oracle file-scope CI and temporarily merged as commit
+`101371c5b3885eee3cf02403fe5e0e061ed6328e` to obtain
+the official result. Organizer public run **`run-f6f0ac5951f6`**
+passed all build, correctness, timeout and sandbox gates but scored
+**83.644793 points**, **22.795 ms**, **15,294,464 bytes RSS**,
+**450 source lines**, **D=1, K=47.086441**. The historically
+verified identical-input source at run **`run-d45aa4ea3d05`**
+scored **84.279208 points**, **21.662 ms**, **14,987,264 bytes**,
+**451 lines**, **D=1, K=48.482406**.
+
+**Oracle decision: REJECT and restore exact best.** One fewer
+source line did not outweigh worse observed runtime and memory on
+the **actual scoring CPU**. Commit
+`500b075ac57d1e962dbef128ee751dbaab9e31ff` restored
+`track-a/main.rs` Git blob
+`4559a57b037785452dcf64f4e098456440f96cd8` byte-for-byte.
+No other track source or dependency changed. This discrepancy
+is explicit evidence of architecture/runner-dependent performance.
+Do not claim a new official score, and do not submit the no-prefetch
+candidate at freeze.
