@@ -1,0 +1,76 @@
+name: Oracle final four-track production Docker and output preflight
+on:
+  push:
+    branches: [oracle/pre-freeze-four-track-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+jobs:
+  official-build-and-output:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {track: a, filename: summary.txt, sha: 495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3}
+          - {track: b, filename: results.txt, sha: f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927}
+          - {track: c, filename: aggregates.txt, sha: d8088b1cd42ba1338b1345b107b55db7b96ef1f5066f3ff64fd26a8912a0f536}
+          - {track: d, filename: distances.txt, sha: a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 58
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Print exact source identity and manifest
+        env:
+          TRACK: ${{ matrix.track }}
+        run: |
+          set -euo pipefail
+          echo "AUDIT_BRANCH_SHA $(git rev-parse HEAD)"
+          sha1sum "track-$TRACK/main.rs"
+          cat "track-$TRACK/.speed-demon.toml"
+          grep -q '^language = "rust"$' "track-$TRACK/.speed-demon.toml"
+          grep -q '^dependency_count = 0$' "track-$TRACK/.speed-demon.toml"
+          test -s "track-$TRACK/Dockerfile"
+          test -s "track-$TRACK/PERF.md"
+          test -s "track-$TRACK/README.md"
+          echo "PASS manifest, documented algorithm, PERF, Dockerfiles"
+      - name: Build actual pinned competition Dockerfile without RUN network
+        env:
+          TRACK: ${{ matrix.track }}
+        run: |
+          set -euo pipefail
+          docker build --network=none --progress=plain -t "speed-demon-audit-$TRACK" -f "track-$TRACK/Dockerfile" "track-$TRACK"
+          echo "PASS pinned production image build track=$TRACK"
+      - name: Generate unmodified full official-format corpus
+        env:
+          TRACK: ${{ matrix.track }}
+        run: |
+          set -euo pipefail
+          if [ "$TRACK" = d ]; then
+            curl --fail --location --silent --show-error --retry 3 https://raw.githubusercontent.com/hackathon-raptors/speed-demon-2026/main/generators/d_traverse.py -o /tmp/official_d_generator.py
+            python3 /tmp/official_d_generator.py --seed 1 --scale full --out /tmp/full-data
+          else
+            python3 "track-$TRACK/pgo_gen.py" --seed 1 --scale full --out /tmp/full-data
+          fi
+          mkdir -p /tmp/audit-out
+          echo "PASS full corpus generated"
+      - name: Run production runtime offline and verify exact output digest
+        env:
+          TRACK: ${{ matrix.track }}
+          FILENAME: ${{ matrix.filename }}
+          EXPECTED_SHA: ${{ matrix.sha }}
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --memory=8g -v /tmp/full-data:/data:ro -v /tmp/audit-out:/out:rw "speed-demon-audit-$TRACK"
+          test -s "/tmp/audit-out/$FILENAME"
+          actual="$(sha256sum "/tmp/audit-out/$FILENAME" | awk '{print $1}')"
+          echo "OUTPUT_SHA256 $TRACK $actual"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::Exact full-dataset digest mismatch for track $TRACK expected=$EXPECTED_SHA actual=$actual"
+            exit 1
+          fi
+          echo "PASS official format full seed1 digest and offline production image track=$TRACK"
