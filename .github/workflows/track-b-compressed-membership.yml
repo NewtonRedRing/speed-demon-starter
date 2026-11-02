@@ -78,3 +78,47 @@ jobs:
           print('FULL_PUBLIC_RATIO_BASE_OVER_CAND',statistics.median(a)/statistics.median(b),flush=True)
           print('PAIRED_FASTER_COUNT',sum(x>y for x,y in zip(a,b)),'of',len(a),flush=True)
           PY
+      - name: Threshold sweep for adaptive compressed postings (full official SHA)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          source=Path('track-b/main.rs').read_text()
+          assert source.count('v.len() <= 32')==1
+          assert source.count('n >= v.len() * 32')==1
+          variants=[(8,8),(16,16),(32,32),(64,16),(64,64),(128,16)]
+          for maxlen,ratio in variants:
+              changed=source.replace('v.len() <= 32',f'v.len() <= {maxlen}').replace('n >= v.len() * 32',f'n >= v.len() * {ratio}')
+              name=f'b{maxlen}r{ratio}'
+              Path('/tmp/'+name+'.rs').write_text(changed)
+              subprocess.run(['rustc','--edition=2021','-C','opt-level=3',
+                  '-C','target-cpu=native','-C','panic=abort','-C','codegen-units=1',
+                  '-o','/tmp/'+name,'/tmp/'+name+'.rs'],check=True)
+              print('COMPILED_VARIANT',name,flush=True)
+          PY
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, statistics, subprocess, time
+          variants=['baseline','b8r8','b16r16','b32r32','b64r16','b64r64','b128r16']
+          times={v:[] for v in variants}
+          expected='f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927'
+          out=Path('/out/results.txt')
+          for trial in range(8):
+              order=variants if trial%2==0 else variants[::-1]
+              for name in order:
+                  out.unlink(missing_ok=True)
+                  t=time.perf_counter()
+                  subprocess.run(['/tmp/'+name],check=True,stdout=subprocess.DEVNULL)
+                  elapsed=(time.perf_counter()-t)*1000
+                  digest=hashlib.sha256(out.read_bytes()).hexdigest()
+                  assert digest==expected,(name,trial,digest)
+                  times[name].append(elapsed)
+          baseline=statistics.median(times['baseline'])
+          for name in variants:
+              m=statistics.median(times[name])
+              wins=sum(a>b for a,b in zip(times['baseline'],times[name]))
+              print('SWEEP_FULL',name,'median_ms',round(m,3),'ratio_base_over',round(baseline/m,5),
+                    'paired_wins',wins,'of',len(times[name]),'sha_pass',flush=True)
+          PY
