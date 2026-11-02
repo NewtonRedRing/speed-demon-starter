@@ -71,3 +71,10 @@ Future research: exact adaptive two-pointer/galloping intersection for
 comparably sized postings, query-conditioned shared phrase execution and
 better worker sharding; all must pass full input output hashes, independent
 seeds, measured memory, then official board score before promotion.
+
+## 2026-11-02: candidate windowed hybrid architecture (experiment branch)
+
+This experimental version ports the MIT-licensed query-trigger and windowed set
+execution design from [danse-macabre Track B](https://github.com/keirsalterego/danse-macabre/tree/speed-demon/track-b), authored by its contributors. Copyright (c) 2026 Hackathon Raptors CIC and danse-macabre contributors; MIT license and attribution retained. The upstream Track B source was accompanied by public score 79.5 / 87.8 ms / 42 MB; **these are upstream results, not results for this repo**.
+
+Features: 1/64 sample to plan rare triggers; per-document truth-table boolean evaluation; query-window dense bitmaps + sparse document lists; AVX2 tokenizer; inline exact phrase verification. The original NewtonRedHeat best Track B source remains preserved in Git history at f9c0a75900b951ba5fcf8a4e4bd74a4b7a6266e6. Must pass full correct-output and official machine-score gates before production promotion.
