@@ -51,7 +51,7 @@ unsafe fn map(len: usize, prot: i32, flags: i32, fd: i32) -> *mut u8 {
 }
 
 const THREADS: usize = 12;
-const PARTS: usize = THREADS * 8; // log pieces the threads claim in turn, as cores differ in speed
+const PARTS: usize = 384;
 const HOURS: usize = 72; // 2026-10-30T18:00Z to 2026-11-02T17:59:59Z
 // A record packs the latency above a 12-bit key: an 11-bit local endpoint id
 // and the 5xx flag. Latencies of 2^20 us or more (about 1% of lines) do not
