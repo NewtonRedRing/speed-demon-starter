@@ -128,3 +128,74 @@ protected / candidate) and used more memory. It was removed.
 ## November 1: experiments that did not help
 
 Answering BOOL queries without an index (per-block masks, queries triggered by their rarest terms) cut peak memory from 52 MB to 35 MB but raised time from about 200 ms to 260-300 ms (about 18.6M query-block evaluations at 30-100 ns each, instruction bound with two threads per core). Reading ahead in the document text (1-2 KB), bitmap thresholds of 1/16 and 1/64, handing the postings back to the kernel in parallel before exit, guided query scheduling and removing a per-query allocation were all neutral or worse on the board, so the postings-and-bitmap design stands.
+
+
+## 2026-11-02 Track B cutoff and lookup-wavefront official score gate
+
+**Hypothesis.** For this 250,000-document, 50,000-query workload, increase
+the range of term frequencies represented with sparse postings by changing
+the threshold from `df * 32 <= sampled` to `df * 64 <= sampled`.
+Shorten the token lookup wavefront from 8 to 4 entries to reduce ring
+work and improve critical-path instruction locality. Both are
+representation/scheduling choices, not approximations: every query
+still executes exact left-associative Boolean semantics, AND/OR/NOT,
+phrase matching, and exact token membership checks.
+
+**Exploratory differential CI:** [PR #51, run 41444995988]
+(https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41444995988)
+compiled ten Rust variants, compared tiny seeds 2/17/42/2026,
+sample 103 and full seed 1 byte-for-byte, then tested twelve randomized
+end-to-end full-dataset runs on a **GitHub-hosted CPU**, not the
+organizer's machine. Lower threshold density64 showed a 3.63%
+median timing benefit with more memory.
+
+**Focused confirmation:** [PR #55, run 41445832177]
+(https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41445832177)
+passed tiny seeds 7/42, sample 103 and full seed 1 (public
+`results.txt` SHA256
+`f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927`).
+Across 24 randomized interleaved full-corpus GH runs, old threshold
+32 and LAG8 median **677.416 ms** versus threshold64/LAG4
+**655.581 ms**, **3.22% lower** (21/24 paired wins).
+Median of eight GH-run RSS readings: **299,994 KB** baseline,
+**302,664 KB** candidate (+0.89%).
+No new runtime dependency; source line count unchanged.
+The non-scoring full-pipeline estimates appeared favorable.
+
+**Exact official trial and regression:** A scoped two-constant
+[PR #58](https://github.com/NewtonRedRing/speed-demon-starter/pull/58)
+was merged temporarily as `4168def59b0873a305b53155b75547c35eaaa5c4`.
+The organizer's public-board run
+**`run-fb448cadcb4e`** (head
+`c6ab79b8a40c183f9b270978c825accfe158d07c`, same Track B
+source) passed **all** correctness, build, sandbox and timeout gates.
+It reported **71.521322 points**, **182.235 ms**,
+**55,414,784 bytes peak memory**, **717 source lines**,
+**D=1, K=26.941790**. Historical best
+`run-f979478c0277` with the original production source was
+**72.172141 points**, **183.883 ms**,
+**46,641,152 bytes**, **717 source lines**,
+**D=1, K=27.761494**.
+
+The candidate reduced wall time by 1.648 ms but increased the
+**official** peak memory by about 18.8%, so the *total efficiency
+coefficient regressed by ~2.95%*. This directly contradicts the
+predictive GitHub-hosted RSS measurements. Hardware/cgroup measurement
+differences are precisely why full official scoring is mandatory.
+
+**Oracle decision: REJECT and restore exact winner.**
+Commit `e2b1126f3066160af8ca82461cdd0aa06e1b5de6`
+restores the best-scorer Rust source blob
+`c7dc80d3413beb6d0303bc376fe95e816a2b7b1c`
+byte-for-byte. Other tracks, offline build, source size and
+dependencies were not changed. The scoring result above is public
+seed-1 practice evidence, not a hidden holdout claim.
+
+**Related Rust-vs-C reproducible control:** [research PR #35,
+CI 41432940269](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41432940269)
+used the identical Rust engine but replaced only hot dictionary
+lookup via C compiled with GCC or Clang. All output bytes matched.
+Twelve full GH runs: native Rust **823.526 ms**,
+Clang-C-FFI **831.926 ms**, GCC-C-FFI **850.851 ms**.
+This is evidence against a C FFI lookup rewrite; it does **not**
+prove an independently optimized all-C implementation cannot win.
