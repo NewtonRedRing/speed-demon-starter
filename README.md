@@ -60,6 +60,11 @@ The complete collection is roughly 790 MB. Use `--engine csv_aggregate`,
 for example, to download one collection. Network access is required only for
 this optional development command, never for execution.
 
+To produce a small subset of the downloaded input, run
+`python3 scripts/make_public_sample.py --source data --dest sample_data`.
+The separately triggered GitHub Actions **Verify public input corpus** workflow
+also produces a downloadable sample artifact and verifies full output hashes.
+
 Lightweight, constructed edge-case fixtures are embedded in the integration
 test suite; no production dataset is checked into source control.
 
