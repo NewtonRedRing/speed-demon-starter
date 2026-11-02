@@ -1,0 +1,5 @@
+BOOL hello
+PHRASE "hello world"
+BOOL hello AND world
+BOOL hello NOT world
+BOOL world OR nothing

@@ -1,0 +1,4 @@
+id,name,note,region_id,amount
+1,alice,hello,10,2.50
+2,alice,xx,10,-1.25
+3,bob,ok,99,0.05

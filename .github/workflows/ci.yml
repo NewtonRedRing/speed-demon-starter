@@ -1,0 +1,16 @@
+name: Build and test C++
+on:
+  push:
+  pull_request:
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Compile
+        run: cmake --build build --parallel 2
+      - name: Integration tests
+        run: ctest --test-dir build --output-on-failure

@@ -1,2 +1,9 @@
-.out/
-data/
+/build/
+/build-*/
+/data/
+/out/
+__pycache__/
+*.pyc
+*.o
+*.profraw
+*.profdata
