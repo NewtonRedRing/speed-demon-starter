@@ -650,3 +650,40 @@ passing. These local results do not substitute for the scoring-machine run.
 **Decision:** retain the 8K source because it has now independently confirmed
 public-board correctness and higher score. Keep other A changes isolated and
 compare against this updated source and score, not an older HARP baseline.
+
+
+## November 2, 12:30 UTC: final interner and scheduling audit
+
+An independent public-board run, **`run-d45aa4ea3d05`**, commit
+`d660d7e49f4eca6a5673ca92a96463b1db238359`, recorded
+**84.279208 points**, **21.662 ms**, **14,987,264 bytes**, **451
+canonical Rust source lines**, **D=1**, and **K=48.482406**.
+Build, exact-output correctness, sandbox, and timeout gates all passed.
+The source's `main.rs` Git blob is
+`4559a57b037785452dcf64f4e098456440f96cd8`: identical to the
+retained 8192-slot interner and twelve-worker code. This public
+high watermark supersedes the earlier 84.106702 official run; no
+source change was needed to obtain the stronger result.
+
+An exact nine-way research sweep of endpoint dictionary size and work
+partitioning, [PR #50](https://github.com/NewtonRedRing/speed-demon-starter/pull/50)
+[Actions 41445114421](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41445114421),
+compiled the current Rust baseline and eight one-variable variants.
+All passed five tiny seeds, sample 103, and the full generator seed-1
+SHA-256 `495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`.
+Across 24 randomized full-run trials on a **GitHub CPU**, base
+8192 slots/96 pieces was **108.7045 ms** median. 48 pieces was
+**108.2404 ms** (0.43% lower) with much higher single-run RSS
+(42,996 vs 27,356 KB); 72 pieces was 108.3458 ms.
+Larger tables at 16K/32K/64K were slower, as was restoring 4096
+slots. These tradeoffs did not justify another scored implementation.
+
+A concurrent eight-worker experiment was temporarily pushed for an
+official-scoring trial but the coordinator subsequently restored
+the scored twelve-worker implementation in `8f3c881c` after a
+board regression. The exact retained code matches the reference
+blob above. Do not infer a general six- or eight-core speed advantage
+from non-scoring hardware; **retain the 12-worker HARP parser**.
+
+The code freeze and holdout are separate from the public board: these
+are documented observations, not predicted final results.
