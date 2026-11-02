@@ -1,0 +1,64 @@
+name: B experimental exact l2-prefetch full benchmark
+on:
+  pull_request:
+    branches: [speed-demon]
+    paths:
+      - 'track-b/**'
+      - '.github/workflows/b-l2-prefetch-experiment.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.head_ref == 'agent/track-b/l2-prefetch-t1-20261102'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compile baseline and candidate with identical flags
+        run: |
+          rustc --version
+          git show origin/speed-demon:track-b/main.rs > /tmp/base_b.rs
+          cp track-b/main.rs /tmp/candidate_b.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=native -C panic=abort -C codegen-units=1 -o /tmp/base_b /tmp/base_b.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=native -C panic=abort -C codegen-units=1 -o /tmp/candidate_b /tmp/candidate_b.rs
+      - name: Generate official full public seed
+        run: |
+          python3 --version
+          python3 track-b/pgo_gen.py --seed 1 --scale full --out /tmp/experiment_data
+          sha256sum /tmp/experiment_data/docs.txt /tmp/experiment_data/queries.txt
+          sudo mkdir -p /data /out
+          sudo ln -sf /tmp/experiment_data/docs.txt /data/docs.txt
+          sudo ln -sf /tmp/experiment_data/queries.txt /data/queries.txt
+          sudo chmod 777 /out
+      - name: Exact official SHA gate plus randomized full-process pairs
+        run: |
+          python3 - <<'PYCODE'
+          import subprocess,hashlib,time,random,statistics
+          programs=['/tmp/base_b','/tmp/candidate_b']
+          expected='f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927'
+          for p in programs:
+              subprocess.run([p],check=True)
+              with open('/out/results.txt','rb') as f: h=hashlib.file_digest(f,'sha256').hexdigest()
+              assert h==expected,(p,h,expected)
+              print('FULL SHA PASS',p,h,flush=True)
+          data={p:[] for p in programs}
+          rng=random.Random(825713)
+          for i in range(20):
+              pair=programs[:]; rng.shuffle(pair)
+              for p in pair:
+                  t0=time.perf_counter_ns()
+                  subprocess.run([p],check=True)
+                  data[p].append((time.perf_counter_ns()-t0)*1e-6)
+          b,c=[data[p] for p in programs]
+          print('BASELINE_MS',b,flush=True)
+          print('CANDIDATE_MS',c,flush=True)
+          print('BASE_MEDIAN_MS',statistics.median(b),flush=True)
+          print('CAND_MEDIAN_MS',statistics.median(c),flush=True)
+          print('BASE_OVER_CAND_SPEEDUP',statistics.median(b)/statistics.median(c),flush=True)
+          PYCODE
+      - name: Single process memory (not official cgroup)
+        run: |
+          /usr/bin/time -f 'BASE_MAX_RSS_KB %M' /tmp/base_b
+          /usr/bin/time -f 'CAND_MAX_RSS_KB %M' /tmp/candidate_b
