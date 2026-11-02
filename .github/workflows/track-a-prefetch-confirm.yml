@@ -1,0 +1,90 @@
+name: Independent Track A prefetch-off confirmation (96 pairs)
+on:
+  push:
+    branches: [experiment/track-a-prefetch-confirm-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+jobs:
+  confirm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile exact historical scored Rust baseline versus no-prefetch
+        run: |
+          set -euo pipefail
+          git show d660d7e49f4eca6a5673ca92a96463b1db238359:track-a/main.rs > /tmp/a_best.rs
+          python3 - <<'PY'
+          import pathlib,subprocess
+          s=pathlib.Path('/tmp/a_best.rs').read_text()
+          line='            _mm_prefetch::<_MM_HINT_T0>(p.add(2048).cast()); // the log is read once, in order\n'
+          assert s.count(line)==1
+          pathlib.Path('/tmp/a_noprefetch.rs').write_text(s.replace(line,''))
+          for name,path in [('best','/tmp/a_best.rs'),('noprefetch','/tmp/a_noprefetch.rs')]:
+              subprocess.run(['rustc','--edition=2021','-C','opt-level=3','-C','target-cpu=haswell','-C','codegen-units=1','-C','panic=abort','-o','/tmp/a_'+name,path],check=True)
+              print('BUILT',name,flush=True)
+          PY
+      - name: Exactness across independent full generated seeds
+        run: |
+          set -euo pipefail
+          sudo install -d -m 777 /out
+          for spec in 'tiny 7' 'tiny 42' 'sample 103' 'full 1' 'full 23'; do
+            set -- $spec
+            python3 track-a/pgo_gen.py --seed "$2" --scale "$1" --out "/tmp/data-a-$1-$2"
+            sudo ln -sfn "/tmp/data-a-$1-$2" /data
+            /tmp/a_best
+            cp /out/summary.txt /tmp/approved
+            /tmp/a_noprefetch
+            cmp /out/summary.txt /tmp/approved
+            echo "PASS exact seed=$2 scale=$1"
+          done
+          sudo ln -sfn /tmp/data-a-full-1 /data
+          /tmp/a_noprefetch
+          sha256sum /out/summary.txt
+          python3 - <<'PY'
+          import hashlib
+          want='495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
+          got=hashlib.sha256(open('/out/summary.txt','rb').read()).hexdigest()
+          assert want==got,(want,got)
+          print('PASS official full seed1 digest',flush=True)
+          PY
+      - name: 96 randomized paired full-process timings and paired bootstrap
+        run: |
+          python3 - <<'PY'
+          import random,subprocess,time,statistics
+          samples={'best':[],'noprefetch':[]}
+          for k in range(96):
+              order=list(samples)
+              random.Random(777+k*197).shuffle(order)
+              for name in order:
+                  t=time.perf_counter()
+                  subprocess.run(['/tmp/a_'+name],check=True,stdout=subprocess.DEVNULL)
+                  samples[name].append((time.perf_counter()-t)*1000)
+          b=statistics.median(samples['best'])
+          c=statistics.median(samples['noprefetch'])
+          ratio=c/b
+          print(f'CONFIRM best_median_ms={b:.4f} noprefetch_median_ms={c:.4f} ratio={ratio:.6f}',flush=True)
+          print('PAIRED_WINS',sum(y<x for x,y in zip(samples['best'],samples['noprefetch'])), '/',len(samples['best']),flush=True)
+          valid=[(x,y) for x,y in zip(samples['best'],samples['noprefetch']) if x<250 and y<250]
+          rng=random.Random(20261102)
+          boot=[]
+          for _ in range(2000):
+              z=[valid[rng.randrange(len(valid))] for _ in range(len(valid))]
+              boot.append(statistics.median(y for _,y in z)/statistics.median(x for x,_ in z))
+          boot.sort()
+          print('BOOTSTRAP_95_RATIO',round(boot[50],5),round(boot[1950],5),flush=True)
+          print('SAMPLES best=',[round(x,2) for x in samples['best']],flush=True)
+          print('SAMPLES noprefetch=',[round(x,2) for x in samples['noprefetch']],flush=True)
+          PY
+      - name: 12 repeated RSS observations
+        run: |
+          for k in $(seq 1 12); do
+            /usr/bin/time -f "RSS_KB name=best kb=%M" /tmp/a_best
+            /usr/bin/time -f "RSS_KB name=noprefetch kb=%M" /tmp/a_noprefetch
+          done
