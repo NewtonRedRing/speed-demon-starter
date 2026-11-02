@@ -1,4 +1,5 @@
 name: Official board score gate audit
+# Check A prefetch-off official score as of 13:18Z
 # 20261102 13:12 UTC score snapshot including 8-worker B status
 # 2026-11-02 Oracle audit for B 8-worker submission trial
 # Fifth official board read for B score gate
