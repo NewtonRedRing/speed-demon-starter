@@ -1,0 +1,38 @@
+name: Oracle guard
+
+on:
+  pull_request:
+    branches: [speed-demon]
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  oracle-guard:
+    name: oracle-guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate one-track scope
+        id: scope
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          python3 -m py_compile tools/oracle_guard.py
+          python3 tools/oracle_guard.py --base "$BASE" --head "$HEAD" --branch "$BRANCH" --github-output "$GITHUB_OUTPUT"
+      - name: Rust compile smoke test (not a correctness or board-score test)
+        if: steps.scope.outputs.track != 'oracle'
+        shell: bash
+        env:
+          TRACK: ${{ steps.scope.outputs.track }}
+        run: |
+          rustc --version
+          rustc --edition=2021 -C opt-level=0 --emit=metadata -o /tmp/oracle-check.rmeta "track-$TRACK/main.rs"
