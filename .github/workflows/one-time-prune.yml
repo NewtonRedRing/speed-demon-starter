@@ -1,0 +1,32 @@
+name: One-time remote branch pruning
+on:
+  push:
+    branches: [speed-demon]
+permissions:
+  contents: write
+jobs:
+  prune:
+    if: contains(github.event.head_commit.message, '[prune-branches]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Remove obsolete remote heads (retain default)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          failures=0
+          while IFS= read -r branch; do
+            if [[ "$branch" == "speed-demon" || -z "$branch" ]]; then
+              continue
+            fi
+            echo "Deleting obsolete branch: $branch"
+            if ! gh api --method DELETE "repos/$GH_REPO/git/refs/heads/$branch"; then
+              echo "::warning::Could not delete $branch"
+              failures=$((failures+1))
+            fi
+          done < <(gh api --paginate "repos/$GH_REPO/branches?per_page=100" --jq '.[].name')
+          echo "Failures: $failures"
+          test "$failures" -eq 0
