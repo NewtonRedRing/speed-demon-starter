@@ -50,3 +50,31 @@ jobs:
               print(f'{scale} seed={seed}: exact SHA256={digest}; baseline median={statistics.median(timings["baseline"]):.2f} ms; candidate median={statistics.median(timings["candidate"]):.2f} ms',flush=True)
           print('PASS: exact baseline agreement on 5 generated seed/scale combinations')
           PY
+      - name: Official full input SHA and 12 paired exact-output A/B trials
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fLsS --retry 4 --retry-delay 2 https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/data/track-b/full-seed1/docs.txt -o /data/docs.txt
+          curl -fLsS --retry 4 --retry-delay 2 https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/data/track-b/full-seed1/queries.txt -o /data/queries.txt
+          echo "6cd461670d6c39f9c5211162577532d3648edeab12340c71cc7d2ab5f18e66c8  /data/docs.txt" | sha256sum -c -
+          echo "77ef7ffc59afde051006b02a2ce8e4c090fbbfbf101acd6f862d0f8e298d39f9  /data/queries.txt" | sha256sum -c -
+          python3 - <<'PY'
+          import hashlib, pathlib, statistics, subprocess, time
+          expected='f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927'
+          out=pathlib.Path('/out/results.txt')
+          a,b=[],[]
+          for j in range(12):
+              for name in (('baseline','candidate') if j%2==0 else ('candidate','baseline')):
+                  out.unlink(missing_ok=True)
+                  t=time.perf_counter()
+                  subprocess.run(['/tmp/'+name],check=True)
+                  ms=(time.perf_counter()-t)*1000
+                  digest=hashlib.sha256(out.read_bytes()).hexdigest()
+                  assert digest==expected,('OFFICIAL OUTPUT MISMATCH',j,name,digest)
+                  (a if name=='baseline' else b).append(ms)
+          print('OFFICIAL_FULL_SHA256_PASS',expected,flush=True)
+          print('FULL_PUBLIC_BASELINE_MEDIAN_MS',statistics.median(a),flush=True)
+          print('FULL_PUBLIC_CANDIDATE_MEDIAN_MS',statistics.median(b),flush=True)
+          print('FULL_PUBLIC_RATIO_BASE_OVER_CAND',statistics.median(a)/statistics.median(b),flush=True)
+          print('PAIRED_FASTER_COUNT',sum(x>y for x,y in zip(a,b)),'of',len(a),flush=True)
+          PY
