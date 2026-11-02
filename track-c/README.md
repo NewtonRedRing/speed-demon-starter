@@ -35,5 +35,12 @@ Dependencies: none.
 With another 24 hours: profile dictionary / membership cache misses and test
 wider structural tiles while preserving exact hash checks on multiple seeds.
 
-The official full-seed-1 board passed at 37.853 ms, 10,215,424 bytes peak
-memory and 73.956052 machine points (run-70f424aa22a8, commit 63ec07b).
+The exact FALCON-C source has passed all official scoring gates. Its current
+historical public-board best is **74.320728 machine points**, **36.405 ms**,
+**10,354,688 bytes** peak memory and **K=30.648876** at
+`run-6dcd8ad2012f`, commit `4b4f4259eb78d55be5f835337488a05c7add6ac6`.
+An earlier exact-source run scored 73.956052 / 37.853 ms / 10,215,424 bytes
+(`run-70f424aa22a8`); this variation occurred with the same algorithm.
+The later exact batch=8/chunks=64 trial passed correctness but scored only
+74.154112, so Oracle restored the above exact source in commit `ea2532f`.
+Full per-seed evidence and reasons for rejection are in `PERF.md`.
