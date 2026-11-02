@@ -1,0 +1,79 @@
+name: Track B exact 9-worker score-gate qualification
+on:
+  push:
+    branches: [experiment/track-b-nine-workers-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+jobs:
+  differential:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build approved 12-worker and 9-worker Rust engines equally
+        run: |
+          set -euo pipefail
+          git show origin/speed-demon:track-b/main.rs >/tmp/b_approved.rs
+          grep -q 'const THREADS: usize = 12;' /tmp/b_approved.rs
+          grep -q 'const THREADS: usize = 9;' track-b/main.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=haswell -C codegen-units=1 -C panic=abort -o /tmp/b12 /tmp/b_approved.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=haswell -C codegen-units=1 -C panic=abort -o /tmp/b9 track-b/main.rs
+          rustc --version
+      - name: Tiny, sample and independent full-seed correctness
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -d -m 777 /out
+          for spec in 'tiny 7' 'tiny 23' 'tiny 42' 'sample 103' 'full 1' 'full 23' 'full 42'; do
+            set -- $spec
+            python3 track-b/pgo_gen.py --scale "$1" --seed "$2" --out "/tmp/b-$1-$2"
+            sudo ln -sfn "/tmp/b-$1-$2" /data
+            /tmp/b12
+            cp /out/results.txt /tmp/b_approved_output
+            /tmp/b9
+            cmp /tmp/b_approved_output /out/results.txt
+            echo "PASS exact scale=$1 seed=$2 SHA=$(sha256sum /out/results.txt)"
+          done
+          sudo ln -sfn /tmp/b-full-1 /data
+          python3 - <<'PY'
+          import hashlib
+          want='f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927'
+          got=hashlib.sha256(open('/tmp/b_approved_output','rb').read()).hexdigest()
+          # Last compared seed was 42, so verify official seed1 separately:
+          import subprocess
+          subprocess.run(['sudo','ln','-sfn','/tmp/b-full-1','/data'],check=True)
+          subprocess.run(['/tmp/b9'],check=True)
+          h=hashlib.sha256(open('/out/results.txt','rb').read()).hexdigest()
+          assert h == want,(h,want)
+          print('PASS published full seed1 SHA256',flush=True)
+          PY
+      - name: 36 interleaved complete full-dataset runs
+        run: |
+          python3 - <<'PY'
+          import random,statistics,subprocess,time
+          samples={'b12':[],'b9':[]}
+          for trial in range(36):
+              order=list(samples)
+              random.Random(20261102+trial*139).shuffle(order)
+              for name in order:
+                  t=time.perf_counter()
+                  subprocess.run(['/tmp/'+name],check=True,stdout=subprocess.DEVNULL)
+                  samples[name].append((time.perf_counter()-t)*1000)
+          base=statistics.median(samples['b12']); new=statistics.median(samples['b9'])
+          print(f'BENCH b12_median_ms={base:.3f} b9_median_ms={new:.3f} ratio={new/base:.5f}',flush=True)
+          print('PAIRS faster_b9=',sum(a>b for a,b in zip(samples['b12'],samples['b9'])),flush=True)
+          print('SAMPLES b12=',[round(x,3) for x in samples['b12']],flush=True)
+          print('SAMPLES b9=',[round(x,3) for x in samples['b9']],flush=True)
+          PY
+      - name: Eight independent memory samples per variant
+        run: |
+          for i in 1 2 3 4 5 6 7 8; do
+            /usr/bin/time -f "RSS_KB b12 rep=$i kb=%M" /tmp/b12
+            /usr/bin/time -f "RSS_KB b9 rep=$i kb=%M" /tmp/b9
+          done
