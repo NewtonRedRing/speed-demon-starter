@@ -1,4 +1,5 @@
 name: Official board score gate audit
+# Second timestamped read after C trial
 on:
   push:
     branches: [oracle/score-audit-20261102-1240]
