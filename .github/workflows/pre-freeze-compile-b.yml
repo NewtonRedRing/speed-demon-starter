@@ -1,0 +1,25 @@
+name: Pre-freeze B Rust module build verification
+on:
+  pull_request:
+    branches: [speed-demon]
+    paths: ['.github/workflows/pre-freeze-compile-b.yml']
+permissions:
+  contents: read
+jobs:
+  compile:
+    if: github.head_ref == 'experiment/pre-freeze-compile-b-20261102'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile all current Track B sources at scoring target
+        run: |
+          rustc --version
+          cd track-b
+          rustc --edition=2024 -C opt-level=3 -C target-cpu=alderlake -C panic=abort -C codegen-units=1 -o /tmp/b_candidate main.rs
+          ls -l /tmp/b_candidate
+      - name: Docker source-copy smoke
+        run: |
+          cd track-b
+          grep -q 'COPY main.rs mmap.rs plan.rs pool.rs scan.rs vocab.rs' Dockerfile
+          test -f mmap.rs && test -f plan.rs && test -f pool.rs && test -f scan.rs && test -f vocab.rs
