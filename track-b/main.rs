@@ -84,6 +84,23 @@ unsafe fn key(p: *const u8, len: usize) -> __m256i {
     _mm256_and_si256(v, _mm256_loadu_si256(KEEP.as_ptr().add(32 - len).cast()))
 }
 
+/// Narrow exact key for short tokens. The original AVX2 key() loads 32
+/// input bytes and a 32-byte mask even when only 1..12 bytes are relevant.
+/// 128-bit loads/masking preserve the exact zero-padded normalized layout.
+#[inline(always)]
+unsafe fn short_key(p: *const u8, len: usize) -> __m128i {
+    static KEEP: [u8; 32] = {
+        let (mut mask, mut i) = ([0; 32], 0);
+        while i < 16 {
+            (mask[i], i) = (0xFF, i + 1);
+        }
+        mask
+    };
+    debug_assert!(len <= SHORT);
+    let v = _mm_or_si128(_mm_loadu_si128(p.cast()), _mm_set1_epi8(0x20));
+    _mm_and_si128(v, _mm_loadu_si128(KEEP.as_ptr().add(16 - len).cast()))
+}
+
 /// The hash of a key of at most 12 bytes.
 fn hash(k: __m128i) -> usize {
     let w: [u64; 2] = unsafe { std::mem::transmute(k) };
@@ -118,12 +135,12 @@ impl Terms {
     /// later, once its slot has been prefetched, and by finish at the latest.
     fn push(&mut self, term: &[u8], ids: &mut Vec<u32>) {
         ids.push(0);
-        let k = unsafe { key(term.as_ptr(), term.len()) };
         if term.len() > SHORT {
+            let k = unsafe { key(term.as_ptr(), term.len()) };
             *ids.last_mut().unwrap() = self.insert(k);
             return;
         }
-        let k = unsafe { _mm256_castsi256_si128(k) };
+        let k = unsafe { short_key(term.as_ptr(), term.len()) };
         let h = hash(k);
         unsafe { _mm_prefetch::<_MM_HINT_T0>(self.tab.as_ptr().add(h & (self.tab.len() - 1)).cast()) };
         let oldest = std::mem::replace(&mut self.ring[self.fed % 8], (k, h, ids.len() - 1));
@@ -241,14 +258,21 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
             }
             m &= !0u64 << (s + len); // here the token ends inside the window
             if len <= 32 {
-                let k = _mm256_castsi256_si128(key(p.add(s as usize), len as usize));
-                let h = hash(k);
-                let slot = t.tab.as_ptr().add(h & (t.tab.len() - 1));
-                _mm_prefetch::<_MM_HINT_T0>(slot.cast());
+                // Long tokens do not use the short table. Leave the
+                // unrelated CRC/preload out of their critical path.
+                let (k, h) = if len as usize <= SHORT {
+                    let k = short_key(p.add(s as usize), len as usize);
+                    let h = hash(k);
+                    let slot = t.tab.as_ptr().add(h & (t.tab.len() - 1));
+                    _mm_prefetch::<_MM_HINT_T0>(slot.cast());
+                    (k, h as u32)
+                } else {
+                    (_mm_setzero_si128(), 0)
+                };
                 if n >= LAG {
                     look(&ring[n % LAG]);
                 }
-                (ring[n % LAG], n) = ((k, h as u32, len, p.add(s as usize)), n + 1);
+                (ring[n % LAG], n) = ((k, h, len, p.add(s as usize)), n + 1);
             }
         }
         if nl != 0 {
