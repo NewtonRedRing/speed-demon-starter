@@ -155,3 +155,47 @@ https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41436785189 .
 **Promotion policy:** The official board's overall Track D machine points,
 correctness gates, source-size count and memory, not GitHub-hosted runtime
 alone, determine whether a tested implementation displaces the existing winner.
+
+
+## November 2 follow-up: locality blob and prefetch ablations
+
+Both sweeps preserved the exact official full-output SHA-256 and passed independent
+reference comparisons for seeds 1 and 7. All variants were built using identical
+`rustc` flags, with benchmark comparisons alternated to control drift.
+
+- **Locality blob sweep** on official full seed 1:
+  https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41438140682 .
+  Eleven paired median process times (ms): original **512-node blob 711.549**;
+  128-node **720.253**; 256-node **713.339**; 1024-node **712.607**;
+  2048-node **711.267**. Equivalent source size (479 noncomment formatted lines),
+  comparable memory, **no meaningful improvement**. An independent six-size sweep
+  https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41438100339
+  likewise found no reproducible blob-size advantage.
+- **Prefetch ablation** on the restored radix-heap version:
+  https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41438509242 .
+  Eleven paired median process times (ms): baseline **683.448**;
+  remove search-edge-offset prefetch **690.963**;
+  remove BFS-lookahead prefetch **715.778**;
+  remove both **726.628**. All were slower despite small reductions in source
+  lines. Keep the existing prefetch logic.
+
+**Official board variance warning:** A later board audit
+https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41438445116
+listed a single exact-wheel run at **68.363711 points** (168.724 ms)
+and another at **67.732133** (177.210 ms), showing considerable
+scoring-machine variability across identical wheel source. The
+restored radix source has an independently verified **68.316671** run.
+Do not claim a consistently faster implementation from one high score
+or from GitHub-hosted medians. The `speed-demon` executable remains
+the established radix version.
+
+**Next cutting-edge engineering leads:** Cache-efficient dynamic distance
+pages that reduce misses without large page-initialization cost; a carefully
+bounded bidirectional upper-bound warmstart using only the source/target
+adjacency; or low-overhead batching of repeated road-network searches.
+Research on parallel contraction hierarchies (SPoCH, ICS 2025,
+https://doi.org/10.1145/3721145.3725744) demonstrates excellent query
+acceleration but the large online preprocessing cost may exceed the
+entire Track D runtime. Any new routing index must measure
+index-build + all 2000 queries + output, preserve arbitrary nonnegative
+u32 weights, and pass official holdout-style correctness tests.
