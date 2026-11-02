@@ -1,6 +1,5 @@
-// Experimental port of MIT-licensed packed-CSR bucket-Dijkstra architecture
-// https://github.com/keirsalterego/danse-macabre/tree/speed-demon/track-d
-// Copyright (c) 2026 Hackathon Raptors CIC and danse-macabre contributors.
+// Adapted from MIT-licensed Speed Demon 2026 entry https://github.com/keirsalterego/danse-macabre/blob/speed-demon/track-d/src/main.rs
+// Copyright (c) 2026 Hackathon Raptors CIC and keirsalterego/danse-macabre contributors. See root LICENSE.
 //! # Track D: Traverse
 //!
 //! For each query `(s, t)` this program prints the length of the shortest directed path from `s`
@@ -464,18 +463,18 @@ impl Csr {
     /// end of this one.
     fn edges<'a>(&'a self, node: u32, copy: &'a mut [u32; 8]) -> &'a [u32] {
         let (start, end) = self.row(node);
-        if end - start <= 8 {
-            if let Some(window) = self.edges.get(start..start + 8) {
-                copy.copy_from_slice(window);
-                return &copy[..end - start];
-            }
+        if let Some(window) = self.edges.get(start..start + 8)
+            && end - start <= 8
+        {
+            copy.copy_from_slice(window);
+            return &copy[..end - start];
         }
         &self.edges[start..end]
     }
 
     /// Returns a function that unpacks one of `node`'s edges into its other end and its weight.
     /// It works out the field layout once, so a loop over the edges keeps it in registers.
-    fn unpack(&self, node: u32) -> impl Fn(&u32) -> (u32, u64) + '_ {
+    fn unpack(&self, node: u32) -> impl Fn(&u32) -> (u32, u64) {
         let (bits, mask) = (self.id_bits, (1 << self.id_bits) - 1);
         let all_ones = u64::from(u32::MAX) >> bits;
         move |&edge| {
