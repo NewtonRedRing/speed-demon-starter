@@ -199,3 +199,47 @@ acceleration but the large online preprocessing cost may exceed the
 entire Track D runtime. Any new routing index must measure
 index-build + all 2000 queries + output, preserve arbitrary nonnegative
 u32 weights, and pass official holdout-style correctness tests.
+
+
+## November 2: Radix bitmask, fused CSR and sparse-page research
+
+These were independent **GitHub Actions** Rust experiments; their
+GitHub-hosted timings are not i5-13500 official scores. All used
+the exact reference graph generator, checked multiple independent
+seeds, and validated the public full seed-1 output checksum
+`a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e`.
+
+- **Nonempty radix-bucket bitmask:** a 64-bit occupancy mask replaces the
+  linear search for the lowest nonempty bucket on each refill. [PR #44,
+  CI 41437938400](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41437938400).
+  12 paired complete full-graph runs: radix baseline **692.241 ms**,
+  bitmask **712.916 ms** (**2.99% slower**, zero of 12 paired
+  wins). Added push/refill bitset maintenance outweighed saved scans.
+  **Rejected; not merged.**
+- **Fused reverse CSR in-degree pass:** count destination in-degrees with
+  relaxed atomics while mapping the forward CSR, eliminating a standalone
+  full-edge reverse-degree pass. [PR #47, CI 41444148140]
+  (https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41444148140).
+  All tiny/sample/full outputs exact. 12 paired complete-process runs:
+  **703.359 ms baseline vs 737.510 ms candidate**, **4.86% slower**;
+  single-run RSS **151,780 KB vs 158,536 KB**.
+  Atomic contention and cache traffic dominated the saved pass.
+  **Rejected and rolled back without touching the submission branch.**
+- **Sparse-distance page size and graph partition width:** nine exact
+  variants independently built from approved radix source in
+  [PR #48, CI 41444590321]
+  (https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41444590321).
+  Baseline page=512, part bits=16 median **695.529 ms**.
+  Part bits=14 (16,384 nodes/part) **689.891 ms** (0.81% lower),
+  but one-shot RSS **151,904 KB vs 151,660 KB** baseline.
+  Page=128 **693.209 ms** (0.33% lower). Other variants did not
+  improve speed. Those small non-board differences were not
+  sufficient to justify a production source change. **Not promoted.**
+
+**Final engineering decision:** Retain the exact source blob
+`46bfcda6d77a5bfb6a72a4baf108de4d71c81a1c` from scored
+radix implementation `6759b53`. One historical wheel-run high
+of 68.363711 points is not consistent evidence that the wheel
+is more robust than radix; another wheel result scored 67.732133.
+Do not silently substitute experimental code. No source-size or
+dependency changes from this research.
