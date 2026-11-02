@@ -73,6 +73,17 @@ zero-weight, duplicate, disconnected, and >2^32 path cases with the
 exact full digest and generated seeds. The code must not use
 approximate heuristics or drop candidates.
 
+**Frontier-policy check, completed:** [workflow run 41437023336](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41437023336) compared four exact Rust search directions on the official full public D input, with nine randomized interleaved executions per variant and the official output SHA verified on every run:
+
+| Policy | Median GitHub Actions elapsed | Baseline ratio |
+|---|---:|---:|
+| smaller queue (existing) | 718.857 ms | 1.0000 |
+| smaller minimum distance | 1220.763 ms | 1.6982 |
+| bias toward reverse frontier | 719.257 ms | 1.0006 |
+| bias toward forward frontier | 717.016 ms | 0.9974 |
+
+The minimum-distance rule is **strongly rejected**, since it expanded a much larger search frontier on this workload. Modest queue-size bias is indistinguishable from noise and adds instructions, so **do not promote** it. Exact source remains unmodified on the contest branch.
+
 Second: fuse CSR scatter and renumbering while *retaining the same
 BFS locality mapping*. The current builder constructs multiple complete
 CSR versions. Any reduction in temporary graph lifetime or memory
