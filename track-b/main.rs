@@ -200,7 +200,7 @@ impl Queries {
     }
 
     /// Query `q`'s terms, each with the operator that joins it. The zip ends with the terms.
-    fn steps(&self, q: usize) -> impl Iterator<Item = Step> {
+    fn steps(&self, q: usize) -> impl Iterator<Item = Step> + '_ {
         (self.ops[self.at[q] as usize..].iter().copied()).zip(self.terms(q).iter().copied())
     }
 }
