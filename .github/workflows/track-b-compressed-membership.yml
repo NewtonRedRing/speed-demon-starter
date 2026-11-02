@@ -17,6 +17,7 @@ jobs:
         run: |
           set -euo pipefail
           rustc --version
+          git fetch --no-tags --depth=1 origin ae44f84fab34eada896a4276996f792949b31e83
           git show ae44f84fab34eada896a4276996f792949b31e83:track-b/main.rs > /tmp/baseline.rs
           rustc --edition=2021 -C opt-level=3 -C target-cpu=native -C panic=abort -C codegen-units=1 -o /tmp/baseline /tmp/baseline.rs
           rustc --edition=2021 -C opt-level=3 -C target-cpu=native -C panic=abort -C codegen-units=1 -o /tmp/candidate track-b/main.rs
