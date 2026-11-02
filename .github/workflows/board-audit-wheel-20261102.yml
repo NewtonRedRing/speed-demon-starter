@@ -3,6 +3,8 @@ on:
   push:
     branches: [oracle/board-audit-wheel-20261102]
   workflow_dispatch:
+  pull_request:
+    branches: [speed-demon]
 jobs:
   audit:
     runs-on: ubuntu-24.04
