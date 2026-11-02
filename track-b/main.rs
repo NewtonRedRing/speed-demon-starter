@@ -218,7 +218,7 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 /// starts the next window. Each token's slot is prefetched and the token
 /// looked up LAG tokens later, so the misses overlap.
 unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, usize)) -> *const u8 {
-    const LAG: usize = 4;
+    const LAG: usize = 8;
     let mut ring = [(_mm_setzero_si128(), 0u32, 0u32, p); LAG];
     let mut look = |r: &(__m128i, u32, u32, *const u8)| f(if r.2 as usize > SHORT { t.lookup(r.3, r.2 as usize) } else { t.find(r.0, r.1 as usize) }, r.3, r.2 as usize);
     let mut n = 0usize;
@@ -537,7 +537,7 @@ fn main() {
     // phrases read (their tokens need no state). Within a class the most
     // frequent come first, so the state of common terms shares cache lines.
     let class = |i: usize| match (in_bool[i], anchor[i]) {
-        (true, false) => (df[i] as usize * 64 <= sampled) as usize,
+        (true, false) => (df[i] as usize * 32 <= sampled) as usize,
         (true, true) => 2,
         (false, true) => 3,
         (false, false) => 4,
