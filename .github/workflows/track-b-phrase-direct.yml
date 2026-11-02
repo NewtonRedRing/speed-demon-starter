@@ -1,0 +1,68 @@
+name: Track B direct phrase comparisons
+on:
+  push:
+    branches: [experiment/track-b-phrase-direct-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+jobs:
+  verify-and-benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile both with matching x86-64 optimization
+        run: |
+          git show origin/speed-demon:track-b/main.rs >/tmp/track_b_baseline.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=haswell -C panic=abort -o /tmp/track_b_baseline /tmp/track_b_baseline.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=haswell -C panic=abort -o /tmp/track_b_candidate track-b/main.rs
+      - name: Verify exact output on held-out generators
+        run: |
+          set -euo pipefail
+          sudo install -d -m 777 /out
+          for seed in 2 7 17 42 2026; do
+            python3 track-b/pgo_gen.py --seed "$seed" --scale tiny --out "/tmp/b-tiny-$seed"
+            sudo ln -sfn "/tmp/b-tiny-$seed" /data
+            /tmp/track_b_baseline
+            cp /out/results.txt /tmp/baseline-results
+            /tmp/track_b_candidate
+            cmp /tmp/baseline-results /out/results.txt
+            echo "PASS tiny seed=$seed"
+          done
+          python3 track-b/pgo_gen.py --seed 103 --scale sample --out /tmp/b-sample
+          sudo ln -sfn /tmp/b-sample /data
+          /tmp/track_b_baseline
+          cp /out/results.txt /tmp/baseline-results
+          /tmp/track_b_candidate
+          cmp /tmp/baseline-results /out/results.txt
+          echo 'PASS sample seed=103'
+          python3 track-b/pgo_gen.py --seed 1 --scale full --out /tmp/b-full
+          sudo ln -sfn /tmp/b-full /data
+          /tmp/track_b_baseline
+          cp /out/results.txt /tmp/baseline-results
+          /tmp/track_b_candidate
+          cmp /tmp/baseline-results /out/results.txt
+          echo 'PASS full seed=1'
+      - name: Paired full dataset wall-time and peak RSS (non-board)
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, time, statistics, resource
+          baseline="/tmp/track_b_baseline"
+          candidate="/tmp/track_b_candidate"
+          times={baseline: [], candidate: []}
+          for i in range(12):
+              order=[baseline,candidate] if i%2==0 else [candidate,baseline]
+              for executable in order:
+                  before=time.perf_counter()
+                  subprocess.run([executable],check=True,stdout=subprocess.DEVNULL)
+                  times[executable].append(time.perf_counter()-before)
+          b=statistics.median(times[baseline]); c=statistics.median(times[candidate])
+          print(f"FULL baseline_median_ms={b*1000:.3f} candidate_median_ms={c*1000:.3f} ratio={c/b:.5f}",flush=True)
+          print(f"FULL baseline_samples={times[baseline]}",flush=True)
+          print(f"FULL candidate_samples={times[candidate]}",flush=True)
+          PY
