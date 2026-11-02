@@ -25,6 +25,7 @@ jobs:
         run: |
           python3 track-c/pgo_gen.py --seed 1 --scale full --out /tmp/c_data
           sudo mkdir -p /data /out
+          sudo chmod 777 /data /out
           sudo ln -sf /tmp/c_data/records.csv /data/records.csv
           sudo ln -sf /tmp/c_data/regions.csv /data/regions.csv
           sudo chmod 777 /out
