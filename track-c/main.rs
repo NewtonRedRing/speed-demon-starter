@@ -323,7 +323,7 @@ impl Names {
     }
 }
 
-const BATCH: usize = 8;
+const BATCH: usize = 16;
 
 struct Sightings<'a> {
     names: &'a Names,
@@ -618,7 +618,7 @@ fn cut(data: &[u8], from: usize) -> usize {
 /// The final bytes are copied behind padding and parsed last, so vector
 /// lookahead cannot run beyond the file mapping.
 const TAIL: usize = 8192;
-const CHUNKS_PER_THREAD: usize = 64;
+const CHUNKS_PER_THREAD: usize = 32;
 
 fn scan(
     data: &[u8],
