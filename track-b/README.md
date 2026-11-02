@@ -24,3 +24,50 @@ Dependencies: none.
 With another 24 hours: reduce per-token dictionary/state traffic and replace
 repeated Boolean block work only when an exact full-dataset benchmark improves
 the official K axes.
+
+## Why this computational model
+
+All queries are available before index construction, so indexing only
+query-relevant tokens eliminates unnecessary postings. The scanner is fused
+with document membership creation: phrase-only terms need token-position
+verification but no Boolean document posting. Exact doc IDs remain sorted
+within each posting list, bitmap bits mean unique document presence, and
+duplicate matches cannot inflate counts.
+
+`Docs::List` uses sorted document IDs and `Docs::Bits` uses exact 64-document
+words. `apply` implements the specification's *left-associative* AND, OR and
+AND-NOT operations; NOT subtracts the right operand rather than complementing
+the entire universe. Phrase matching tests the ordered token sequence using a
+rare anchor and reports each document at most once. Short-word hashing and
+CRC32C hash tags are only prefilters; SIMD compares every candidate token's
+complete 32-byte padded key before declaring it equal. No probability can
+change correctness. Exact ID sum, total count and first ten document IDs are
+calculated from the final set.
+
+## Build and measured alternatives
+
+`Dockerfile` pins its toolchain and runtime images by SHA256. The multi-stage
+build uses generator-produced training input, Rust PGO+LTO and an offline
+runtime with no additional runtime dependencies. The official reference
+and independently generated tiny/sample seeds are compared byte for byte.
+
+The highest recorded official result for this implementation is public-board
+run `run-f979478c0277` (commit
+`c9f733bb7849269b600358483cc1c06936318bb6`): **72.172141 points**,
+**183.883 ms**, **46,641,152 bytes peak RSS**, **S=717**, **D=1**,
+**K=27.761494**. All official build, correctness, timeout and sandbox gates
+passed. This is a public-board observation; the final holdout may differ.
+
+An alternative exact threshold (bitmap cutoff 1/64) and a four-token lookup
+lag looked faster on a GitHub-hosted benchmark, but official run
+`run-fb448cadcb4e` measured **71.521322 points**, **182.235 ms** and
+**55,414,784 bytes**. Its roughly 19% higher scored memory outweighed the
+slightly lower wall time, reducing K to 26.941790. It was rolled back by
+`e2b1126f3066160af8ca82461cdd0aa06e1b5de6`. This demonstrates
+why runtime-only promotion is unsafe. Full experiment history and additional
+negative results are documented in `PERF.md`.
+
+Future research: exact adaptive two-pointer/galloping intersection for
+comparably sized postings, query-conditioned shared phrase execution and
+better worker sharding; all must pass full input output hashes, independent
+seeds, measured memory, then official board score before promotion.
