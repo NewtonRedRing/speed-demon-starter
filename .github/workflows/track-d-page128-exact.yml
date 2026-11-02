@@ -77,7 +77,7 @@ jobs:
           import subprocess, time, statistics, random
           execs={"baseline":"/tmp/d_base","page128":"/tmp/d_page128"}
           xs={k:[] for k in execs}
-          for i in range(12):
+          for i in range(48):
               order=list(execs)
               random.Random(i*7907+3).shuffle(order)
               for name in order:
@@ -89,6 +89,14 @@ jobs:
           print("SAMPLES baseline=",[round(x,3) for x in xs["baseline"]],flush=True)
           print("SAMPLES page128=",[round(x,3) for x in xs["page128"]],flush=True)
           print("FASTER_PAIRED=",sum(y<x for x,y in zip(xs["baseline"],xs["page128"])),flush=True)
+          pairs=[(x,y) for x,y in zip(xs["baseline"],xs["page128"])]
+          paired=[(x-y)/x for x,y in pairs]
+          import math
+          mean=sum(paired)/len(paired)
+          rng=random.Random(20261102)
+          sample_means=[sum(rng.choices(paired,k=len(paired)))/len(paired) for _ in range(20000)]
+          sample_means.sort()
+          print(f"PAIRED_RELATIVE_SAVING mean={mean:.6f} bootstrap95=[{sample_means[500]:.6f},{sample_means[19500]:.6f}] wins={sum(x>y for x,y in pairs)}/{len(pairs)}",flush=True)
           PY
       - name: Peak RSS and Rust source lines
         run: |
