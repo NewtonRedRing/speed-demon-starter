@@ -3,12 +3,17 @@
 Exact zero-dependency Rust implementation of the official hostile-CSV Track C
 specification.
 
-The input is memory-mapped and split into quote-safe ranges. The parser uses
-the specification's field grammar: nonempty names and notes are quoted, while
-IDs, region IDs and amounts are unquoted. AVX2 quote searches skip escaped pairs;
-commas and newlines inside quotes remain data. Empty quoted and unquoted fields,
-CRLF/LF and record-start BOMs retain their exact semantics. Region IDs use a
-dense lookup table and numeric aggregation remains thread-local.
+The input is memory-mapped and split into quote-safe ranges. The FALCON-C
+parser scans consecutive 64-byte SIMD tiles rather than repeatedly classifying
+a 128-byte window for every record. AVX2 identifies comma, newline and quote
+bytes, while carry-less prefix XOR carries quote parity between tiles. Only
+separators outside quoted fields are emitted. Quote counts at the name and
+note boundaries give exact unescaped byte lengths without constructing CSV
+strings; the original input bytes remain borrowed for exact name comparisons.
+Both empty quoting styles, escaped quotes, embedded note newlines, CRLF/LF,
+mid-record-boundary BOMs and long text fields are handled exactly. Numeric
+fields are converted directly to integers. Region IDs use a dense lookup table
+and numeric aggregation remains thread-local.
 
 Distinct names use a fixed-capacity concurrent atomic table. Length and the
 first/last eight raw bytes select a candidate bucket, never establish equality.
@@ -27,5 +32,8 @@ with the unmodified official generator and a separate training seed.
 
 Dependencies: none.
 
-With another 24 hours: profile structural CSV scanning and exact-name cache
-misses on the scoring CPU, then tune only exact full-process improvements.
+With another 24 hours: profile dictionary / membership cache misses and test
+wider structural tiles while preserving exact hash checks on multiple seeds.
+
+The official full-seed-1 board passed at 37.853 ms, 10,215,424 bytes peak
+memory and 73.956052 machine points (run-70f424aa22a8, commit 63ec07b).
