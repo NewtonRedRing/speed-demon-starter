@@ -1,0 +1,71 @@
+name: Track A HARP hour confirm 56 pairs
+on:
+  push:
+    branches: [experiment/track-a-harp-hour-20261102]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify published full input
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .out/full
+          curl -fL --retry 3 --connect-timeout 20 https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/data/track-a/full-seed1/requests.log -o .out/full/requests.log
+          echo '7ec80ba45bceef51ac7f79d3a14521fc6187b2dcb87b5e5542d08063fe5d962a  .out/full/requests.log' | sha256sum -c -
+      - name: Build exact baseline and current candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show 46120ff5d21a6100c3a5d86b571521a1380e6b2d:track-a/main.rs >/tmp/harp-base.rs
+          flags='--edition=2021 -C opt-level=3 -C lto=fat -C target-cpu=native -C panic=abort -C codegen-units=1 -C target-feature=+crt-static -C relocation-model=static'
+          rustc $flags -o /tmp/harp-base /tmp/harp-base.rs
+          rustc $flags -o /tmp/harp-hour track-a/main.rs
+          wc -l /tmp/harp-base.rs track-a/main.rs track-a/Dockerfile
+      - name: 56 interleaved paired runs plus interval
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /data /out
+          sudo chmod 0777 /out
+          sudo ln -sf "$GITHUB_WORKSPACE/.out/full/requests.log" /data/requests.log
+          python3 - <<'PY'
+          import os,pathlib,subprocess,hashlib,statistics,time,random
+          expected='495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3'
+          times={'base':[],'hour':[]}
+          rss={'base':[],'hour':[]}
+          for iteration in range(56):
+              # ABBA pairs, warming up but all runs still correctness-checked.
+              order=['base','hour'] if iteration%4<2 else ['hour','base']
+              for n in order:
+                  path=pathlib.Path('/out/summary.txt'); path.unlink(missing_ok=True)
+                  begin=time.perf_counter()
+                  p=subprocess.Popen([f'/tmp/harp-{n}'])
+                  _,status,usage=os.wait4(p.pid,0)
+                  assert os.waitstatus_to_exitcode(status)==0,(iteration,n,status)
+                  ms=(time.perf_counter()-begin)*1000
+                  with path.open('rb') as f: got=hashlib.file_digest(f,'sha256').hexdigest()
+                  assert got==expected,(iteration,n,got)
+                  times[n].append(ms); rss[n].append(usage.ru_maxrss/1024)
+              print(f'PAIR {iteration:02} base={times["base"][-1]:.3f} hour={times["hour"][-1]:.3f} ratio={times["base"][-1]/times["hour"][-1]:.5f}',flush=True)
+          # Exclude first 4 complete paired warm-up runs from statistics.
+          trimmed={n:times[n][4:] for n in times}
+          m={n:statistics.median(trimmed[n]) for n in times}
+          ratios=[b/h for b,h in zip(trimmed['base'],trimmed['hour'])]
+          med=statistics.median(ratios)
+          rng=random.Random(77)
+          boot=[statistics.median(rng.choices(ratios,k=len(ratios))) for _ in range(3000)]
+          boot.sort()
+          lo,hi=boot[75],boot[2924]
+          print(f'SUMMARY baseline median_ms={m["base"]:.3f} median_rss_mib={statistics.median(rss["base"][4:]):.2f} max_rss_mib={max(rss["base"][4:]):.2f}',flush=True)
+          print(f'SUMMARY hour median_ms={m["hour"]:.3f} median_rss_mib={statistics.median(rss["hour"][4:]):.2f} max_rss_mib={max(rss["hour"][4:]):.2f}',flush=True)
+          print(f'PAIRED median_base_over_hour={med:.5f} bootstrap_95pct=[{lo:.5f},{hi:.5f}] wins={sum(b>h for b,h in zip(trimmed["base"],trimmed["hour"]))}/{len(ratios)}',flush=True)
+          print('CORRECTNESS_PASS 112 full-input executions',flush=True)
+          PY
