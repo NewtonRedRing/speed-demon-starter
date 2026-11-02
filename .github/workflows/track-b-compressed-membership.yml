@@ -1,0 +1,51 @@
+name: Track B compressed-postings membership A/B
+on:
+  pull_request:
+    paths:
+      - "track-b/main.rs"
+      - ".github/workflows/track-b-compressed-membership.yml"
+  workflow_dispatch:
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile baseline and candidate Rust on runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version
+          git show ae44f84fab34eada896a4276996f792949b31e83:track-b/main.rs > /tmp/baseline.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=native -C panic=abort -C codegen-units=1 -o /tmp/baseline /tmp/baseline.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=native -C panic=abort -C codegen-units=1 -o /tmp/candidate track-b/main.rs
+          sudo mkdir -p /data /out
+          sudo chown "$USER" /data /out
+      - name: Verify exact output against original across sample and tiny seeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, os, pathlib, statistics, subprocess, time
+          root = pathlib.Path('/data')
+          out = pathlib.Path('/out/results.txt')
+          for seed, scale, repetitions in [(17, 'sample', 8), (2, 'tiny', 1), (7, 'tiny', 1), (42, 'tiny', 1), (2026, 'tiny', 1)]:
+              subprocess.run(['python3','track-b/pgo_gen.py','--seed',str(seed),'--scale',scale,'--out','/data'],check=True)
+              timings = {name: [] for name in ('baseline','candidate')}
+              digest = None
+              for j in range(repetitions):
+                  for name in (('baseline','candidate') if j%2==0 else ('candidate','baseline')):
+                      out.unlink(missing_ok=True)
+                      t0=time.perf_counter()
+                      subprocess.run(['/tmp/'+name], check=True)
+                      ms=(time.perf_counter()-t0)*1000
+                      data=out.read_bytes()
+                      assert data and data.endswith(b'\n'), (seed,scale,name)
+                      h=hashlib.sha256(data).hexdigest()
+                      if digest is None: digest=h
+                      assert h==digest,(seed,scale,name,digest,h)
+                      timings[name].append(ms)
+              print(f'{scale} seed={seed}: exact SHA256={digest}; baseline median={statistics.median(timings["baseline"]):.2f} ms; candidate median={statistics.median(timings["candidate"]):.2f} ms',flush=True)
+          print('PASS: exact baseline agreement on 5 generated seed/scale combinations')
+          PY
