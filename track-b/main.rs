@@ -690,6 +690,16 @@ fn main() {
             Docs::List(v)
         }
     };
+    // Probe a term's compact per-thread u16 postings directly instead of
+    // decoding the entire list when a small candidate set is being narrowed.
+    let compressed_has = |term: usize, doc: u32| {
+        let t = firsts.partition_point(|&first| first <= doc).saturating_sub(1);
+        let sizes = &seg[term * THREADS..][..THREADS];
+        let at = start[term] as usize + sizes[..t].iter().map(|&n| n as usize).sum::<usize>();
+        let delta = doc - firsts[t];
+        delta <= u16::MAX as u32
+            && post[at..at + sizes[t] as usize].binary_search(&(delta as u16)).is_ok()
+    };
     let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
     on_threads(|_| {
@@ -705,9 +715,19 @@ fn main() {
                     Docs::List(found[at..].iter().take_while(|m| m.0 == q as u32).map(|m| m.1).collect())
                 } else {
                     let cur = docs(tids[0]);
-                    ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| match &cur {
-                        Docs::List(v) if v.is_empty() && op != b'O' => cur, // nothing left to narrow
-                        _ => apply(cur, op, docs(id), &mut scratch),
+                    ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| match cur {
+                        Docs::List(v) if v.is_empty() && op != b'O' => Docs::List(v),
+                        Docs::List(mut v) if op != b'O' && id as usize >= nbits && v.len() <= 32 => {
+                            let n: usize = seg[id as usize * THREADS..][..THREADS]
+                                .iter().map(|&n| n as usize).sum();
+                            if n >= v.len() * 32 {
+                                v.retain(|&d| compressed_has(id as usize, d) == (op == b'A'));
+                                Docs::List(v)
+                            } else {
+                                apply(Docs::List(v), op, docs(id), &mut scratch)
+                            }
+                        }
+                        other => apply(other, op, docs(id), &mut scratch),
                     })
                 };
                 line(&mut out, &set);
