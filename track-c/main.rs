@@ -409,8 +409,7 @@ fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
         let word = |p: usize| data.as_ptr().add(p).cast::<u64>().read_unaligned();
         let first = word(from) & byte_mask(len);
         let last = word(to - 8) * (len >= 8) as u64;
-        let h = _mm_crc32_u64(_mm_crc32_u64(len as u64, first), last);
-        h.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ h.rotate_left(29)
+        _mm_crc32_u64(len as u64 ^ first, last)
     }
 }
 
