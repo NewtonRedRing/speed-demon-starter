@@ -400,6 +400,25 @@ fn line(out: &mut String, docs: &Docs) {
     out.push('\n');
 }
 
+/// The count, sum and first IDs for a selective direct-query result.
+#[derive(Clone, Default)]
+struct DirectAnswer { count: u32, sum: u64, first: [u32; 10] }
+impl DirectAnswer {
+    #[inline(always)]
+    fn record(&mut self, doc: u32) {
+        if self.count < 10 { self.first[self.count as usize] = doc; }
+        self.count += 1;
+        self.sum += doc as u64;
+    }
+    fn append_to(&self, out: &mut String) {
+        write!(out, "{} {}", self.count, self.sum).unwrap();
+        for &d in &self.first[..(self.count as usize).min(10)] {
+            write!(out, " {d}").unwrap();
+        }
+        out.push('\n');
+    }
+}
+
 /// Calls f(doc, id, start, len) for the term tokens of the lines in text,
 /// the first being document first; returns the number of documents.
 fn walk(text: &[u8], first: u32, t: &Terms, mut f: impl FnMut(u32, u32, *const u8, usize)) -> u32 {
@@ -525,6 +544,49 @@ fn main() {
     for (_, d) in samples {
         df.iter_mut().zip(d).for_each(|(a, b)| *a += b);
     }
+    // Q-FUSE: a match implies that at least one witness was present.
+    // AND can use either side's witnesses, NOT keeps the left set, and OR
+    // takes the union. The Boolean predicate is still evaluated exactly.
+    const MAX_DIRECT: usize = 5000;
+    const MAX_WITNESS_SAMPLE_DF: u32 = 2;
+    let mut direct_lookup = vec![NONE; spans.len()];
+    let mut witness_dispatch: Vec<Vec<u32>> = vec![Vec::new(); nterms];
+    let mut direct_term = vec![false; nterms];
+    let mut direct_count = 0usize;
+    for (q, &(phrase, from, to)) in spans.iter().enumerate() {
+        if phrase || direct_count == MAX_DIRECT { continue; }
+        let ts = &ids[from as usize..to as usize];
+        if ts.is_empty() || ts.len() > 6 { continue; }
+        let mut witness = vec![ts[0]];
+        for (j, &term) in ts.iter().enumerate().skip(1) {
+            match ops[from as usize + j - 1] {
+                b'A' => {
+                    if df[term as usize] < witness.iter().map(|&w| df[w as usize]).sum() {
+                        witness.clear();
+                        witness.push(term);
+                    }
+                }
+                b'O' => if !witness.contains(&term) { witness.push(term); },
+                b'N' => {},
+                _ => unreachable!("invalid Boolean operation"),
+            }
+        }
+        let estimate: u32 = witness.iter().map(|&w| df[w as usize]).sum();
+        if estimate > MAX_WITNESS_SAMPLE_DF || witness.len() > 3 { continue; }
+        direct_lookup[q] = direct_count as u32;
+        direct_count += 1;
+        for &id in ts { direct_term[id as usize] = true; }
+        for &id in &witness { witness_dispatch[id as usize].push(q as u32); }
+    }
+    // Direct-only terms need no postings. Other queries use the baseline.
+    in_bool.fill(false);
+    for (q, &(phrase, from, to)) in spans.iter().enumerate() {
+        if !phrase && direct_lookup[q] == NONE {
+            for &id in &ids[from as usize..to as usize] {
+                in_bool[id as usize] = true;
+            }
+        }
+    }
     // Each phrase's anchor, its rarest term: (anchor, query, position).
     let (mut anchored, mut anchor) = (vec![], vec![false; nterms]);
     for (q, &(_, from, to)) in spans.iter().enumerate().filter(|s| s.1 .0) {
@@ -551,6 +613,21 @@ fn main() {
         new[k as usize & 0xFF_FFFF] = r as u32;
     }
     terms.renumber(&new);
+    // Renumber the sparse query dispatch to match the final term dictionary.
+    let mut direct_active = vec![false; nterms + 1];
+    let mut trigger_starts = vec![0usize; nterms + 1];
+    for old in 0..nterms {
+        let id = new[old] as usize;
+        direct_active[id] = direct_term[old];
+        trigger_starts[id + 1] = witness_dispatch[old].len();
+    }
+    for i in 0..nterms { trigger_starts[i + 1] += trigger_starts[i]; }
+    let mut trigger_queries = vec![0u32; trigger_starts[nterms]];
+    for (old, triggers) in witness_dispatch.iter().enumerate() {
+        let at = trigger_starts[new[old] as usize];
+        trigger_queries[at..at + triggers.len()].copy_from_slice(triggers);
+    }
+    drop((witness_dispatch, direct_term));
     ids.iter_mut().for_each(|id| *id = new[*id as usize]);
     anchored.iter_mut().for_each(|a| a.0 = new[a.0 as usize]);
     anchored.sort_unstable();
@@ -571,15 +648,19 @@ fn main() {
 
     // The scan: phrase matches, bitmap bits, and list postings by bucket.
     let found = Mutex::new(vec![]); // (query, document) phrase matches
-    let mut scans: Vec<(Vec<u16>, Mutex<Vec<Units>>)> = on_threads(|t| {
+    let mut scans: Vec<(Vec<u16>, Mutex<Vec<Units>>, Vec<DirectAnswer>)> = on_threads(|t| {
         // Per term (and one id for every token that needs nothing): documents
         // in this share, and the last one's offset + 1.
         let (mut count, mut last, mut mine) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1], vec![]);
         let mut buckets: Vec<Units> = (0..BUCKETS).map(|_| Units::default()).collect();
         let first = firsts[t];
+        let mut present = vec![0u16; nterms + 1];
+        let mut queued = vec![0u16; spans.len()];
+        let mut pending = Vec::<u32>::new();
+        let mut direct_results = vec![DirectAnswer::default(); direct_count];
         // Each bitmap term's bits for the current 64 documents (one more word
         // takes the bits of every other term), ORed in when the block ends.
-        let (mut pending, mut block) = (vec![0u64; nbits + 1], first as usize / 64);
+        let (mut pending_bits, mut block) = (vec![0u64; nbits + 1], first as usize / 64);
         let flush = |pending: &mut [u64], w: usize| {
             for (b, x) in pending[..nbits].iter_mut().enumerate().filter(|(_, x)| **x != 0) {
                 bits[b * words + w].fetch_or(std::mem::take(x), Relaxed);
@@ -587,7 +668,23 @@ fn main() {
         };
         // Bitmap OR is idempotent; only list postings need per-document
         // deduplication. Unused terms and phrase-only anchors need no posting.
-        let n = walk(&text[cut[t]..cut[t + 1]], first, &terms, #[inline(always)] |doc, id, s, len| {
+        let shard = &text[cut[t]..cut[t + 1]];
+        let (mut p, end, mut doc) = (shard.as_ptr(), shard.as_ptr_range().end, first);
+        while p < end {
+            unsafe {
+                while *p != b'\t' { p = p.add(1); }
+                p = tokens(p, &terms, #[inline(always)] |id, s, len| {
+            let mark = (doc - first + 1) as u16;
+            if (id as usize) < nterms {
+                let tid = id as usize;
+                if direct_active[tid] { present[tid] = mark; }
+                for &q in &trigger_queries[trigger_starts[tid]..trigger_starts[tid + 1]] {
+                    if queued[q as usize] != mark {
+                        queued[q as usize] = mark;
+                        pending.push(q);
+                    }
+                }
+            }
             let i = (id as usize).min(nkeep);
             if i == nkeep {
                 return;
@@ -606,9 +703,9 @@ fn main() {
             if i < nbits {
                 if doc as usize / 64 != block {
                     let w = std::mem::replace(&mut block, doc as usize / 64);
-                    flush(&mut pending, w);
+                    flush(&mut pending_bits, w);
                 }
-                pending[i] |= 1u64 << (doc % 64);
+                pending_bits[i] |= 1u64 << (doc % 64);
                 return;
             }
             if i >= lists {
@@ -620,13 +717,45 @@ fn main() {
                 buckets[i % BUCKETS].add((i / BUCKETS) as u32, doc - first);
                 count[i] += 1;
             }
-        });
-        flush(&mut pending, block);
+                });
+            }
+            // Consume each triggered query at the document boundary, after
+            // all its terms have been seen. Repeat tokens trigger only once.
+            let mark = (doc - first + 1) as u16;
+            for q in pending.drain(..) {
+                let (_, from, to) = spans[q as usize];
+                let mut matched = present[ids[from as usize] as usize] == mark;
+                for j in from as usize + 1..to as usize {
+                    let hit = present[ids[j] as usize] == mark;
+                    matched = match ops[j - 1] {
+                        b'A' => matched && hit,
+                        b'O' => matched || hit,
+                        b'N' => matched && !hit,
+                        _ => unreachable!("invalid Boolean operation"),
+                    };
+                }
+                if matched { direct_results[direct_lookup[q as usize] as usize].record(doc); }
+            }
+            doc += 1;
+        }
+        let n = doc - first;
+        flush(&mut pending_bits, block);
         assert!(n < 1 << DOC_BITS, "too many documents per thread");
         found.lock().unwrap().extend(mine);
-        (count, Mutex::new(buckets))
+        (count, Mutex::new(buckets), direct_results)
     });
-    drop((terms, recs, astart));
+    drop((terms, recs, astart, direct_active, trigger_starts, trigger_queries));
+    // Shard ranges are ordered: first matches can be concatenated globally.
+    let mut direct_answers = vec![DirectAnswer::default(); direct_count];
+    for scan in &scans {
+        for (dst, src) in direct_answers.iter_mut().zip(&scan.2) {
+            let offset = (dst.count as usize).min(10);
+            let take = (10 - offset).min(src.count as usize);
+            dst.first[offset..offset + take].copy_from_slice(&src.first[..take]);
+            dst.count += src.count;
+            dst.sum += src.sum;
+        }
+    }
     // Each term's postings lie in one stretch, thread by thread: the segment
     // from thread t holds seg[i * THREADS + t] offsets from firsts[t]. The
     // stretches go bucket by bucket, so a bucket's scatter writes one region,
@@ -700,6 +829,10 @@ fn main() {
             let mut out = String::new();
             for (q, &(phrase, from, to)) in spans.iter().enumerate().skip(k * 64).take(64) {
                 let (tids, ops) = (&ids[from as usize..to as usize], &ops[from as usize..to as usize]);
+                if direct_lookup[q] != NONE {
+                    direct_answers[direct_lookup[q] as usize].append_to(&mut out);
+                    continue;
+                }
                 let set = if phrase {
                     let at = found.partition_point(|m| m.0 < q as u32);
                     Docs::List(found[at..].iter().take_while(|m| m.0 == q as u32).map(|m| m.1).collect())
