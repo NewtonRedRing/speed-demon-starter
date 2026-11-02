@@ -98,12 +98,26 @@ fn same(a: __m256i, b: __m256i) -> bool {
 /// entries: the key's 12 bytes and the id + 1 (0 if free), so a hit reads
 /// one cache line. The few longer terms are searched linearly.
 const SHORT: usize = 12;
+const DIRECT3: usize = 37 * 37 * 37; // ~198 KiB, base-37 exact 1..3-token map
+#[inline(always)]
+unsafe fn three(p: *const u8, len: usize) -> usize {
+    let mut index = 0;
+    for i in 0..3 {
+        let d = if i >= len { 0 } else {
+            let b = *p.add(i) | 0x20;
+            if b <= b'9' { b - b'0' + 1 } else { b - b'a' + 11 }
+        };
+        index = index * 37 + d as usize;
+    }
+    index
+}
 
 /// Query terms to dense ids. A token that is no term gets the id one past
 /// the last term.
 struct Terms {
     tab: Vec<__m128i>,
     long: Vec<(__m256i, u32)>,
+    direct3: Vec<u32>,
     n: u32,
     ring: [(__m128i, usize, usize); 8], // short terms waiting for their slot: key, hash, place in the ids
     fed: usize,
@@ -173,6 +187,15 @@ impl Terms {
         for e in &mut self.tab {
             let w: &mut [u32; 4] = unsafe { std::mem::transmute(e) };
             w[3] = if w[3] == 0 { 0 } else { new[w[3] as usize - 1] + 1 };
+            if w[3] != 0 {
+                let key: [u8; 16] = unsafe { std::mem::transmute(*e) };
+                if let Some(n) = key[..4].iter().position(|&b| b == 0) {
+                    if n > 0 {
+                        let at = unsafe { three(key.as_ptr(), n) };
+                        self.direct3[at] = w[3] - 1;
+                    }
+                }
+            }
         }
         self.long.iter_mut().for_each(|l| l.1 = new[l.1 as usize]);
     }
@@ -240,7 +263,10 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
                 break;
             }
             m &= !0u64 << (s + len); // here the token ends inside the window
-            if len <= 32 {
+            if len <= 3 {
+                let id = t.direct3[three(p.add(s as usize), len as usize)].min(t.n);
+                f(id, p.add(s as usize), len as usize);
+            } else if len <= 32 {
                 let k = _mm256_castsi256_si128(key(p.add(s as usize), len as usize));
                 let h = hash(k);
                 let slot = t.tab.as_ptr().add(h & (t.tab.len() - 1));
@@ -471,7 +497,7 @@ fn main() {
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) };
     let qtext = map("/data/queries.txt");
     let tab: Vec<__m128i> = unsafe { std::mem::transmute(vec![0u128; (qtext.len() / 8).next_power_of_two()]) };
-    let mut terms = Terms { tab, long: vec![], n: 0, ring: [(unsafe { _mm_setzero_si128() }, 0, 0); 8], fed: 0 };
+    let mut terms = Terms { tab, long: vec![], direct3: vec![u32::MAX; DIRECT3], n: 0, ring: [(unsafe { _mm_setzero_si128() }, 0, 0); 8], fed: 0 };
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
