@@ -153,3 +153,7 @@ are not a valid basis for a projected six-point gain.
 **Validation status:** The changes above require a fresh Rust compile, full
 seed-1 SHA256 output check, and wall-time/cgroup peak-memory comparison. None
 of the proposed +point effects is stated as an achieved result.
+
+## 2026-11-02 candidate packed hour-run pipeline (unscored experiment)
+
+Ported techniques and implementation from the MIT-licensed [danse-macabre Track A](https://github.com/keirsalterego/danse-macabre/tree/speed-demon/track-a), Copyright (c) 2026 Hackathon Raptors CIC and its contributors, under the MIT terms in the repository LICENSE. Compact four-byte per-request records, preserve hour runs in incoming file order, per-hour counting sort and exact percentiles in L2, parallel output formatting. The upstream reports 16.6 ms / 16.9 MB / 87.6 points; **not a NewtonRedHeat measured result**. Previous protected source lives at f9c0a75900b951ba5fcf8a4e4bd74a4b7a6266e6; no production promotion before exact output hashes and a better K score.
