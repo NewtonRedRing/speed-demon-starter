@@ -123,3 +123,8 @@ comparison (trimmed 223.030 and 227.463 ms versus 220.925 ms).
 A 4-million-bit exact Bloom prefilter for query-term membership also matched
 the full hash but was slower in a 16-run comparison (213.307 / 248.996 ms,
 protected / candidate) and used more memory. It was removed.
+
+
+## November 1: experiments that did not help
+
+Answering BOOL queries without an index (per-block masks, queries triggered by their rarest terms) cut peak memory from 52 MB to 35 MB but raised time from about 200 ms to 260-300 ms (about 18.6M query-block evaluations at 30-100 ns each, instruction bound with two threads per core). Reading ahead in the document text (1-2 KB), bitmap thresholds of 1/16 and 1/64, handing the postings back to the kernel in parallel before exit, guided query scheduling and removing a per-query allocation were all neutral or worse on the board, so the postings-and-bitmap design stands.

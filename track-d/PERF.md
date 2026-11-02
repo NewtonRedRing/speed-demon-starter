@@ -96,3 +96,8 @@ entire measured query stage is only about a quarter second locally, so its
 preprocessing cost would need a demonstrated whole-process win.
 All official hashes, all 14 tests, all eight solution methods under ASan/UBSan,
 strict warnings and all four offline sandbox checks pass. No new score exists.
+
+
+## November 1: experiments that did not help
+
+Reading ahead in the edge list (3 KB per edge) cost about 35 ms, allowing transparent huge pages raised peak memory by 7 MB for no gain, handing the arrays back in parallel before exit cost about 8 ms, cache-affine query batches and build-time PGO scored lower. The source is the best-scoring version.
