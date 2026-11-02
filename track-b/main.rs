@@ -323,6 +323,15 @@ impl<'a> Post<'a> {
     fn iter(self) -> PostIter<'a> {
         PostIter { post: self, shard: 0, remaining: 0, offset: 0, base: 0 }
     }
+    #[inline]
+    fn contains(self, d: u32) -> bool {
+        let shard = self.firsts.partition_point(|&x| x <= d).saturating_sub(1);
+        let start: usize = self.segments[..shard].iter().map(|&n| n as usize).sum();
+        let n = self.segments[shard] as usize;
+        let local = d - self.firsts[shard];
+        local <= u16::MAX as u32 &&
+            self.values[start..start + n].binary_search(&(local as u16)).is_ok()
+    }
 }
 impl Iterator for PostIter<'_> {
     type Item = u32;
@@ -418,6 +427,18 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, scratch: &mut [u64]) -> Docs
             Bits(b)
         }
         (Post(a), _, Post(b)) => List(merge_docs(a.iter(), b.iter(), op, a.len, b.len)),
+        (List(mut a), _, Post(b)) if op != b'O' => {
+            // In-place filtering keeps the left intermediate vector. For
+            // skewed lengths, binary-search the borrowed 16-bit postings.
+            if a.len() * 8 < b.len {
+                a.retain(|&d| b.contains(d) == (op == b'A'));
+            } else {
+                for d in b.iter() { scratch[d as usize / 64] |= 1 << (d % 64); }
+                a.retain(|&d| has(scratch, d) == (op == b'A'));
+                for d in b.iter() { scratch[d as usize / 64] = 0; }
+            }
+            List(a)
+        }
         (List(a), _, Post(b)) => {
             let n = a.len();
             List(merge_docs(a.into_iter(), b.iter(), op, n, b.len))
@@ -777,16 +798,22 @@ fn main() {
     // Answers, 64 queries at a time on every thread. Large lists come and go
     // here, so they now reuse heap memory instead of a fresh mapping each.
     unsafe { mallopt(-3, 64 << 20) };
-    // Sparse terms are borrowed as 16-bit sorted postings; only actual
-    // Boolean operators materialize derived 32-bit document sets.
+    // Materialize only the *leftmost* sparse term in each Boolean query.
+    // All subsequent sparse terms are borrowed as 16-bit posting views;
+    // intermediates filter in-place or use an ordered union.
+    let postings = |i: usize| {
+        let segs = &seg[i * THREADS..][..THREADS];
+        let n: usize = segs.iter().map(|&count| count as usize).sum();
+        let at = start[i] as usize;
+        Post { values: &post[at..at + n], segments: segs, firsts: &firsts, len: n }
+    };
+    let term_docs = |id: u32| match id as usize {
+        i if i < nbits => Docs::Bits(Cow::Borrowed(&bits[i * words..(i + 1) * words])),
+        i => Docs::Post(postings(i)),
+    };
     let docs = |id: u32| match id as usize {
         i if i < nbits => Docs::Bits(Cow::Borrowed(&bits[i * words..(i + 1) * words])),
-        i => {
-            let segs = &seg[i * THREADS..][..THREADS];
-            let n: usize = segs.iter().map(|&count| count as usize).sum();
-            let at = start[i] as usize;
-            Docs::Post(Post { values: &post[at..at + n], segments: segs, firsts: &firsts, len: n })
-        }
+        i => Docs::List(postings(i).iter().collect()),
     };
     let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
     let next = AtomicUsize::new(0);
@@ -805,7 +832,7 @@ fn main() {
                     let cur = docs(tids[0]);
                     ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| match &cur {
                         Docs::List(v) if v.is_empty() && op != b'O' => cur, // nothing left to narrow
-                        _ => apply(cur, op, docs(id), &mut scratch),
+                        _ => apply(cur, op, term_docs(id), &mut scratch),
                     })
                 };
                 line(&mut out, &set);
