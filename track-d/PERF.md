@@ -101,3 +101,57 @@ strict warnings and all four offline sandbox checks pass. No new score exists.
 ## November 1: experiments that did not help
 
 Reading ahead in the edge list (3 KB per edge) cost about 35 ms, allowing transparent huge pages raised peak memory by 7 MB for no gain, handing the arrays back in parallel before exit cost about 8 ms, cache-affine query batches and build-time PGO scored lower. The source is the best-scoring version.
+
+
+## November 2: officially scored queue experiment and hardware-oriented research
+
+The experimental 1,024-slot integer-wheel queue was correct and showed a 7.25%
+median reduction in one paired GitHub Actions benchmark, but that **did not**
+transfer to the scoring machine. Official board run `run-46320c1ba140`,
+commit `9bb3f6a76188cd39fefd95b769f53135f1341b0f`, reported **0.177210 s**,
+**77,762,560 bytes** and **532 code lines** for **67.732133 points**. Every gate
+passed. The historical, better source (blob
+`46bfcda6d77a5bfb6a72a4baf108de4d71c81a1c`) scored **68.316671 points**
+at **0.174011 s**, **76,247,040 bytes** and **485 code lines** in official
+run `run-e3a230f2ca26` on commit `6759b53eda0ced88ef30a8d0f9b77654a0c8686b`.
+Commit `635c41cbfa8a7144e76f5fcdf2356cd73865cade` restored the historical
+Track D source without modifying A–C. The board audit supporting this decision:
+https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41436015800
+
+New *experimental-branch only* tests, all using the official seed-1 full output
+SHA-256 and reference-checked sample seeds, include:
+
+- Wheel reset and sparse page sweep:
+  https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41435656599 .
+  Medians (ms): wheel baseline **442.562**, clear only **438.289**,
+  128-entry pages **434.062**, 256-entry **444.871**, 1024-entry **436.421**.
+- Independent repeatability check:
+  https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41436119154 .
+  Medians (ms): wheel baseline **637.903**, 64-entry pages **641.465**,
+  128-entry pages **660.256**, 128+occupied-clear **645.766**. The prior
+  128-page advantage **did not reproduce** on the wheel engine.
+- Official-score-winning radix-heap experiments:
+  https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41436898361 .
+  Medians (ms): radix baseline **736.534**, 128-entry pages **721.316**,
+  256-entry pages **732.583**, radix occupied-bucket bitmap **775.008**.
+  The 128-page change is promising but has **no scoring-box proof**; the bitmap
+  is clearly worse and was rejected. No experimental code was promoted.
+
+**Research direction:** Efficient route preprocessing techniques such as
+Customizable Tree Labeling (PVLDB 2025,
+https://doi.org/10.14778/3748191.3748198), flow-optimized Customizable
+Contraction Hierarchies (Procedia Computer Science 2025,
+https://doi.org/10.1016/j.procs.2025.03.010), and batched customizable routing
+(Future Transportation 2026, https://doi.org/10.3390/futuretransp6040134)
+offer excellent road-network query acceleration, but their online index-build
+time must be included in this contest's end-to-end wall clock. Since Track D
+has just 2,000 predominantly local queries, prioritize CPU-cache locality,
+lightweight exact distance storage, packed graph construction and minimizing
+preprocessing overhead rather than importing a large routing index. A separate
+controlled identity-order experiment showed ~**2.89x slower** performance when
+BFS locality numbering was removed:
+https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41436785189 .
+
+**Promotion policy:** The official board's overall Track D machine points,
+correctness gates, source-size count and memory, not GitHub-hosted runtime
+alone, determine whether a tested implementation displaces the existing winner.
