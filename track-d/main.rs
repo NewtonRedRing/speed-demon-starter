@@ -118,49 +118,95 @@ fn share(n: usize, t: usize, nt: usize) -> std::ops::Range<usize> {
     n * t / nt..n * (t + 1) / nt
 }
 
-/// A monotone priority queue: keys never drop below the last one popped, so
-/// a key only moves to a lower bucket, and only the lowest is ever split.
-struct RadixHeap {
-    b: Vec<Vec<(u64, u32)>>,
+/// Two-level exact integer priority queue. Near distances live in 1024
+/// exact buckets holding u32 node ids; farther distances use a radix
+/// hierarchy on aligned 1024-distance groups. No distance is rounded.
+struct WheelHeap {
+    nodes: Vec<Vec<u32>>,
+    occupied: [u64; 16],
+    words: u64,
+    base: u64,
+    group: u64,
+    far: Vec<Vec<(u64, u32)>>,
     len: usize,
-    last: u64,
 }
-
-impl RadixHeap {
+impl WheelHeap {
     fn new() -> Self {
-        RadixHeap { b: (0..65).map(|_| Vec::new()).collect(), len: 0, last: 0 }
+        Self {
+            nodes: (0..1024).map(|_| Vec::new()).collect(),
+            occupied: [0; 16],
+            words: 0,
+            base: 0,
+            group: 0,
+            far: (0..65).map(|_| Vec::new()).collect(),
+            len: 0,
+        }
     }
-    fn slot(&self, k: u64) -> usize {
-        (64 - (k ^ self.last).leading_zeros()) as usize
+    #[inline]
+    fn near(&mut self, key: u64, node: u32) {
+        let i = (key - self.base) as usize;
+        if self.nodes[i].is_empty() {
+            let w = i >> 6;
+            self.occupied[w] |= 1u64 << (i & 63);
+            self.words |= 1u64 << w;
+        }
+        self.nodes[i].push(node);
     }
-    fn push(&mut self, k: u64, u: u32) {
-        let s = self.slot(k);
-        unsafe { self.b.get_unchecked_mut(s) }.push((k, u));
+    #[inline]
+    fn push(&mut self, key: u64, node: u32) {
         self.len += 1;
+        if key >= self.base && key - self.base < 1024 {
+            self.near(key, node);
+        } else {
+            let i = (64 - ((key >> 10) ^ self.group).leading_zeros()) as usize;
+            self.far[i].push((key, node));
+        }
     }
-    /// The smallest key (the heap must not be empty).
-    fn top(&mut self) -> u64 {
-        if self.b[0].is_empty() {
-            let i = (1..65).find(|&i| !self.b[i].is_empty()).unwrap();
-            let mut v = std::mem::take(&mut self.b[i]);
-            self.last = v.iter().map(|e| e.0).min().unwrap();
+    #[cold]
+    fn refill(&mut self) {
+        if self.far[0].is_empty() {
+            let i = (1..65).find(|&i| !self.far[i].is_empty()).unwrap();
+            let mut v = std::mem::take(&mut self.far[i]);
+            self.group = v.iter().map(|e| e.0 >> 10).min().unwrap();
             for &(k, u) in &v {
-                let s = self.slot(k);
-                self.b[s].push((k, u));
+                let slot = (64 - ((k >> 10) ^ self.group).leading_zeros()) as usize;
+                self.far[slot].push((k, u));
             }
             v.clear();
-            self.b[i] = v;
+            self.far[i] = v;
         }
-        self.last
+        self.base = self.group << 10;
+        while let Some((key, node)) = self.far[0].pop() {
+            self.near(key, node);
+        }
     }
+    #[inline]
+    fn top(&mut self) -> u64 {
+        if self.words == 0 { self.refill(); }
+        let w = self.words.trailing_zeros() as usize;
+        self.base + (w * 64 + self.occupied[w].trailing_zeros() as usize) as u64
+    }
+    #[inline]
     fn pop(&mut self) -> (u64, u32) {
-        self.top();
+        let key = self.top();
+        let i = (key - self.base) as usize;
+        let node = self.nodes[i].pop().unwrap();
+        if self.nodes[i].is_empty() {
+            let w = i >> 6;
+            self.occupied[w] &= !(1u64 << (i & 63));
+            if self.occupied[w] == 0 { self.words &= !(1u64 << w); }
+        }
         self.len -= 1;
-        self.b[0].pop().unwrap()
+        (key, node)
     }
     fn clear(&mut self) {
-        self.b.iter_mut().for_each(Vec::clear);
-        (self.len, self.last) = (0, 0);
+        self.nodes.iter_mut().for_each(Vec::clear);
+        self.far.iter_mut().for_each(Vec::clear);
+        self.occupied.fill(0);
+        self.words = 0;
+        self.base = 0;
+        self.group = 0;
+        self.len = 0;
     }
 }
 
@@ -471,7 +517,7 @@ fn main() {
     // it can, so the best meeting seen is the answer.
     on_threads(nt, |_| {
         let mut dist = [Dist::new(n), Dist::new(n)];
-        let mut queue = [RadixHeap::new(), RadixHeap::new()];
+        let mut queue = [WheelHeap::new(), WheelHeap::new()];
         loop {
             let q = next.fetch_add(1, Relaxed);
             let Some(&i) = order.get(q) else { return };
@@ -516,7 +562,7 @@ fn main() {
                 }
             }
             unsafe { *ansr.at(i) = best };
-            queue.iter_mut().for_each(RadixHeap::clear);
+            queue.iter_mut().for_each(WheelHeap::clear);
             dist.iter_mut().for_each(Dist::reset);
         }
     });
@@ -525,3 +571,4 @@ fn main() {
     let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
     std::fs::write("/out/distances.txt", out).unwrap();
 }
+
