@@ -73,9 +73,9 @@ jobs:
           import statistics,random,subprocess,time
           names=open('/tmp/a_variants.txt').read().split()
           xs={n:[] for n in names}
-          for round in range(24):
+          for trial in range(24):
               order=names.copy()
-              random.Random(round*20261102+17).shuffle(order)
+              random.Random(trial*20261102+17).shuffle(order)
               for name in order:
                   t=time.perf_counter()
                   subprocess.run(['/tmp/a_'+name],check=True,stdout=subprocess.DEVNULL)
