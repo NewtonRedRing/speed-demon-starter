@@ -28,3 +28,7 @@ Dependencies: none.
 
 With another 24 hours: profile CSR construction versus frontier expansion and
 test exact preprocessing only when its complete build+query cost improves K.
+
+## 2026-11-02 packed-CSR / bucket-Dijkstra candidate (unscored)
+
+Adapted from MIT-licensed [danse-macabre Track D](https://github.com/keirsalterego/danse-macabre/tree/speed-demon/track-d), Copyright (c) 2026 Hackathon Raptors CIC and its contributors. Features 4-byte packed edges with exact heavy-weight overflow side map, parallel CSR construction with per-owner chunk ranges, prefetch-aware bucket-queue bidirectional Dijkstra and sparse distance maps. Upstream board reported 118.4 ms / 65.7 MB / 73.6 points. Those are **upstream**, not our results. Preserve NewtonRedHeat original at f9c0a75900b951ba5fcf8a4e4bd74a4b7a6266e6, including the verified BFS locality path; test public and independent reference seeds and full K before promotion.
