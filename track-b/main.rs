@@ -410,7 +410,9 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, scratch: &mut [u64]) -> Docs
             }
             Bits(a)
         }
-        (Post(a), b'O', Bits(mut b)) => {
+        (Post(a), _, Bits(mut b)) => {
+            // AND and NOT are handled above, so only OR reaches this arm.
+            assert_eq!(op, b'O');
             let x = b.to_mut();
             for d in a.iter() { let (w, m) = bit(d); x[w] |= m; }
             Bits(b)
