@@ -301,3 +301,49 @@ Rejected without promoting implementation changes. The source blob
 `e6782b241cd8f07bca5b114fdb05019a483f91e7` stays on
 `speed-demon`; previous best public board run is `run-70f424aa22a8`,
 73.956052 pts / 37.853 ms / 10,215,424 B. No hidden-holdout claim.
+
+
+## November 2, 12:30–12:43 UTC — exact batch/chunk sweep and official rejection
+
+**Hypothesis.** FALCON-C uses 16 pending name lookups per batch and 32 chunks
+per worker. Smaller batches reduce live speculative name-cache traffic;
+more chunks can lower peak scratch allocation. Neither change modifies the
+exact UTF-8/quote-state parser, canonical hash/table comparisons, country
+aggregation, or output order.
+
+**Reproducible local experiments.** Initial nine-way research sweep in
+[PR #52](https://github.com/NewtonRedRing/speed-demon-starter/pull/52),
+[GitHub Actions 41445259502](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41445259502),
+passed tiny seeds 2/7/42, sample seed 103 and full seed 1 output byte-for-byte.
+Its 24 GitHub-runner full-input timing trials suggested batch=8 at
+98.143 ms versus baseline 99.151 ms, but the difference was small and
+the runner is **not** the official scoring CPU.
+
+Focused independent six-way confirmation in
+[PR #54](https://github.com/NewtonRedRing/speed-demon-starter/pull/54),
+[Actions 41445573587](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41445573587)
+passed three tiny seeds, sample 103 and full seed-1
+SHA-256 `d8088b1cd42ba1338b1345b107b55db7b96ef1f5066f3ff64fd26a8912a0f536`.
+Across 48 randomized interleaved full-run repetitions, median baseline
+was **162.6095 ms** and combined batch=8/chunks=64 was **163.9556 ms**
+(**0.83% slower**). Eight separate memory readings showed median RSS
+**19,028 KB** versus **16,266 KB** (**14.5% lower**). This suggested a
+possibly favorable complete K despite slower wall-time; differences are
+specific to the shared GitHub runner and not equivalent to official memory.
+
+**Official score-gate result.** A clean, scoped, two-constant
+[PR #56](https://github.com/NewtonRedRing/speed-demon-starter/pull/56)
+was temporarily integrated as `c3ce73af`. Public-board run
+**`run-1d9635c77406`** passed correctness and all gates but recorded
+**74.154112 points / 37.009 ms / 10,326,016 bytes / S=712 / D=1 /
+K=30.414610**, below the historical exact FALCON-C winner
+**`run-6dcd8ad2012f`**, **74.320728 points / 36.405 ms /
+10,354,688 bytes / S=712 / D=1 / K=30.648876**. The slight memory
+gain did not offset worse wall time on the real scoring machine.
+
+**Decision: REJECT.** Oracle rollback commit
+`ea2532f68462ca5fc07c3e93cf28d62d80a163c1` restored
+`track-c/main.rs` byte-for-byte to the best-scored FALCON-C Git blob
+`e6782b241cd8f07bca5b114fdb05019a483f91e7`.
+The winning program, offline Rust toolchain and other tracks are unchanged.
+This is **public-board evidence**, not hidden holdout evidence.
