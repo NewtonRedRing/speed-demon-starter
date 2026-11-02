@@ -244,7 +244,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
                 let k = _mm256_castsi256_si128(key(p.add(s as usize), len as usize));
                 let h = hash(k);
                 let slot = t.tab.as_ptr().add(h & (t.tab.len() - 1));
-                _mm_prefetch::<_MM_HINT_T0>(slot.cast());
+                _mm_prefetch::<_MM_HINT_T1>(slot.cast());
                 if n >= LAG {
                     look(&ring[n % LAG]);
                 }
