@@ -1,0 +1,93 @@
+name: Track A Rust endpoint interner and work-piece sweep
+on:
+  push:
+    branches: [experiment/track-a-interner-parts-sweep-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+jobs:
+  sweep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile all Rust variants from current scored Track A source
+        run: |
+          set -euo pipefail
+          git show origin/speed-demon:track-a/main.rs >/tmp/a_base.rs
+          python3 - <<'PY'
+          import pathlib,subprocess
+          src=pathlib.Path('/tmp/a_base.rs').read_text()
+          assert 'const SLOTS: usize = 1 << 13;' in src
+          assert 'const PARTS: usize = THREADS * 8;' in src
+          specs=[('base',13,8),('slots12',12,8),('slots14',14,8),('slots15',15,8),('slots16',16,8),('pieces4',13,4),('pieces6',13,6),('pieces12',13,12),('pieces16',13,16)]
+          pathlib.Path('/tmp/a_variants.txt').write_text('\n'.join(x[0] for x in specs)+'\n')
+          for name,slot,pieces in specs:
+              out=src.replace('const SLOTS: usize = 1 << 13;',f'const SLOTS: usize = 1 << {slot};').replace('const PARTS: usize = THREADS * 8;',f'const PARTS: usize = THREADS * {pieces};')
+              p=pathlib.Path('/tmp/a_'+name+'.rs');p.write_text(out)
+              subprocess.run(['rustc','--edition=2021','-C','opt-level=3','-C','target-cpu=haswell','-C','codegen-units=1','-C','panic=abort','-o','/tmp/a_'+name,str(p)],check=True)
+              print('BUILT',name,'slots',2**slot,'pieces',12*pieces,flush=True)
+          PY
+      - name: Validate exact multi-seed outputs against approved Rust
+        run: |
+          set -euo pipefail
+          sudo install -d -m 777 /out
+          for seed in 2 7 17 42 2026; do
+            python3 track-a/pgo_gen.py --seed "$seed" --scale tiny --out "/tmp/a-tiny-$seed"
+            sudo ln -sfn "/tmp/a-tiny-$seed" /data
+            /tmp/a_base
+            cp /out/summary.txt /tmp/a_expected
+            while read -r name; do
+              /tmp/a_"$name"
+              cmp /tmp/a_expected /out/summary.txt
+            done < /tmp/a_variants.txt
+            echo "PASS tiny seed=$seed all nine exact"
+          done
+          python3 track-a/pgo_gen.py --seed 103 --scale sample --out /tmp/a-sample
+          sudo ln -sfn /tmp/a-sample /data
+          /tmp/a_base
+          cp /out/summary.txt /tmp/a_expected
+          while read -r name; do
+            /tmp/a_"$name"
+            cmp /tmp/a_expected /out/summary.txt
+          done < /tmp/a_variants.txt
+          echo 'PASS sample seed=103 all variants'
+          python3 track-a/pgo_gen.py --seed 1 --scale full --out /tmp/a-full
+          sudo ln -sfn /tmp/a-full /data
+          /tmp/a_base
+          cp /out/summary.txt /tmp/a_expected
+          echo "BASELINE_FULL_SHA256 $(sha256sum /out/summary.txt)"
+          while read -r name; do
+            /tmp/a_"$name"
+            cmp /tmp/a_expected /out/summary.txt
+            echo "PASS full exact $name"
+          done < /tmp/a_variants.txt
+      - name: Twenty-four randomized interleaved full-data rounds
+        run: |
+          python3 - <<'PY'
+          import statistics,random,subprocess,time
+          names=open('/tmp/a_variants.txt').read().split()
+          xs={n:[] for n in names}
+          for round in range(24):
+              order=names.copy()
+              random.Random(round*20261102+17).shuffle(order)
+              for name in order:
+                  t=time.perf_counter()
+                  subprocess.run(['/tmp/a_'+name],check=True,stdout=subprocess.DEVNULL)
+                  xs[name].append(1000*(time.perf_counter()-t))
+          b=statistics.median(xs['base'])
+          for name in sorted(names,key=lambda n: statistics.median(xs[n])):
+              v=xs[name]
+              med=statistics.median(v)
+              print(f'VARIANT {name} median_ms={med:.4f} ratio={med/b:.6f} mean_ms={statistics.mean(v):.4f} samples='+str([round(x,3) for x in v]),flush=True)
+          PY
+      - name: Peak RSS readings by binary
+        run: |
+          while read -r name; do
+            /usr/bin/time -f "RSS_KB $name %M" /tmp/a_"$name"
+          done </tmp/a_variants.txt
