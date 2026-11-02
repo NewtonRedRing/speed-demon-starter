@@ -137,3 +137,39 @@ Official board experiment `63ec07b`, run `run-70f424aa22a8`, scored
 previous best `run-df1b1d44c1d4` at 73.442105 (38.107 ms, 11,075,584 B,
 S=732, D=1). This is a verified public-dataset improvement, not a claim about
 the unobserved holdout set.
+
+## November 2: follow-on dictionary and hash experiments
+
+Independent candidate branches were used; they do **not** change the
+verified FALCON-C source retained on `speed-demon`.
+
+- Dictionary prefetch batching: 8, 16, 32, 64, 128 sightings; official
+  full-seed-1 output hash matched for all configurations. GitHub Actions
+  medians were within 0.2% (`41428946618`). No clear winner.
+- Reversible 6-bit inline packing of 17–20 byte name keys (with exact raw
+  long-name fallback): full seed-1 and official tiny seeds 2, 7, 42, 2026
+  matched reference. Paired GitHub Actions medians 215.918 ms baseline
+  vs 216.337 ms candidate (`41429262686`): rejected.
+- Record software-prefetch frequency (every record, disabled, every 2,
+  every 4, every 8): official full seed-1 hash passed, medians were
+  statistically indistinguishable (~165.4 ms; `41429522851`).
+- Exact name hash mixer (5 variants): full seed-1 hash passed for all.
+  The one-CRC candidate locally measured 165.221 ms versus original
+  165.646 ms on one noisy paired batch (`41429780874`), but a second
+  paired validation reversed the direction: 217.537 ms candidate versus
+  216.450 ms baseline. All four additional tiny seeds passed
+  (`41430010949`). An independent official board test was therefore
+  required instead of trusting CI timing.
+
+**Official board single-CRC test:** commit `843f284`,
+run `run-869dd9a99af1`, passed all gates but scored **72.990104**
+(40.873 ms, 10,543,104 B, S=711, D=1), below best FALCON-C
+`63ec07b` run `run-70f424aa22a8` at **73.956052**
+(37.853 ms, 10,215,424 B, S=712, D=1). The board also varies
+between identical-source runs; these are observations, not a
+causal estimate for the hash in isolation.
+
+**Decision:** restore the known best source blob
+`e6782b241cd8f07bca5b114fdb05019a483f91e7` via commit
+`50fab2d`. Do not promote these inconclusive/rejected changes without
+a new measured improvement.
