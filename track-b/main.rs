@@ -85,9 +85,12 @@ unsafe fn key(p: *const u8, len: usize) -> __m256i {
 }
 
 /// The hash of a key of at most 12 bytes.
-fn hash(k: __m128i) -> usize {
+fn hash(k: __m128i, len: usize) -> usize {
     let w: [u64; 2] = unsafe { std::mem::transmute(k) };
-    unsafe { _mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[1]) as usize }
+    unsafe {
+        let h = _mm_crc32_u64(0, w[0]);
+        if len <= 8 { h as usize } else { _mm_crc32_u64(h, w[1]) as usize }
+    }
 }
 
 fn same(a: __m256i, b: __m256i) -> bool {
@@ -124,7 +127,7 @@ impl Terms {
             return;
         }
         let k = unsafe { _mm256_castsi256_si128(k) };
-        let h = hash(k);
+        let h = hash(k, term.len());
         unsafe { _mm_prefetch::<_MM_HINT_T0>(self.tab.as_ptr().add(h & (self.tab.len() - 1)).cast()) };
         let oldest = std::mem::replace(&mut self.ring[self.fed % 8], (k, h, ids.len() - 1));
         if self.fed >= 8 {
@@ -165,7 +168,7 @@ impl Terms {
     unsafe fn lookup(&self, p: *const u8, len: usize) -> u32 {
         let k = key(p, len);
         let k128 = _mm256_castsi256_si128(k);
-        if len > SHORT { self.find_long(k) } else { self.find(k128, hash(k128)) }
+        if len > SHORT { self.find_long(k) } else { self.find(k128, hash(k128, len)) }
     }
 
     /// Term i becomes new[i].
@@ -242,7 +245,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
             m &= !0u64 << (s + len); // here the token ends inside the window
             if len <= 32 {
                 let k = _mm256_castsi256_si128(key(p.add(s as usize), len as usize));
-                let h = hash(k);
+                let h = hash(k, len as usize);
                 let slot = t.tab.as_ptr().add(h & (t.tab.len() - 1));
                 _mm_prefetch::<_MM_HINT_T0>(slot.cast());
                 if n >= LAG {
