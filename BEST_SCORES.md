@@ -1,27 +1,48 @@
-# Speed Demon 2026 — verified best-source consolidation
+# Speed Demon 2026 — verified best public scores
 
-Team: `NewtonRedHeat`. Evidence: [official public-seed-1 board feed](https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/board/board.json), generated **2026-11-02 10:37:46 UTC**. These are the latest *retrievable* historical best per-track runs at that feed timestamp; individual runs are not a benchmark of the merged branch head.
+Team: `NewtonRedHeat`. These are the historical **best per-track** official board
+runs as confirmed by the live board feed on **2026-11-02 11:05:52 UTC**,
+independently recorded in
+[the board audit CI run](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41433888424).
+The current submission source for each track was separately compared against
+the corresponding source in GitHub. Runs on the merged branch can score
+differently due to timing/memory variance. The final holdout determines final
+results.
 
-| Track | Official board best commit | Points | Runtime | Peak memory | Output gates |
+| Track | Best public-board commit | Points | Runtime | Peak memory | Official gates |
 |---|---|---:|---:|---:|---|
-| A — Ingest | `eea0f63220e5c1a782c5627941d55f154833f8b9` | 83.585525 | 23.187 ms | 15,110,144 bytes | passed |
-| B — Index | `126b40894cb67d44283296176cfaf17f300b2220` | 72.043345 | 185.745 ms | 46,850,048 bytes | passed |
-| C — Join | `63ec07b1d10a6cd7fd9a169f9b9a80d684a03dd8` | 73.956052 | 37.853 ms | 10,215,424 bytes | passed |
-| D — Traverse | `a4807ddacffcaf958e8cce89428777ffdc5f6445` | 67.766726 | 145.480 ms | 77,139,968 bytes | passed |
-
-Historical note: an earlier board snapshot recorded **D 68.316671 points** from `6759b53eda0ced88ef30a8d0f9b77654a0c8686b` at 174.011 ms. That old best is not shown as the D best in the feed above; do not conflate the two snapshots or claim a new improvement.
+| A — Ingest | `c0053b4a77ec28817b83af2e6ee7492b10ae8c22` | **83.717827** | **22.451 ms** | 15,622,144 bytes | passed |
+| B — Index | `c9f733bb7849269b600358483cc1c06936318bb6` | **72.172141** | **183.883 ms** | 46,641,152 bytes | passed |
+| C — Join | `63ec07b1d10a6cd7fd9a169f9b9a80d684a03dd8` | **73.956052** | **37.853 ms** | 10,215,424 bytes | passed |
+| D — Traverse | `6759b53eda0ced88ef30a8d0f9b77654a0c8686b` | **68.316671** | **174.011 ms** | 76,247,040 bytes | passed |
 
 ## Verified source selection on speed-demon
 
-The latest audited `speed-demon` branch head `c9f733bb7849269b600358483cc1c06936318bb6` contains identical scored implementation files for A/B/C compared with their best public runs:
+At the 2026-11-02 11:05 UTC audit, `speed-demon` was at
+`c0053b4a77ec28817b83af2e6ee7492b10ae8c22`. The exact
+`main.rs` blob SHA-1s for that branch were checked against GitHub refs:
 
-| Track | Current `main.rs` and `Dockerfile` | Source comparison |
+| Track | Submission main.rs blob | Identical to scored reference |
 |---|---|---|
-| A | Matches official best `eea0f63` | track subtree identical |
-| B | Matches official best `126b408` | track subtree identical |
-| C | Matches official best `63ec07b` | identical `main.rs`, `Dockerfile`, and `Cargo.toml`; only experimental notes changed |
-| D | Matches older verified source `6759b53` | identical `main.rs` and `Dockerfile`; recent D board best commit is not retrievable as a GitHub object to compare directly |
+| A | `da36728dd32ec3c0449fc23966d6e5cb6604d6ea` | `c0053b4` — HARP exact-hour cache |
+| B | `c7dc80d3413beb6d0303bc376fe95e816a2b7b1c` | `c9f733b` and `126b408` |
+| C | `e6782b241cd8f07bca5b114fdb05019a483f91e7` | `63ec07b` — FALCON-C |
+| D | `46bfcda6d77a5bfb6a72a4baf108de4d71c81a1c` | `6759b53` — historical verified best |
 
-The unmerged draft PRs contain unscored or rejected experiments; **none has verified superior official score** as of this audit. Do not merge them as score improvements without independent correctness and board evidence.
+Track A's newly promoted HARP hour-prefix cache passed the full official
+correctness and sandbox gates at board run `run-1c2bb20981c8`. Its previous
+best was **83.683039**, 23.108 ms from `c9f733b`. The new run scored
+**83.717827**, 22.451 ms, improving by **0.034788 points** (and reducing
+runtime by 0.657 ms). The small score gain despite the runtime improvement
+reflects the scoring formula's other axes, including memory and source size.
 
-This documentation-only consolidation deliberately changes **no track source, build flags, runtime dependencies, or contest inputs**. The official holdout seed will ultimately determine the final scores.
+The B and D scores above are historical board bests; they need not be the
+latest timed runs. All four tracks use Rust with the pinned offline Docker
+toolchains and no runtime dependencies. Separate experimental branches and
+draft PRs are **not** promoted unless correctness and the official board
+demonstrate an improvement. In particular, newer C wide-tile, atomic-filter,
+PEXT and CRC variants did not outperform the retained FALCON-C version.
+
+No holdout results are claimed. Source and scoring context:
+[official board](https://speeddemon.dev/board/) and
+[public board feed](https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/board/board.json).
