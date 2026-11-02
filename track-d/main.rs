@@ -395,6 +395,11 @@ fn main() {
     }
     let mut adj = vec![0u32; m];
     let ar = Raw::of(&mut adj);
+    // Fuse the reverse-graph in-degree pass into the existing forward CSR
+    // remapping: every packed edge is visited exactly once here.
+    let mut roff = vec![0u32; n + 1];
+    let rr = Raw::of(&mut roff);
+    let bump = |i: usize| unsafe { AtomicU32::from_ptr(rr.at(i)).fetch_add(1, Relaxed) };
     let off = &off;
     let mut heavy2: Vec<(u32, u32)> = on_threads(nt, |t| {
         let (mut out, r) = (Vec::new(), share(n, t, nt));
@@ -412,7 +417,9 @@ fn main() {
                 if x >> hb == big {
                     out.push((j, heavy_weight(&heavy, e)));
                 }
-                unsafe { *ar.at(j as usize) = id[(x & hmask) as usize] | (x & !hmask) };
+                let v = id[(x & hmask) as usize];
+                unsafe { *ar.at(j as usize) = v | (x & !hmask) };
+                bump(v as usize + 1);
                 j += 1;
             }
         }
@@ -425,14 +432,9 @@ fn main() {
     let ends: Vec<(u32, u32)> = queries.iter().map(|&(s, t)| (id[s as usize], id[t as usize])).collect();
     drop((heavy, first_v, link_v, id_v));
 
-    // The reverse graph in the same format: in-degrees counted into
-    // roff[v + 1], summed, then roff[v] used as v's cursor, which leaves it at
-    // v's end, so shifting it up by one restores the offsets.
+    // Reverse graph: degree counts were accumulated during the forward
+    // remap, so prefix and scatter without a separate full-edge count pass.
     let adj = &adj;
-    let mut roff = vec![0u32; n + 1];
-    let rr = Raw::of(&mut roff);
-    let bump = |i: usize| unsafe { AtomicU32::from_ptr(rr.at(i)).fetch_add(1, Relaxed) };
-    on_threads(nt, |t| share(n, t, nt).for_each(|u| (off[u]..off[u + 1]).for_each(|e| { bump((adj[e as usize] & hmask) as usize + 1); })));
     for v in 0..n {
         roff[v + 1] += roff[v];
     }
