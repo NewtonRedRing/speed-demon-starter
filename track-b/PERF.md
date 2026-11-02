@@ -199,3 +199,40 @@ Twelve full GH runs: native Rust **823.526 ms**,
 Clang-C-FFI **831.926 ms**, GCC-C-FFI **850.851 ms**.
 This is evidence against a C FFI lookup rewrite; it does **not**
 prove an independently optimized all-C implementation cannot win.
+
+## November 2: exact adaptive two-pointer Boolean set intersection — rejected
+
+**Hypothesis:** two sorted `Docs::List` operands of comparable sizes could be
+intersected or differenced with one monotone forward cursor, avoiding scratch
+bitmap marking, reads and clearing. The special-case arm preserves ordered
+IDs and the existing strict left-to-right AND/NOT semantics, with OR and
+asymmetrical-list implementations unchanged. This independently implemented
+Rust candidate is on
+[`agent/track-b/two-pointer-selective-lists-20261102`](https://github.com/NewtonRedRing/speed-demon-starter/tree/agent/track-b/two-pointer-selective-lists-20261102),
+source commit `e68dbf6b381bf6ca5f63d4a1f4cbea47880c4062`. No
+ready-made library or runtime dependency was imported.
+
+[Actions 41448437318](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41448437318)
+compiled unchanged baseline and candidate with identical Rust 1.99.1
+`-C opt-level=3 -C target-cpu=haswell -C codegen-units=1 -C panic=abort`
+settings (these are research flags, **not** the official final PGO Docker
+build). Outputs matched byte-for-byte on tiny seeds 7, 23, 42; sample
+seeds 11 and 103; and full official-format generated seed 1.
+The full-output SHA256 matched published expected value
+`f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927`.
+
+In 32 randomized paired complete-pipeline runs (30 pairs after warm-up),
+the baseline median was **834.939 ms** versus candidate **838.923 ms**.
+Median paired baseline/candidate speed ratio was **0.99518**
+(bootstrap 95% interval **[0.99183, 0.99952]**);
+candidate won only **10/30** timed pairs. Six independent per-program
+peak-RSS measurements overlapped (approximately 294–302 MiB), giving
+no convincing memory benefit. These observations are from a shared GitHub
+runner, **not** the official i5-13500 scoring machine.
+
+**Decision: REJECT**. No contest-source promotion, board submission, or
+measured public K gain was claimed. For this workload the existing
+scratch-bitset path appears preferable to the added branch/merge walk,
+even though the alternative is exact and can reduce theoretical memory
+writes. The publication of Tantivy's cardinality-aware `DocSet::cost()`
+is a research motivation, not evidence that this application wins.
