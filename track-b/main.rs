@@ -24,6 +24,10 @@ extern "C" {
     fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
 }
 
+extern "C" {
+    fn track_b_find_c(table: *const u8, mask: usize, key: *const u8, hash: usize, n: u32) -> u32;
+}
+
 const THREADS: usize = 12;
 const NONE: u32 = u32::MAX;
 const BUCKETS: usize = 32; // scan output streams per thread; term i goes to bucket i % BUCKETS
@@ -154,7 +158,18 @@ impl Terms {
     }
 
     fn find(&self, k: __m128i, h: usize) -> u32 {
-        Self::id(self.tab[self.probe(k, h)]).wrapping_sub(1).min(self.n)
+        // The C version is byte-exact on the same 16-byte table and query key.
+        // Its out-of-line foreign call is an explicit cost of this hybrid
+        // implementation; results do not imply an equivalent all-C port.
+        unsafe {
+            track_b_find_c(
+                self.tab.as_ptr().cast(),
+                self.tab.len() - 1,
+                (&k as *const __m128i).cast(),
+                h,
+                self.n,
+            )
+        }
     }
 
     fn find_long(&self, k: __m256i) -> u32 {
