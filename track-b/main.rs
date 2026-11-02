@@ -302,10 +302,83 @@ unsafe fn around(terms: &Terms, s: *const u8, len: usize, phrase: &[u32], j: usi
     true
 }
 
-/// A set of documents: a sorted list, or a bitmap. A term's bitmap is
-/// borrowed, and copied only when an operator first writes to it.
+/// Borrowed view of a term's 16-bit, thread-relative postings. Retains the
+/// existing sorted, deduplicated storage without reconstructing Vec<u32>.
+#[derive(Clone, Copy)]
+struct Post<'a> {
+    values: &'a [u16],
+    segments: &'a [u16],
+    firsts: &'a [u32],
+    len: usize,
+}
+struct PostIter<'a> {
+    post: Post<'a>,
+    shard: usize,
+    remaining: usize,
+    offset: usize,
+    base: u32,
+}
+impl<'a> Post<'a> {
+    #[inline(always)]
+    fn iter(self) -> PostIter<'a> {
+        PostIter { post: self, shard: 0, remaining: 0, offset: 0, base: 0 }
+    }
+}
+impl Iterator for PostIter<'_> {
+    type Item = u32;
+    #[inline]
+    fn next(&mut self) -> Option<u32> {
+        while self.remaining == 0 {
+            if self.shard == self.post.segments.len() { return None; }
+            self.base = self.post.firsts[self.shard];
+            self.remaining = self.post.segments[self.shard] as usize;
+            self.shard += 1;
+        }
+        let d = self.base + self.post.values[self.offset] as u32;
+        self.offset += 1;
+        self.remaining -= 1;
+        Some(d)
+    }
+}
+
+/// Merge two sorted sets directly, without expanding an input posting list.
+fn merge_docs(
+    a: impl Iterator<Item = u32>, b: impl Iterator<Item = u32>,
+    op: u8, an: usize, bn: usize,
+) -> Vec<u32> {
+    let capacity = match op {
+        b'O' => an + bn,
+        b'A' => an.min(bn),
+        _ => an,
+    };
+    let mut out = Vec::with_capacity(capacity);
+    let (mut a, mut b) = (a.peekable(), b.peekable());
+    while let Some(&x) = a.peek() {
+        match b.peek() {
+            Some(&y) if y < x => {
+                if op == b'O' { out.push(y); }
+                b.next();
+            }
+            Some(&y) if y == x => {
+                if op != b'N' { out.push(x); }
+                a.next();
+                b.next();
+            }
+            _ => {
+                if op != b'A' { out.push(x); }
+                a.next();
+            }
+        }
+    }
+    if op == b'O' { out.extend(b); }
+    out
+}
+
+/// A document set may remain a zero-copy 16-bit posting view until an operation
+/// actually needs to materialize a new result. Bitmaps retain copy-on-write.
 enum Docs<'a> {
     List(Vec<u32>),
+    Post(Post<'a>),
     Bits(Cow<'a, [u64]>),
 }
 
@@ -313,23 +386,48 @@ fn has(bits: &[u64], d: u32) -> bool {
     bits[d as usize / 64] >> (d % 64) & 1 != 0
 }
 
-/// cur op term, strictly left to right; a list OR a bitmap becomes a bitmap.
+/// Apply BOOL operators strictly left to right, preserving the existing
+/// bitmap/list fast paths and streaming raw postings for sparse operands.
 fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, scratch: &mut [u64]) -> Docs<'a> {
     use Docs::*;
     let bit = |d: u32| (d as usize / 64, 1u64 << (d % 64));
     match (cur, op, term) {
         (Bits(mut a), _, Bits(b)) => {
             for (x, &y) in a.to_mut().iter_mut().zip(b.iter()) {
-                *x = match op {
-                    b'A' => *x & y,
-                    b'O' => *x | y,
-                    _ => *x & !y,
-                };
+                *x = match op { b'A' => *x & y, b'O' => *x | y, _ => *x & !y };
             }
             Bits(a)
         }
-        (Bits(a), b'A', List(mut b)) | (List(mut b), b'A', Bits(a)) => (b.retain(|&d| has(&a, d)), List(b)).1,
-        (List(mut a), _, Bits(b)) if op == b'N' => (a.retain(|&d| !has(&b, d)), List(a)).1,
+        (Bits(a), b'A', Post(b)) | (Post(b), b'A', Bits(a)) =>
+            List(b.iter().filter(|&d| has(&a, d)).collect()),
+        (Post(a), b'N', Bits(b)) =>
+            List(a.iter().filter(|&d| !has(&b, d)).collect()),
+        (Bits(mut a), _, Post(b)) => {
+            let x = a.to_mut();
+            for d in b.iter() {
+                let (w, m) = bit(d);
+                x[w] = if op == b'O' { x[w] | m } else { x[w] & !m };
+            }
+            Bits(a)
+        }
+        (Post(a), b'O', Bits(mut b)) => {
+            let x = b.to_mut();
+            for d in a.iter() { let (w, m) = bit(d); x[w] |= m; }
+            Bits(b)
+        }
+        (Post(a), _, Post(b)) => List(merge_docs(a.iter(), b.iter(), op, a.len, b.len)),
+        (List(a), _, Post(b)) => {
+            let n = a.len();
+            List(merge_docs(a.into_iter(), b.iter(), op, n, b.len))
+        }
+        (Post(a), _, List(b)) => {
+            let n = b.len();
+            List(merge_docs(a.iter(), b.into_iter(), op, a.len, n))
+        }
+        (Bits(a), b'A', List(mut b)) | (List(mut b), b'A', Bits(a)) =>
+            (b.retain(|&d| has(&a, d)), List(b)).1,
+        (List(mut a), _, Bits(b)) if op == b'N' =>
+            (a.retain(|&d| !has(&b, d)), List(a)).1,
         (Bits(mut a), _, List(b)) | (List(b), _, Bits(mut a)) => {
             let x = a.to_mut();
             for (w, m) in b.into_iter().map(bit) {
@@ -348,7 +446,6 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, scratch: &mut [u64]) -> Docs
             v.extend_from_slice(&b[j..]);
             List(v)
         }
-        // AND or NOT: a binary search per document when b is far longer.
         (List(mut a), _, List(b)) if a.len() * 8 < b.len() => {
             let mut j = 0;
             a.retain(|&d| {
@@ -357,16 +454,10 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, scratch: &mut [u64]) -> Docs
             });
             List(a)
         }
-        // Otherwise b's documents are marked in a scratch bitmap, which a's
-        // documents are tested against; the bitmap is zeroed again at the end.
         (List(mut a), _, List(b)) => {
-            for &d in &b {
-                scratch[d as usize / 64] |= 1 << (d % 64);
-            }
+            for &d in &b { scratch[d as usize / 64] |= 1 << (d % 64); }
             a.retain(|&d| has(scratch, d) == (op == b'A'));
-            for &d in &b {
-                scratch[d as usize / 64] = 0;
-            }
+            for &d in &b { scratch[d as usize / 64] = 0; }
             List(a)
         }
     }
@@ -379,6 +470,13 @@ fn line(out: &mut String, docs: &Docs) {
         Docs::List(v) => {
             (count, sum) = (v.len() as u64, v.iter().map(|&d| d as u64).sum());
             first.extend(v.iter().take(10));
+        }
+        Docs::Post(v) => {
+            count = v.len as u64;
+            for d in v.iter() {
+                sum += d as u64;
+                if first.len() < 10 { first.push(d); }
+            }
         }
         Docs::Bits(b) => {
             // Bit k of a position adds 2^k for each set bit whose position has it.
@@ -677,17 +775,15 @@ fn main() {
     // Answers, 64 queries at a time on every thread. Large lists come and go
     // here, so they now reuse heap memory instead of a fresh mapping each.
     unsafe { mallopt(-3, 64 << 20) };
+    // Sparse terms are borrowed as 16-bit sorted postings; only actual
+    // Boolean operators materialize derived 32-bit document sets.
     let docs = |id: u32| match id as usize {
         i if i < nbits => Docs::Bits(Cow::Borrowed(&bits[i * words..(i + 1) * words])),
         i => {
-            let mut at = start[i] as usize;
             let segs = &seg[i * THREADS..][..THREADS];
-            let mut v = Vec::with_capacity(segs.iter().map(|&n| n as usize).sum());
-            for (&n, &first) in segs.iter().zip(&firsts) {
-                v.extend(post[at..at + n as usize].iter().map(|&d| first + d as u32));
-                at += n as usize;
-            }
-            Docs::List(v)
+            let n: usize = segs.iter().map(|&count| count as usize).sum();
+            let at = start[i] as usize;
+            Docs::Post(Post { values: &post[at..at + n], segments: segs, firsts: &firsts, len: n })
         }
     };
     let chunks: Vec<Mutex<String>> = (0..spans.len().div_ceil(64)).map(|_| Mutex::default()).collect();
