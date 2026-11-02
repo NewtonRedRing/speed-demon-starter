@@ -130,15 +130,16 @@ struct Interner {
 }
 
 impl Interner {
-    const SLOTS: usize = 1 << 12; // ids fit 11 bits; a seed has 1,842
+    const SLOTS: usize = 1 << 13; // 8192 hash slots, independent of max 2048 ids
+    const IDS: usize = 1 << 11; // compressed packed keys have 11-bit id
     const BUSY: u16 = u16::MAX;
 
     fn new() -> Self {
         let slot = (0..Self::SLOTS).map(|_| AtomicU16::new(0)).collect();
-        let arena = unsafe { map(Self::SLOTS / 2 * 125 + 32, READ_WRITE, ANONYMOUS, -1) } as usize;
+        let arena = unsafe { map(Self::IDS * 125 + 32, READ_WRITE, ANONYMOUS, -1) } as usize;
         Interner {
             slot,
-            name: (0..Self::SLOTS / 2).map(|_| AtomicU64::new(0)).collect(),
+            name: (0..Self::IDS).map(|_| AtomicU64::new(0)).collect(),
             arena,
             used: AtomicUsize::new(0),
             count: AtomicUsize::new(0),
@@ -161,7 +162,7 @@ impl Interner {
             let mut id = at.load(Acquire);
             if id == 0 && at.compare_exchange(0, Self::BUSY, Acquire, Acquire).is_ok() {
                 let new = self.count.fetch_add(1, Relaxed);
-                assert!(new < Self::SLOTS / 2, "too many endpoints"); // 11 bits
+                assert!(new < Self::IDS, "too many endpoints"); // 11 bits
                 let copy = self.arena + self.used.fetch_add(n, Relaxed);
                 unsafe { (copy as *mut u8).copy_from_nonoverlapping(s.as_ptr(), n) };
                 self.name[new].store(copy as u64 | (n as u64) << 48, Relaxed);
@@ -379,7 +380,7 @@ fn main() {
     let margin = if again { HOURS } else { 2 };
     // Per hour, in 12 pages of its own: its groups as (endpoint, count, p50, p95, p99, errors),
     // ended by a zero count. The pages go back to the kernel once the hour is written.
-    const SLOT: usize = Interner::SLOTS / 2 * size_of::<[u32; 6]>();
+    const SLOT: usize = Interner::IDS * size_of::<[u32; 6]>();
     let lines = unsafe { map(HOURS * SLOT, READ_WRITE, ANONYMOUS, -1) } as usize;
     let at: Vec<AtomicU64> = (0..HOURS).map(|_| AtomicU64::new(0)).collect(); // size, then offset
     let text = Shared::new(null_mut::<u8>());
@@ -402,7 +403,7 @@ fn main() {
     };
 
     let work = |t: usize| unsafe {
-        const N: usize = Interner::SLOTS / 2; // endpoint ids
+        const N: usize = Interner::IDS; // endpoint ids
         // Reuse a worker-local cursor across all hours: no per-hour allocations.
         let (mut start, mut errors, mut cursor, mut latency) =
             (vec![0u32; N + 1], vec![0u32; N], vec![0u32; N], vec![]);
