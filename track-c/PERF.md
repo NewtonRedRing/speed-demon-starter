@@ -173,3 +173,56 @@ causal estimate for the hash in isolation.
 `e6782b241cd8f07bca5b114fdb05019a483f91e7` via commit
 `50fab2d`. Do not promote these inconclusive/rejected changes without
 a new measured improvement.
+
+## November 2: wide structural tiles and atomic bitmap filtering
+
+All tests were isolated on experiment branches. The proven FALCON-C Rust
+source (blob e6782b2) was left unchanged on the submission branch.
+
+**Continuous tile-width sweep:** branch
+experiment/track-c-wide-tiles-20261102, GitHub Actions
+[run 41431626134](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41431626134).
+A fused comma-or-newline AVX2 mask and carry-less quote parity processed
+1, 2, 4 or 8 consecutive 64-byte lanes per refill, comparing against the
+existing FALCON-C scanner. Each variant matched the official full seed-1
+SHA256, plus the official Python reference for tiny seeds 2, 7, 42, and
+2026. Ten randomized interleaved non-PGO GitHub Actions timings:
+
+| Variant | Median elapsed | Relative to original |
+|---|---:|---:|
+| original FALCON-C | 216.065 ms | 1.0000 |
+| 64-byte fused | 216.358 ms | 1.0014 |
+| 128-byte fused | 216.376 ms | 1.0014 |
+| 256-byte fused | 216.790 ms | 1.0034 |
+| 512-byte fused | 216.617 ms | 1.0026 |
+
+The larger-tile versions were longer and did not earn a runtime speedup
+on the CI CPU. They were not submitted to the scoring box.
+
+**Exact distinct-name membership filtering:** branch
+experiment/track-c-membership-filter-20261102, GitHub Actions
+[run 41431876167](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41431876167).
+A Relaxed bitmap load checks whether a bit is already set; if not,
+the existing atomic fetch_or performs the update, preserving safety
+under concurrent races. Four official-full-hash-correct variants and
+four official tiny seeds passed; twelve interleaved non-PGO timings:
+
+| Variant | Median elapsed | Relative |
+|---|---:|---:|
+| original | 165.166 ms | 1.0000 |
+| atomic load before fetch_or | 166.004 ms | 1.0051 |
+| omit bitmap write-prefetch | 165.209 ms | 1.0003 |
+| load filter + omit prefetch | 166.665 ms | 1.0091 |
+
+All differences were small; the conditional update consistently added
+work, and removing the write-prefetch was neutral. Rejected.
+
+**Source-size rule:** the machine measures scc code lines after the
+canonical language formatter, excluding comments and blank lines. Pure
+minification is not a viable optimization, and the human code-quality
+and optimization-log criteria also reward readable explanations. No
+source-only cosmetic contest change was made.
+
+Next research: CPU profiling of the name-table probe and
+RMW cache-to-cache traffic, then benchmark a genuinely different
+exact-name data layout, not marginal SIMD-width or prefetch tweaks.
