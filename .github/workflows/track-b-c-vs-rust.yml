@@ -1,0 +1,99 @@
+name: Track B Rust vs GCC-C vs Clang-C lookup
+on:
+  push:
+    branches: [experiment/track-b-c-vs-rust-20261102]
+  pull_request:
+    branches: [speed-demon]
+  workflow_dispatch:
+
+jobs:
+  differential-performance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Show compiler and CPU information
+        run: |
+          rustc --version
+          gcc --version | head -1
+          clang --version | head -1
+          lscpu | grep -E 'Model name|CPU\(s\)|Flags' | cut -c1-200 || true
+      - name: Build identical Rust engine with Rust, GCC-C and Clang-C dictionary lookup
+        run: |
+          set -euo pipefail
+          git show origin/speed-demon:track-b/main.rs > /tmp/track_b_rust_main.rs
+          FLAGS='--edition=2021 -C opt-level=3 -C codegen-units=1 -C panic=abort -C target-cpu=haswell'
+          rustc $FLAGS -o /tmp/track_b_rust /tmp/track_b_rust_main.rs
+          gcc -O3 -march=haswell -fno-semantic-interposition -c track-b/lookup_c.c -o /tmp/track_b_gcc_lookup.o
+          clang -O3 -march=haswell -c track-b/lookup_c.c -o /tmp/track_b_clang_lookup.o
+          rustc $FLAGS -C link-arg=/tmp/track_b_gcc_lookup.o -o /tmp/track_b_gcc track-b/main.rs
+          rustc $FLAGS -C link-arg=/tmp/track_b_clang_lookup.o -o /tmp/track_b_clang track-b/main.rs
+          echo 'All three binaries compiled'
+      - name: Validate byte-exact outputs on independent generated data
+        run: |
+          set -euo pipefail
+          sudo install -d -m 777 /out
+          for seed in 2 7 42 2026; do
+            python3 track-b/pgo_gen.py --seed "$seed" --scale tiny --out "/tmp/c-rust-tiny-$seed"
+            sudo ln -sfn "/tmp/c-rust-tiny-$seed" /data
+            /tmp/track_b_rust
+            cp /out/results.txt /tmp/baseline-results.txt
+            /tmp/track_b_gcc
+            cmp /tmp/baseline-results.txt /out/results.txt
+            /tmp/track_b_clang
+            cmp /tmp/baseline-results.txt /out/results.txt
+            echo "PASS tiny seed=$seed (Rust = GCC-C = Clang-C)"
+          done
+          python3 track-b/pgo_gen.py --seed 103 --scale sample --out /tmp/c-rust-sample
+          sudo ln -sfn /tmp/c-rust-sample /data
+          /tmp/track_b_rust
+          cp /out/results.txt /tmp/baseline-results.txt
+          for exe in /tmp/track_b_gcc /tmp/track_b_clang; do
+            "$exe"
+            cmp /tmp/baseline-results.txt /out/results.txt
+          done
+          echo 'PASS sample seed=103 (all three output identical)'
+          python3 track-b/pgo_gen.py --seed 1 --scale full --out /tmp/c-rust-full
+          sudo ln -sfn /tmp/c-rust-full /data
+          /tmp/track_b_rust
+          cp /out/results.txt /tmp/baseline-results.txt
+          for exe in /tmp/track_b_gcc /tmp/track_b_clang; do
+            "$exe"
+            cmp /tmp/baseline-results.txt /out/results.txt
+          done
+          echo 'PASS full seed=1 (all three output identical)'
+      - name: 12 paired three-way full-data benchmark
+        run: |
+          python3 - <<'PY'
+          import itertools, statistics, subprocess, time
+          exes={
+              "Rust": "/tmp/track_b_rust",
+              "GCC-C-FFI": "/tmp/track_b_gcc",
+              "Clang-C-FFI": "/tmp/track_b_clang",
+          }
+          samples={k: [] for k in exes}
+          for label, exe in exes.items():
+              subprocess.run([exe], check=True, stdout=subprocess.DEVNULL)
+          perms=list(itertools.permutations(exes))
+          for trial in range(12):
+              for label in perms[trial % len(perms)]:
+                  start=time.perf_counter()
+                  subprocess.run([exes[label]], check=True, stdout=subprocess.DEVNULL)
+                  samples[label].append((time.perf_counter()-start)*1000)
+          baseline=statistics.median(samples["Rust"])
+          for label, v in samples.items():
+              median=statistics.median(v)
+              trimmed=statistics.mean(sorted(v)[1:-1])
+              print(f"RESULT {label} median_ms={median:.3f} trimmed_mean_ms={trimmed:.3f} ratio_to_rust={median/baseline:.5f}", flush=True)
+              print(f"SAMPLES {label} {[round(x,3) for x in v]}", flush=True)
+          PY
+      - name: Peak RSS for each variant (not official board hardware)
+        run: |
+          /usr/bin/time -f 'RSS Rust: %M KB' /tmp/track_b_rust
+          /usr/bin/time -f 'RSS GCC-C-FFI: %M KB' /tmp/track_b_gcc
+          /usr/bin/time -f 'RSS Clang-C-FFI: %M KB' /tmp/track_b_clang
