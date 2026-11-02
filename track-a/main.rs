@@ -232,7 +232,6 @@ impl Parser {
         let mut prev_prefix = 0u64;
         let mut prev_hour = 0usize;
         while p < end {
-            _mm_prefetch::<_MM_HINT_T0>(p.add(2048).cast()); // the log is read once, in order
             // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
             let fingerprint = p.add(5).cast::<u64>().read_unaligned();
             let h = if fingerprint == prev_prefix {
