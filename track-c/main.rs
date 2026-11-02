@@ -416,41 +416,6 @@ fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
 
 // --- Record parsing (spec section 2.1) ----------------------------------
 
-/// Bit mask of bytes equal to c in data[at..at+32].
-#[inline(always)]
-fn match32(data: &[u8], at: usize, c: u8) -> u32 {
-    unsafe {
-        let v = _mm256_loadu_si256(data.as_ptr().add(at).cast::<__m256i>());
-        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c as i8))) as u32
-    }
-}
-
-// Spec 2.2: a text field is quoted or empty. Skip escaped pairs, treating
-// commas and embedded newlines as ordinary bytes until the closing quote.
-// Returns raw start/end, decoded length, and the next field's start.
-#[inline(always)]
-fn text_field(data: &[u8], at: usize) -> (usize, usize, usize, usize) {
-    if data[at] == b',' {
-        return (at, at, 0, at + 1);
-    }
-    let start = at + 1;
-    let mut p = start;
-    let mut escaped = 0;
-    loop {
-        let bits = match32(data, p, b'"');
-        if bits == 0 {
-            p += 32;
-            continue;
-        }
-        p += bits.trailing_zeros() as usize;
-        if data[p + 1] != b'"' {
-            return (start, p, p - start - escaped, p + 2);
-        }
-        escaped += 1;
-        p += 2;
-    }
-}
-
 /// The run of ASCII digits at `data[at..]` as (value, length).
 #[inline]
 fn digits(data: &[u8], at: usize) -> (u64, usize) {
@@ -475,21 +440,10 @@ fn fold8(w: u64) -> u64 {
     ((w & 0x0000_FFFF_0000_FFFF).wrapping_mul(42_949_672_960_001)) >> 32
 }
 
-/// A parsed record: id, decoded name and note lengths, region id, cents,
-/// the raw name's start and end, and where the next record starts.
-type Rec = (u64, usize, usize, usize, i64, usize, usize, usize);
-
-/// Positions of byte `c` in a 128-byte window.
-#[inline(always)]
-fn class(v: &[__m256i; 4], c: u8) -> u128 {
-    unsafe {
-        let k = _mm256_set1_epi8(c as i8);
-        let m = |x: __m256i| _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, k)) as u32 as u64;
-        ((m(v[0]) | m(v[1]) << 32) as u128) | ((m(v[2]) | m(v[3]) << 32) as u128) << 64
-    }
-}
-
-/// Bit i is the parity of the set bits at or below i.
+// --- FALCON-C: tile-wide SIMD structural scanner -------------------------
+// One pass over consecutive 64-byte tiles, rather than loading 128 bytes
+// again for every ~61-byte record. Quote parity carries between tiles.
+// Separators and quote counts carry across arbitrary-length quoted notes.
 #[inline(always)]
 fn prefix_xor(q: u64) -> u64 {
     unsafe {
@@ -498,89 +452,91 @@ fn prefix_xor(q: u64) -> u64 {
     }
 }
 
-/// The n-digit number that ends just before `p[end]`, 1 <= n <= 8.
+struct Separators<'a> {
+    data: &'a [u8],
+    base: usize,
+    marks: u64,
+    quote_mask: u64,
+    quotes_before: u32,
+    in_quotes: bool,
+    loaded: bool,
+}
+
+impl<'a> Separators<'a> {
+    #[inline(always)]
+    fn new(data: &'a [u8], start: usize) -> Self {
+        Self {
+            data,
+            base: start,
+            marks: 0,
+            quote_mask: 0,
+            quotes_before: 0,
+            in_quotes: false, // every claimed chunk begins at a record boundary
+            loaded: false,
+        }
+    }
+
+    /// Return the next delimiter outside quoted strings, and the number of
+    /// quote characters preceding it (including all earlier tiles).
+    #[inline(always)]
+    fn next<const QUOTE_COUNT: bool>(&mut self) -> (usize, u32) {
+        loop {
+            if self.marks != 0 {
+                let bit = self.marks.trailing_zeros();
+                self.marks &= self.marks - 1;
+                let count = if QUOTE_COUNT {
+                    self.quotes_before + unsafe { _bzhi_u64(self.quote_mask, bit) }.count_ones()
+                } else { 0 };
+                return (self.base + bit as usize, count);
+            }
+            if self.loaded {
+                self.quotes_before += self.quote_mask.count_ones();
+                self.base += 64;
+            } else {
+                self.loaded = true;
+            }
+            assert!(self.base < self.data.len(), "truncated CSV record");
+            let (quotes, commas, lines) = if self.base + 64 <= self.data.len() {
+                unsafe {
+                    let p = self.data.as_ptr().add(self.base).cast::<__m256i>();
+                    let v0 = _mm256_loadu_si256(p);
+                    let v1 = _mm256_loadu_si256(p.add(1));
+                    let mask = |c: u8| {
+                        let needle = _mm256_set1_epi8(c as i8);
+                        let m0 = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v0, needle)) as u32 as u64;
+                        let m1 = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v1, needle)) as u32 as u64;
+                        m0 | (m1 << 32)
+                    };
+                    (mask(b'"'), mask(b','), mask(b'\n'))
+                }
+            } else {
+                // Padded tail and tiny inputs: never issue a SIMD load past EOF.
+                let mut q = 0u64;
+                let mut c = 0u64;
+                let mut n = 0u64;
+                for (i, &v) in self.data[self.base..].iter().enumerate() {
+                    q |= ((v == b'"') as u64) << i;
+                    c |= ((v == b',') as u64) << i;
+                    n |= ((v == b'\n') as u64) << i;
+                }
+                (q, c, n)
+            };
+            let inside = prefix_xor(quotes) ^ 0u64.wrapping_sub(self.in_quotes as u64);
+            self.marks = (commas | lines) & !inside;
+            self.quote_mask = quotes;
+            self.in_quotes ^= (quotes.count_ones() & 1) != 0;
+        }
+    }
+}
+
+/// The n-digit number immediately preceding data[end], for 1 <= n <= 8.
 #[inline(always)]
 fn run(p: *const u8, end: usize, n: usize) -> u64 {
     let w = unsafe { p.wrapping_add(end).wrapping_sub(8).cast::<u64>().read_unaligned() };
     fold8(w & (!0 << (64 - 8 * n)))
 }
 
-/// A whole record from one 128-byte window: the quote parity (a carry-less
-/// prefix xor of the quote bits; `""` toggles twice) says which commas and
-/// LFs are outside quotes, and those are the field ends. None when the record
-/// does not end inside the window or a number is longer than expected.
-#[inline(always)]
-fn window_record(data: &[u8], i: usize) -> Option<Rec> {
-    let p = data.as_ptr().wrapping_add(i);
-    let v = unsafe { [0, 32, 64, 96].map(|o| _mm256_loadu_si256(p.add(o).cast::<__m256i>())) };
-    let q = class(&v, b'"');
-    let inq_lo = prefix_xor(q as u64);
-    let inq_hi = prefix_xor((q >> 64) as u64) ^ (inq_lo >> 63).wrapping_neg();
-    let outside = !((inq_lo as u128) | (inq_hi as u128) << 64);
-    let lf = class(&v, b'\n') & outside;
-    if lf == 0 {
-        return None;
-    }
-    let l = lf.trailing_zeros() as usize;
-    let mut d = (class(&v, b',') & outside) | lf;
-    let mut next = || {
-        let at = d.trailing_zeros() as usize;
-        d &= d - 1;
-        at
-    };
-    let (d0, d1, d2, d3) = (next(), next(), next(), next());
-    let at = |o: usize| unsafe { *p.add(o) };
-    let b = 3 * (at(0) == 0xEF) as usize;
-    let (n0, n3) = (d0 - b, d3 - d2 - 1);
-    let cr = (at(l - 1) == b'\r') as usize;
-    let e = l - cr;
-    let neg = (at(d3 + 1) == b'-') as usize;
-    let k = e - 3 - d3 - 1 - neg;
-    if (n0.wrapping_sub(1) | n3.wrapping_sub(1)) >= 8 || k.wrapping_sub(1) >= 5 {
-        return None;
-    }
-    let (id, region) = (run(p, d0, n0), run(p, d3, n3) as usize);
-    // The amount ends `.dd`; move the fraction next to the whole digits.
-    let w = unsafe { p.wrapping_add(e).wrapping_sub(8).cast::<u64>().read_unaligned() };
-    let w = ((w & 0xFF_FFFF_FFFF) & (!0 << (8 * (5 - k)))) | (w >> 8 & 0xFFFF << 40);
-    let cents = fold8(w << 8) as i64;
-    let cents = if neg == 1 { -cents } else { cents };
-    // Quotes before window offset x: _bzhi_u64 keeps the low x bits (all of them from 64 up).
-    let below = |x: usize| unsafe {
-        _bzhi_u64(q as u64, x.min(64) as u32).count_ones()
-            + _bzhi_u64((q >> 64) as u64, (x.max(64) - 64) as u32).count_ones()
-    } as usize;
-    let (qn, qt) = (below(d1), below(d2) - below(d1));
-    let decoded = |raw: usize, quotes: usize| raw - quotes / 2 - (quotes != 0) as usize;
-    let (ns, ne) = (i + d0 + 1 + (qn != 0) as usize, i + d1 - (qn != 0) as usize);
-    Some((id, decoded(d1 - d0 - 1, qn), decoded(d2 - d1 - 1, qt), region, cents, ns, ne, i + l + 1))
-}
-
-/// The same record, field by field: any length, any record shape.
-#[inline(always)]
-fn field_record(data: &[u8], mut i: usize) -> Rec {
-    // 0xEF opens the 3-byte UTF-8 BOM at a line start; skip it.
-    i += 3 * (data[i] == 0xEF) as usize;
-    let (id, id_len) = digits(data, i);
-    let (ns, ne, name_bytes, note_at) = text_field(data, i + id_len + 1);
-    let (_, _, note_bytes, region_at) = text_field(data, note_at);
-    let (region, region_len) = digits(data, region_at);
-
-    let mut a = region_at + region_len + 1;
-    let neg = data[a] == b'-';
-    a += neg as usize;
-    let (whole, n) = digits(data, a);
-    let frac = a + n + 1;
-    let cents = (whole * 100
-        + (data[frac] - b'0') as u64 * 10
-        + (data[frac + 1] - b'0') as u64) as i64;
-    let cents = if neg { -cents } else { cents };
-    let next = frac + 2 + (data[frac + 2] == b'\r') as usize + 1;
-    (id, name_bytes, note_bytes, region as usize, cents, ns, ne, next)
-}
-
-/// Parses record-aligned data[start..end] with 128 readable lookahead bytes.
-/// Name lookups remain batched.
+/// Fused parse and aggregation; no per-record allocations, no full CSV rows.
 fn parse_records(
     data: &[u8],
     start: usize,
@@ -589,13 +545,43 @@ fn parse_records(
     sightings: &mut Sightings,
     groups: &mut [Agg],
 ) {
+    let mut separators = Separators::new(data, start);
+    // The numeric fields contain no quotes: the count at the previous
+    // note delimiter is also the count at this record's first comma.
+    let mut quotes_before_name = 0u32;
+    let p = data.as_ptr();
     let unmatched = groups.len() - 1;
     let mut i = start;
     while i < end {
-        prefetch_read(data.as_ptr().wrapping_add(i + 1536));
-        let (id, name_bytes, note_bytes, region, cents, ns, ne, next) =
-            window_record(data, i).unwrap_or_else(|| field_record(data, i));
-        i = next;
+        prefetch_read(p.wrapping_add(i + 1536));
+        let (d0, _) = separators.next::<false>();
+        let (d1, q1) = separators.next::<true>();
+        let (d2, q2) = separators.next::<true>();
+        let (d3, _) = separators.next::<false>();
+        let (lf, _) = separators.next::<false>();
+        let skip_bom = 3 * (data[i] == 0xEF) as usize;
+        let id = run(p, d0, d0 - i - skip_bom);
+        let region = run(p, d3, d3 - d2 - 1) as usize;
+        let name_quotes = (q1 - quotes_before_name) as usize;
+        let note_quotes = (q2 - q1) as usize;
+        quotes_before_name = q2;
+        let name_raw = d1 - d0 - 1;
+        let note_raw = d2 - d1 - 1;
+        let name_bytes = name_raw - name_quotes / 2 - (name_quotes != 0) as usize;
+        let note_bytes = note_raw - note_quotes / 2 - (note_quotes != 0) as usize;
+        let ns = d0 + 1 + (name_quotes != 0) as usize;
+        let ne = d1 - (name_quotes != 0) as usize;
+
+        // Exact integer cents; the final two digits follow the decimal dot.
+        let e = lf - (data[lf - 1] == b'\r') as usize;
+        let negative = (data[d3 + 1] == b'-') as usize;
+        let k = e - d3 - 4 - negative;
+        let w = unsafe { p.wrapping_add(e).wrapping_sub(8).cast::<u64>().read_unaligned() };
+        let w = ((w & 0xFF_FFFF_FFFF) & (!0 << (8 * (5 - k))))
+            | (w >> 8 & (0xFFFF << 40));
+        let cents = fold8(w << 8) as i64;
+        let cents = if negative != 0 { -cents } else { cents };
+        i = lf + 1;
 
         let g = if region < regions.group_of.len() {
             let x = unsafe { regions.group_of.get_unchecked(region) }.load(Relaxed);
@@ -611,7 +597,7 @@ fn parse_records(
         agg.amount_max = agg.amount_max.max(cents);
         agg.name_bytes += name_bytes as u64;
         agg.note_bytes += note_bytes as u64;
-        sightings.push(g, hash_name(data, ns, ne), data.as_ptr().wrapping_add(ns) as usize, ne - ns);
+        sightings.push(g, hash_name(data, ns, ne), p.wrapping_add(ns) as usize, ne - ns);
     }
 }
 
