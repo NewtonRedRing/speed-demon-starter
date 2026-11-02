@@ -616,3 +616,37 @@ The hours may only be taken early because the generator's log cannot be more tha
 largest `cummax(hour) - hour` over the full seed 1, the full seed 23 and the samples is 1. The spec promises no bound,
 so every piece checks on finishing that it holds no hour already taken; if one does, or a thread panics reading an
 hour that is still being filled, the process re-executes itself with all hours held back until the log is parsed.
+
+## November 2: 8K interner slots — exact source promotion and official result
+
+The endpoint dictionary now separates **8192 linear-probing hash slots** from the
+unchanged **2048 endpoint-ID capacity**. A wider sparse slot table reduces
+probe collisions without changing the 11-bit on-record endpoint-ID encoding,
+name arena, exact byte comparisons, or output order. Experiment source blob
+`4559a57b037785452dcf64f4e098456440f96cd8` was promoted into the
+contest branch by commit
+[`0df911467a16a9e3f13f1192dd87ee786f69f2e2`](https://github.com/NewtonRedRing/speed-demon-starter/commit/0df911467a16a9e3f13f1192dd87ee786f69f2e2);
+only `track-a/main.rs` changed.
+
+On the organizer scoring hardware, official run `run-de44a5ad6c12` passed
+build, correctness, sandbox, and timeout gates at **21.706 ms**,
+**15,515,648 bytes peak memory**, **451 formatted source lines**, no runtime
+dependencies, **K=48.098777** and **84.106702 points**. Prior best
+`run-17a9af7da124` on `9bb3f6a` was **22.229 ms**,
+**14,880,768 bytes**, **450 lines**, **K=47.944356**, and **84.036874 points**.
+The new measured score improves by **0.069828 points**, despite a larger
+scored memory footprint and one additional formatted line. Scores may vary
+between otherwise identical-source runs; this is a public board observation,
+not a holdout prediction.
+
+Official feed was read and printed with full run metadata in
+[Oracle board audit 41438230876](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41438230876).
+Earlier independent local 40-pair confirmation
+[41436499988](https://github.com/NewtonRedRing/speed-demon-starter/actions/runs/41436499988)
+reported paired median baseline/8K runtime 1.02546, bootstrap 95% interval
+[1.00016, 1.04255], 25/38 wins with full public hash and generated seeds
+passing. These local results do not substitute for the scoring-machine run.
+
+**Decision:** retain the 8K source because it has now independently confirmed
+public-board correctness and higher score. Keep other A changes isolated and
+compare against this updated source and score, not an older HARP baseline.
