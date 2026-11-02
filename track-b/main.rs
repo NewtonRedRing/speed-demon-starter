@@ -90,6 +90,14 @@ fn hash(k: __m128i) -> usize {
     unsafe { _mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[1]) as usize }
 }
 
+/// CRC32C over the full 32-byte normalized token, rather than the
+/// 16-byte prefix used by the short-key dictionary.
+#[inline(always)]
+fn hash_long(k: __m256i) -> usize {
+    let w: [u64; 4] = unsafe { std::mem::transmute(k) };
+    unsafe { _mm_crc32_u64(_mm_crc32_u64(_mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[1]), w[2]), w[3]) as usize }
+}
+
 fn same(a: __m256i, b: __m256i) -> bool {
     unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, b)) == -1 }
 }
@@ -104,6 +112,7 @@ const SHORT: usize = 12;
 struct Terms {
     tab: Vec<__m128i>,
     long: Vec<(__m256i, u32)>,
+    long_slots: Vec<u32>, // 1-based indexes into long, zero means empty
     n: u32,
     ring: [(__m128i, usize, usize); 8], // short terms waiting for their slot: key, hash, place in the ids
     fed: usize,
@@ -158,7 +167,25 @@ impl Terms {
     }
 
     fn find_long(&self, k: __m256i) -> u32 {
-        self.long.iter().find(|l| same(l.0, k)).map_or(self.n, |l| l.1)
+        let mask = self.long_slots.len() - 1;
+        let mut i = hash_long(k) & mask;
+        loop {
+            let slot = self.long_slots[i];
+            if slot == 0 { return self.n; }
+            let entry = &self.long[slot as usize - 1];
+            if same(entry.0, k) { return entry.1; }
+            i = (i + 1) & mask;
+        }
+    }
+
+    fn index_long(&mut self) {
+        let size = (self.long.len() * 2).next_power_of_two().max(1);
+        self.long_slots = vec![0; size];
+        for (ix, &(key, _)) in self.long.iter().enumerate() {
+            let mut slot = hash_long(key) & (size - 1);
+            while self.long_slots[slot] != 0 { slot = (slot + 1) & (size - 1); }
+            self.long_slots[slot] = ix as u32 + 1;
+        }
     }
 
     /// The id of the token of len (at most 32) bytes at p.
@@ -471,7 +498,7 @@ fn main() {
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) };
     let qtext = map("/data/queries.txt");
     let tab: Vec<__m128i> = unsafe { std::mem::transmute(vec![0u128; (qtext.len() / 8).next_power_of_two()]) };
-    let mut terms = Terms { tab, long: vec![], n: 0, ring: [(unsafe { _mm_setzero_si128() }, 0, 0); 8], fed: 0 };
+    let mut terms = Terms { tab, long: vec![], long_slots: vec![], n: 0, ring: [(unsafe { _mm_setzero_si128() }, 0, 0); 8], fed: 0 };
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
@@ -487,6 +514,7 @@ fn main() {
         spans.push((phrase, from, ids.len() as u32));
     }
     terms.finish(&mut ids);
+    terms.index_long();
     let nterms = terms.n as usize;
     assert!(nterms <= BUCKETS << 12, "too many terms"); // a unit's index has 12 bits
     let mut in_bool = vec![false; nterms];
