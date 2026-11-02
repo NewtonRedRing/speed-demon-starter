@@ -717,10 +717,10 @@ fn main() {
                     let cur = docs(tids[0]);
                     ops.iter().zip(&tids[1..]).fold(cur, |cur, (&op, &id)| match cur {
                         Docs::List(v) if v.is_empty() && op != b'O' => Docs::List(v),
-                        Docs::List(mut v) if op != b'O' && id as usize >= nbits && v.len() <= 32 => {
+                        Docs::List(mut v) if op != b'O' && id as usize >= nbits && v.len() <= 128 => {
                             let n: usize = seg[id as usize * THREADS..][..THREADS]
                                 .iter().map(|&n| n as usize).sum();
-                            if n >= v.len() * 32 {
+                            if n >= v.len() * 16 {
                                 v.retain(|&d| compressed_has(id as usize, d) == (op == b'A'));
                                 Docs::List(v)
                             } else {
