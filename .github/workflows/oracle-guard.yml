@@ -4,7 +4,6 @@ on:
   pull_request:
     branches: [speed-demon]
     types: [opened, reopened, synchronize, ready_for_review]
-  workflow_dispatch:
 
 permissions:
   contents: read
