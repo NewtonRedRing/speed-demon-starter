@@ -1,0 +1,30 @@
+name: Final public-board readback
+on:
+  pull_request:
+    branches: [speed-demon]
+    paths:
+      - '.github/workflows/final-public-board-readback.yml'
+permissions:
+  contents: read
+jobs:
+  board:
+    if: github.head_ref == 'experiment/final-public-board-readback-20261102'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read latest public native score receipt
+        run: |
+          curl -fLsS --retry 3 'https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/board/board.json' -o /tmp/board.json
+          python3 - <<'PY'
+          import json
+          with open('/tmp/board.json') as f: b=json.load(f)
+          print("GENERATED_AT",b.get("generated_at"),flush=True)
+          print("QUEUE",b.get("queue"),flush=True)
+          t=[t for t in b.get("teams",[]) if t.get("team") in ("NewtonRedHeat","NewtonRedHeat★") or "newtonredheat" in str(t.get("slug","")).lower()]
+          print("TEAMS_FOUND",len(t),flush=True)
+          for team in t:
+              print("TEAM",team.get("team"),"SLUG",team.get("slug"),"WATCH",team.get("watch"),"QUEUE",team.get("queue"),flush=True)
+              for track,val in team.get("tracks",{}).items():
+                  print("SCORE",track,"BEST",json.dumps(val.get("best")),"LATEST",json.dumps(val.get("latest")),flush=True)
+          PY
