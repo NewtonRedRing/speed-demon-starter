@@ -99,11 +99,30 @@ fn same(a: __m256i, b: __m256i) -> bool {
 /// one cache line. The few longer terms are searched linearly.
 const SHORT: usize = 12;
 
+/* Query-driven exact prefix gate. Four base-36 chars give 36^4 possible
+   prefixes (205 KiB of membership bits); a zero bit definitively rejects
+   the token. A one bit is only a candidate, checked by the original
+   full 32-byte query-term dictionary with exact equality. */
+const PREFIX4_KEYS: usize = 36 * 36 * 36 * 36;
+#[inline(always)]
+unsafe fn prefix4(p: *const u8) -> usize {
+    let mut k = 0usize;
+    let mut i = 0;
+    while i < 4 {
+        let c = *p.add(i) | 0x20;
+        let digit = if c <= b'9' { c - b'0' } else { c - b'a' + 10 };
+        k = k * 36 + digit as usize;
+        i += 1;
+    }
+    k
+}
+
 /// Query terms to dense ids. A token that is no term gets the id one past
 /// the last term.
 struct Terms {
     tab: Vec<__m128i>,
     long: Vec<(__m256i, u32)>,
+    prefix4_bits: Vec<u64>,
     n: u32,
     ring: [(__m128i, usize, usize); 8], // short terms waiting for their slot: key, hash, place in the ids
     fed: usize,
@@ -118,6 +137,10 @@ impl Terms {
     /// later, once its slot has been prefetched, and by finish at the latest.
     fn push(&mut self, term: &[u8], ids: &mut Vec<u32>) {
         ids.push(0);
+        if term.len() >= 4 {
+            let p = unsafe { prefix4(term.as_ptr()) };
+            self.prefix4_bits[p >> 6] |= 1u64 << (p & 63);
+        }
         let k = unsafe { key(term.as_ptr(), term.len()) };
         if term.len() > SHORT {
             *ids.last_mut().unwrap() = self.insert(k);
@@ -240,7 +263,10 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
                 break;
             }
             m &= !0u64 << (s + len); // here the token ends inside the window
-            if len <= 32 {
+            if len <= 32 && (len < 4 || {
+                let idx = prefix4(p.add(s as usize));
+                t.prefix4_bits[idx >> 6] & (1u64 << (idx & 63)) != 0
+            }) {
                 let k = _mm256_castsi256_si128(key(p.add(s as usize), len as usize));
                 let h = hash(k);
                 let slot = t.tab.as_ptr().add(h & (t.tab.len() - 1));
@@ -471,7 +497,7 @@ fn main() {
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) };
     let qtext = map("/data/queries.txt");
     let tab: Vec<__m128i> = unsafe { std::mem::transmute(vec![0u128; (qtext.len() / 8).next_power_of_two()]) };
-    let mut terms = Terms { tab, long: vec![], n: 0, ring: [(unsafe { _mm_setzero_si128() }, 0, 0); 8], fed: 0 };
+    let mut terms = Terms { tab, long: vec![], prefix4_bits: vec![0u64; PREFIX4_KEYS / 64], n: 0, ring: [(unsafe { _mm_setzero_si128() }, 0, 0); 8], fed: 0 };
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
