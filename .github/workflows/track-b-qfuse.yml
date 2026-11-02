@@ -1,0 +1,39 @@
+name: Track B Q-FUSE differential validation
+on:
+  push:
+    branches: [experiment/track-b-qfuse]
+  workflow_dispatch:
+jobs:
+  compile-and-compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile baseline and candidate with the same CPU target
+        run: |
+          git show origin/speed-demon:track-b/main.rs > /tmp/track_b_baseline.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=haswell -C panic=abort -o /tmp/track_b_baseline /tmp/track_b_baseline.rs
+          rustc --edition=2021 -C opt-level=3 -C target-cpu=haswell -C panic=abort -o /tmp/track_b_qfuse track-b/main.rs
+      - name: Check byte-for-byte equivalence across tiny and sample seeds
+        run: |
+          set -euo pipefail
+          sudo install -d -m 777 /out
+          for seed in 2 17 42 2026; do
+            python3 track-b/pgo_gen.py --seed "$seed" --scale tiny --out "/tmp/b-$seed"
+            sudo ln -sfn "/tmp/b-$seed" /data
+            /usr/bin/time -f "baseline tiny $seed: %e sec %M KB" /tmp/track_b_baseline
+            cp /out/results.txt "/tmp/baseline-$seed"
+            /usr/bin/time -f "Q-FUSE tiny $seed: %e sec %M KB" /tmp/track_b_qfuse
+            cmp "/tmp/baseline-$seed" /out/results.txt
+          done
+          python3 track-b/pgo_gen.py --seed 103 --scale sample --out /tmp/b-sample
+          sudo ln -sfn /tmp/b-sample /data
+          /usr/bin/time -f 'baseline sample: %e sec %M KB' /tmp/track_b_baseline
+          cp /out/results.txt /tmp/baseline-sample
+          /usr/bin/time -f 'Q-FUSE sample: %e sec %M KB' /tmp/track_b_qfuse
+          cmp /tmp/baseline-sample /out/results.txt
