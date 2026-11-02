@@ -24,7 +24,7 @@ extern "C" {
     fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
 }
 
-const THREADS: usize = 8;
+const THREADS: usize = 12;
 const NONE: u32 = u32::MAX;
 const BUCKETS: usize = 32; // scan output streams per thread; term i goes to bucket i % BUCKETS
 const GAP: u32 = 15; // a unit's 4-bit doc gap; GAP means the whole gap follows in the next unit
