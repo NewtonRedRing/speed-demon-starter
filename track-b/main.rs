@@ -185,14 +185,15 @@ impl Terms {
     /// Term i becomes new[i].
     fn renumber(&mut self, new: &[u32]) {
         for e in &mut self.tab {
-            let w: &mut [u32; 4] = unsafe { std::mem::transmute(e) };
+            let w: &mut [u32; 4] = unsafe { std::mem::transmute(&mut *e) };
             w[3] = if w[3] == 0 { 0 } else { new[w[3] as usize - 1] + 1 };
-            if w[3] != 0 {
+            let id = w[3];
+            if id != 0 {
                 let key: [u8; 16] = unsafe { std::mem::transmute(*e) };
                 if let Some(n) = key[..4].iter().position(|&b| b == 0) {
                     if n > 0 {
                         let at = unsafe { three(key.as_ptr(), n) };
-                        self.direct3[at] = w[3] - 1;
+                        self.direct3[at] = id - 1;
                     }
                 }
             }
@@ -240,10 +241,15 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 /// one class mask per 64-byte window; a token that runs into the window's end
 /// starts the next window. Each token's slot is prefetched and the token
 /// looked up LAG tokens later, so the misses overlap.
+#[inline(always)]
+unsafe fn emit_pending(t: &Terms, r: &(__m128i, u32, u32, *const u8), f: &mut impl FnMut(u32, *const u8, usize)) {
+    let id = if r.2 as usize > SHORT { t.lookup(r.3, r.2 as usize) } else { t.find(r.0, r.1 as usize) };
+    f(id, r.3, r.2 as usize);
+}
+
 unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, usize)) -> *const u8 {
     const LAG: usize = 8;
     let mut ring = [(_mm_setzero_si128(), 0u32, 0u32, p); LAG];
-    let mut look = |r: &(__m128i, u32, u32, *const u8)| f(if r.2 as usize > SHORT { t.lookup(r.3, r.2 as usize) } else { t.find(r.0, r.1 as usize) }, r.3, r.2 as usize);
     let mut n = 0usize;
     loop {
         let (word, nl) = classes(p);
@@ -272,13 +278,13 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, mut f: impl FnMut(u32, *const u8, 
                 let slot = t.tab.as_ptr().add(h & (t.tab.len() - 1));
                 _mm_prefetch::<_MM_HINT_T0>(slot.cast());
                 if n >= LAG {
-                    look(&ring[n % LAG]);
+                    emit_pending(t, &ring[n % LAG], &mut f);
                 }
                 (ring[n % LAG], n) = ((k, h as u32, len, p.add(s as usize)), n + 1);
             }
         }
         if nl != 0 {
-            (n.saturating_sub(LAG)..n).for_each(|i| look(&ring[i % LAG]));
+            for i in n.saturating_sub(LAG)..n { emit_pending(t, &ring[i % LAG], &mut f); }
             return p.add(stop as usize + 1);
         }
         p = p.add(next as usize);
